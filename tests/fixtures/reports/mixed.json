@@ -1,0 +1,262 @@
+[
+  {
+    "iterationIndex": 0,
+    "results": [
+      {
+        "test": {
+          "filename": "folder/down.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18799/nope",
+          "headers": {}
+        },
+        "response": {
+          "status": "error",
+          "statusText": null,
+          "headers": null,
+          "data": null,
+          "url": null,
+          "responseTime": 0
+        },
+        "error": "connect ECONNREFUSED 127.0.0.1:18799",
+        "status": "error",
+        "assertionResults": [],
+        "testResults": [],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.068983992,
+        "name": "down",
+        "path": "folder/down",
+        "iterationIndex": 0
+      },
+      {
+        "test": {
+          "filename": "ok.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/index.html",
+          "headers": {}
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.10.12",
+            "date": "Mon, 14 Sep 2026 14:23:53 GMT",
+            "content-type": "text/html",
+            "content-length": "32",
+            "last-modified": "Mon, 14 Sep 2026 14:23:13 GMT"
+          },
+          "data": "<html><body>probe</body></html>\n",
+          "url": "http://127.0.0.1/index.html",
+          "responseTime": 14
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [
+          {
+            "uid": "J5SvrxThWDLhAEfi4SaRA",
+            "lhsExpr": "res.status",
+            "rhsExpr": "eq 200",
+            "rhsOperand": "200",
+            "operator": "eq",
+            "status": "pass"
+          },
+          {
+            "uid": "rBsfBKZCg7VlvHNCdkP1z",
+            "lhsExpr": "res.status",
+            "rhsExpr": "eq 404",
+            "rhsOperand": "404",
+            "operator": "eq",
+            "status": "fail",
+            "error": "expected 200 to equal 404"
+          }
+        ],
+        "testResults": [
+          {
+            "description": "fails",
+            "status": "fail",
+            "error": "expected 200 to equal 500",
+            "actual": 200,
+            "expected": 500,
+            "uid": "N-5r7kenQ0iSHowbE3XBR"
+          },
+          {
+            "description": "passes",
+            "status": "pass",
+            "uid": "o96Oit9ERrO_dx9Zcthf1"
+          }
+        ],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.049533291,
+        "name": "ok",
+        "path": "ok",
+        "iterationIndex": 0
+      },
+      {
+        "test": {
+          "filename": "json.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/data.json",
+          "headers": {}
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.10.12",
+            "date": "Mon, 14 Sep 2026 14:23:53 GMT",
+            "content-type": "application/json",
+            "content-length": "21",
+            "last-modified": "Mon, 14 Sep 2026 14:23:13 GMT"
+          },
+          "data": {
+            "a": [
+              1,
+              2
+            ],
+            "b": null
+          },
+          "url": "http://127.0.0.1/data.json",
+          "responseTime": 9
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [],
+        "testResults": [],
+        "preRequestTestResults": [
+          {
+            "description": "pre ok",
+            "status": "pass",
+            "uid": "u6dp_0vWddxSzmkrpC6kp"
+          }
+        ],
+        "postResponseTestResults": [
+          {
+            "description": "post ko",
+            "status": "fail",
+            "error": "expected 2 to equal 3",
+            "actual": 2,
+            "expected": 3,
+            "uid": "0fH9pgXwFmDpxM8a2QdZR"
+          }
+        ],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.015499956,
+        "name": "json",
+        "path": "json",
+        "iterationIndex": 0
+      },
+      {
+        "test": {
+          "filename": "green.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/data.json",
+          "headers": {}
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.10.12",
+            "date": "Mon, 14 Sep 2026 14:23:53 GMT",
+            "content-type": "application/json",
+            "content-length": "21",
+            "last-modified": "Mon, 14 Sep 2026 14:23:13 GMT"
+          },
+          "data": {
+            "a": [
+              1,
+              2
+            ],
+            "b": null
+          },
+          "url": "http://127.0.0.1/data.json",
+          "responseTime": 6
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [
+          {
+            "uid": "4qzFrao8Udkv7xVH7zg2p",
+            "lhsExpr": "res.status",
+            "rhsExpr": "eq 200",
+            "rhsOperand": "200",
+            "operator": "eq",
+            "status": "pass"
+          }
+        ],
+        "testResults": [
+          {
+            "description": "body a",
+            "status": "pass",
+            "uid": "13JH7cVMDgc3YkMFwfQGP"
+          }
+        ],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.009425562,
+        "name": "green",
+        "path": "green",
+        "iterationIndex": 0
+      },
+      {
+        "test": {
+          "filename": "skip.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/index.html",
+          "headers": {}
+        },
+        "response": {
+          "status": "skipped",
+          "statusText": "request skipped via pre-request script",
+          "data": null,
+          "responseTime": 0
+        },
+        "error": null,
+        "status": "skipped",
+        "skipped": true,
+        "assertionResults": [],
+        "testResults": [],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.001894807,
+        "name": "skip",
+        "path": "skip",
+        "iterationIndex": 0
+      }
+    ],
+    "summary": {
+      "totalRequests": 5,
+      "passedRequests": 1,
+      "failedRequests": 2,
+      "errorRequests": 1,
+      "skippedRequests": 1,
+      "totalAssertions": 3,
+      "passedAssertions": 2,
+      "failedAssertions": 1,
+      "totalTests": 3,
+      "passedTests": 2,
+      "failedTests": 1,
+      "totalPreRequestTests": 1,
+      "passedPreRequestTests": 1,
+      "failedPreRequestTests": 0,
+      "totalPostResponseTests": 1,
+      "passedPostResponseTests": 0,
+      "failedPostResponseTests": 1
+    }
+  }
+]

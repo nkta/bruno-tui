@@ -1,0 +1,19 @@
+meta {
+  name: json
+  type: http
+  seq: 2
+}
+
+get {
+  url: http://127.0.0.1:18765/data.json
+  body: none
+  auth: none
+}
+
+script:pre-request {
+  test("pre ok", function() { expect(1).to.equal(1); });
+}
+
+script:post-response {
+  test("post ko", function() { expect(res.getBody().a.length).to.equal(3); });
+}

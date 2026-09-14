@@ -1,0 +1,15 @@
+meta {
+  name: skip
+  type: http
+  seq: 4
+}
+
+get {
+  url: http://127.0.0.1:18765/index.html
+  body: none
+  auth: none
+}
+
+script:pre-request {
+  bru.runner.skipRequest();
+}

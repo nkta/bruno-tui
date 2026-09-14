@@ -1,0 +1,19 @@
+meta {
+  name: green
+  type: http
+  seq: 3
+}
+
+get {
+  url: http://127.0.0.1:18765/data.json
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("body a", function() { expect(res.getBody().a).to.eql([1, 2]); });
+}

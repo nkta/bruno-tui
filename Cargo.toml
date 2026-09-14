@@ -1,0 +1,13 @@
+[package]
+name = "bruno-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["process", "rt-multi-thread", "macros", "sync", "io-util", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+command-fds = { version = "0.3.3", features = ["tokio"] }

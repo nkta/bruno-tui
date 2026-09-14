@@ -1,0 +1,50 @@
+#!/bin/sh
+# Faux `bru` pour tester le runner sans Node ni réseau.
+#
+# Appelé comme `bru run <mode> [paramètre] ... --reporter-json /dev/fd/3` :
+# le mode et son paramètre sont passés comme cibles de la requête, ce qui
+# évite de modifier l'environnement du processus de test.
+#
+#   report <fichier>       écrit <fichier> sur le fd 3, sort en 1
+#   slow-report <fichier>  attend 1 s puis agit comme `report`
+#   none                   n'écrit aucun rapport, sort en 0 (hors collection)
+#   invalid                écrit du JSON non conforme sur le fd 3, sort en 0
+#   path-not-found         écrit « Path not found » sur stdout, sort en 5
+#   sleep <fichier-pid>    écrit son PID dans <fichier-pid> puis dort ;
+#                          `exec` garde le PID du processus lancé
+
+[ "$1" = "run" ] && shift
+MODE="$1"
+PARAM="$2"
+
+case "$MODE" in
+  report)
+    cat "$PARAM" >&3
+    exit 1
+    ;;
+  slow-report)
+    sleep 1
+    cat "$PARAM" >&3
+    exit 1
+    ;;
+  none)
+    echo "You can run only at the root of a collection"
+    exit 0
+    ;;
+  invalid)
+    printf '[{"iterationIndex": "zero"}]' >&3
+    exit 0
+    ;;
+  path-not-found)
+    echo "Path not found: $MODE"
+    exit 5
+    ;;
+  sleep)
+    echo $$ > "$PARAM"
+    exec sleep 60
+    ;;
+  *)
+    echo "mode inconnu : $MODE" >&2
+    exit 99
+    ;;
+esac
