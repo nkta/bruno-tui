@@ -1,0 +1,19 @@
+meta {
+  name: multiline
+  type: http
+}
+
+get {
+  url: https://{{host}}/search?q=line one&page=1
+  body: none
+  auth: none
+}
+
+params:query {
+  q: '''
+    line one
+    line two
+    line three
+  '''
+  page: 1
+}

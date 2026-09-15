@@ -1,0 +1,26 @@
+meta {
+  name: post-json
+  type: http
+  seq: 10
+}
+
+post {
+  url: https://{{host}}/items
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "a": {
+      "b": [
+        { "c": 1 }
+      ]
+    },
+    "s": "}"
+  }
+}

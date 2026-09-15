@@ -1,0 +1,25 @@
+meta {
+  name: unknown-block
+  type: http
+}
+
+future:thing {
+  mode: experimental
+  nested {
+    deeper: yes
+  }
+}
+
+get {
+  url: https://{{host}}/future
+  body: none
+  auth: none
+}
+
+tests {
+  test("first", function () {});
+}
+
+headers {
+  Accept: text/plain
+}

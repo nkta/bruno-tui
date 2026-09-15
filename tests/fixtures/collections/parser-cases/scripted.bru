@@ -1,0 +1,41 @@
+meta {
+  name: scripted
+  type: http
+  seq: 12
+}
+
+get {
+  url: https://{{host}}/scripted
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+  ~X-Debug: 1
+}
+
+auth:bearer {
+  token: {{tok}}
+}
+
+assert {
+  res.status: eq 200
+  res.body.ok: isTrue
+}
+
+script:pre-request {
+  bru.setVar("started", Date.now());
+}
+
+script:post-response {
+  if (res.getStatus() !== 200) {
+    console.log("oops");
+  }
+}
+
+tests {
+  test("ok", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}

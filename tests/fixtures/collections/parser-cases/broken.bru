@@ -1,0 +1,14 @@
+meta {
+  name: broken
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://{{host}}/broken
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer s3cr3t-fixture

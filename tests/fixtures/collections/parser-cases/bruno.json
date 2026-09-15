@@ -1,0 +1,13 @@
+{
+  "version": "1",
+  "name": "parser-cases",
+  "type": "collection",
+  "ignore": ["node_modules", "tmp"],
+  "scripts": {
+    "moduleWhitelist": ["crypto"]
+  },
+  "presets": {
+    "requestType": "http",
+    "requestUrl": "https://{{host}}"
+  }
+}
