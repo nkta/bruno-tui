@@ -1,0 +1,16 @@
+meta {
+  name: form-body
+  type: http
+  seq: 5
+}
+
+put {
+  url: https://{{host}}/items
+  body: formUrlEncoded
+  auth: none
+}
+
+body:form-urlencoded {
+  a: 1
+  ~b: 2
+}
