@@ -13,7 +13,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{CollectionState, Focus, Model, RunFailure};
+use super::model::{CollectionState, Focus, Model, RunFailure, StatusMessage};
 use crate::collection::TreeNode;
 
 /// Largeur minimale du terminal.
@@ -107,7 +107,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
         CollectionState::Loaded(_) => {
             render_tree(model, frame, areas.tree);
             frame.render_widget(
-                Paragraph::new(detail::detail_text(model))
+                Paragraph::new(detail::render_text(model))
                     .wrap(Wrap { trim: false })
                     .scroll((model.detail_scroll, 0))
                     .block(panel(" Détail ", model.focus == Focus::Detail)),
@@ -178,20 +178,41 @@ fn last_failure_message(model: &Model) -> Option<String> {
     }
 }
 
+/// Ligne de saisie de recherche, tant qu'elle est ouverte : remplace la
+/// barre d'état, à la place des rappels de touches habituels.
+fn search_input_line(model: &Model) -> Option<String> {
+    let search = model.search.as_ref()?;
+    search.editing.then(|| format!("/{}", search.draft))
+}
+
+fn status_message_text(message: &StatusMessage) -> String {
+    match message {
+        StatusMessage::Copied => "Copié dans le presse-papiers".to_owned(),
+        StatusMessage::ClipboardError(reason) => format!("Échec de la copie : {reason}"),
+        StatusMessage::NoMatch => "Aucune correspondance".to_owned(),
+    }
+}
+
 fn status_line(model: &Model) -> String {
+    if let Some(line) = search_input_line(model) {
+        return line;
+    }
     if let Some(message) = active_run_message(model) {
         return message;
     }
     if let Some(message) = last_failure_message(model) {
         return message;
     }
+    if let Some(message) = &model.last_status {
+        return status_message_text(message);
+    }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
-            "↑↓ naviguer  → déplier  ← replier  r lancer  Ctrl+X annuler  Tab détail  q quitter"
+            "↑↓ naviguer  → déplier  ← replier  r lancer  / chercher  Tab détail  q quitter"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
-            "↑↓ défiler  PgPréc/PgSuiv page  Début/Fin  Échap arbre  r lancer  Ctrl+X annuler  q quitter"
+            "↑↓ défiler  Début/Fin  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
                 .to_owned()
         }
         _ => "q quitter".to_owned(),
@@ -247,7 +268,7 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use crate::app::message::Message;
-    use crate::app::test_support::{fixture, loaded_model, render};
+    use crate::app::test_support::{fixture, loaded_model, render, select};
     use crate::app::update::update;
     use crate::collection::{Collection, LoadError};
 
@@ -389,5 +410,70 @@ mod tests {
         let line = status_line(&model);
         assert!(line.contains("q quitter"), "{line}");
         assert!(line.contains("r lancer"), "{line}");
+    }
+
+    #[test]
+    fn search_input_line_replaces_the_status_bar_while_editing() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::StartSearch);
+        update(&mut model, Message::SearchInput('p'));
+        update(&mut model, Message::SearchInput('o'));
+        let line = status_line(&model);
+        assert_eq!(line, "/po");
+
+        update(&mut model, Message::ConfirmSearch);
+        let line = status_line(&model);
+        assert!(!line.starts_with('/'), "{line}");
+    }
+
+    #[test]
+    fn last_status_is_shown_when_no_run_is_active() {
+        let mut model = loaded_model((100, 30));
+        model.last_status = Some(crate::app::model::StatusMessage::Copied);
+        let line = status_line(&model);
+        assert!(line.contains("Copié"), "{line}");
+    }
+
+    #[test]
+    fn selection_and_match_are_highlighted_distinctly_on_screen() {
+        let mut model = loaded_model((100, 12));
+        select(&mut model, "scripted.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::StartSearch);
+        for c in "res.body.ok".chars() {
+            update(&mut model, Message::SearchInput(c));
+        }
+        update(&mut model, Message::ConfirmSearch);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 12)).expect("terminal");
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let buffer = terminal.backend().buffer();
+        let (line, range) = model.detail_match.clone().expect("correspondance");
+        let detail_area = layout_for((100, 12)).expect("taille suffisante").detail;
+        let inner_area = inner(detail_area);
+        let row = inner_area.y + (line - model.detail_scroll);
+        let col = inner_area.x + range.start as u16;
+        let highlighted = buffer[(col, row)].bg;
+        assert_ne!(
+            highlighted,
+            ratatui::style::Color::Reset,
+            "la correspondance doit avoir un fond distinct"
+        );
+
+        // Sélection visuelle : fond distinct de la surbrillance de motif.
+        update(&mut model, Message::ToggleVisual);
+        update(&mut model, Message::Down);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 12)).expect("terminal");
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let buffer = terminal.backend().buffer();
+        let selection_row = inner_area.y;
+        let selection_bg = buffer[(inner_area.x, selection_row)].bg;
+        assert_ne!(
+            selection_bg,
+            ratatui::style::Color::Reset,
+            "sélection visible"
+        );
     }
 }

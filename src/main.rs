@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use bruno_tui::app::cli::{self, Command, USAGE, VERSION};
+use bruno_tui::app::clipboard::SystemClipboard;
 use bruno_tui::app::event::{EVENT_BUFFER, spawn_terminal_reader};
 use bruno_tui::app::model::Exit;
 use bruno_tui::app::run;
@@ -70,6 +71,7 @@ fn main() -> ExitCode {
             sender,
             events,
             "bru".into(),
+            Arc::new(SystemClipboard),
         )),
         Err(error) => Ok(Exit::TerminalError(error)),
     };

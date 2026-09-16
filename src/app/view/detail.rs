@@ -4,17 +4,32 @@
 //! borner le défilement. Les valeurs sont affichées telles qu'écrites dans
 //! les fichiers : aucune variable n'est résolue.
 
-use ratatui::style::{Modifier, Style};
+use std::ops::Range;
+
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use serde_json::Value;
 
 use super::tree::file_name;
 use crate::app::model::{Model, RequestOutcome};
+use crate::app::update::selection_range;
 use crate::collection::{
     AuthMode, BodyContent, BodyKind, ErrorNode, FileMeta, FolderNode, KeyValue, RequestNode,
     TreeNode,
 };
 use crate::runner::report::{AssertionResult, ResponseStatus, ResultStatus, TestResult};
+
+/// Texte brut du détail, une entrée par ligne logique (`Text.lines`),
+/// spans concaténés. Utilisé par la recherche et par la copie : c'est
+/// cette même unité de ligne que `update::detail_line_count` compte pour
+/// le défilement (voir sa documentation pour la raison du choix).
+pub fn plain_lines(model: &Model) -> Vec<String> {
+    detail_text(model)
+        .lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect()
+}
 
 /// Texte du détail du nœud sélectionné ; vide sans sélection.
 pub fn detail_text(model: &Model) -> Text<'static> {
@@ -351,6 +366,78 @@ fn folder_text(folder: &FolderNode) -> Text<'static> {
         }
     }
     Text::from(lines)
+}
+
+/// Fond distinct des lignes d'une sélection visuelle active.
+const SELECTION_TINT: Style = Style::new().bg(Color::Rgb(40, 55, 75));
+/// Fond distinct d'une correspondance de recherche, différent de la teinte
+/// de sélection et du surlignage `REVERSED` déjà utilisé pour le nœud
+/// sélectionné dans l'arbre.
+const MATCH_HIGHLIGHT: Style = Style::new().bg(Color::Rgb(96, 78, 0));
+
+/// `detail_text` avec la teinte de sélection visuelle et la surbrillance
+/// de la dernière correspondance de recherche appliquées, pour le rendu
+/// seulement : `detail_text` reste la source utilisée pour le calcul de
+/// défilement et pour la copie.
+pub fn render_text(model: &Model) -> Text<'static> {
+    let mut text = detail_text(model);
+    if let Some(range) = selection_range(model) {
+        for (index, line) in text.lines.iter_mut().enumerate() {
+            if range.contains(&(index as u16)) {
+                *line = tint_line(std::mem::take(line), SELECTION_TINT);
+            }
+        }
+    }
+    if let Some((line_index, range)) = &model.detail_match
+        && let Some(line) = text.lines.get_mut(usize::from(*line_index))
+    {
+        *line = highlight_match(line, range.clone());
+    }
+    text
+}
+
+fn tint_line(line: Line<'static>, tint: Style) -> Line<'static> {
+    Line::from(
+        line.spans
+            .into_iter()
+            .map(|span| Span::styled(span.content, span.style.patch(tint)))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Découpe `line` en spans avant/motif/après selon `range` (position en
+/// octets dans le texte concaténé de la ligne), en conservant le style
+/// d'origine de chaque portion et en y ajoutant le fond de surbrillance sur
+/// le motif. `range` vient de `find_detail_match`, qui le construit par
+/// `str::find` : toujours une frontière de caractère valide.
+fn highlight_match(line: &Line<'static>, range: Range<usize>) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut pos = 0usize;
+    for span in &line.spans {
+        let text = span.content.as_ref();
+        let span_start = pos;
+        let span_end = pos + text.len();
+        pos = span_end;
+        let hl_start = range.start.max(span_start);
+        let hl_end = range.end.min(span_end);
+        if hl_start >= hl_end {
+            spans.push(Span::styled(text.to_owned(), span.style));
+            continue;
+        }
+        let local_start = hl_start - span_start;
+        let local_end = hl_end - span_start;
+        if local_start > 0 {
+            spans.push(Span::styled(text[..local_start].to_owned(), span.style));
+        }
+        spans.push(Span::styled(
+            text[local_start..local_end].to_owned(),
+            span.style.patch(MATCH_HIGHLIGHT),
+        ));
+        if local_end < text.len() {
+            spans.push(Span::styled(text[local_end..].to_owned(), span.style));
+        }
+    }
+    Line::from(spans)
 }
 
 fn error_text(error: &ErrorNode) -> Text<'static> {
