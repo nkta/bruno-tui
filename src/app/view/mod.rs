@@ -114,6 +114,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
             Focus::History => {
                 panels::render_history(model, frame, areas.body);
             }
+            Focus::EnvironmentPicker => {
+                panels::render_environment_picker(model, frame, areas.body);
+            }
             Focus::Tree | Focus::Detail => {
                 render_tree(model, frame, areas.tree);
                 frame.render_widget(
@@ -180,10 +183,19 @@ fn title_line(model: &Model) -> Line<'static> {
             Span::raw("Erreur de chargement".to_owned()),
         ]),
         CollectionState::Loaded(collection) => {
+            let env_label = model
+                .current_environment
+                .as_deref()
+                .unwrap_or("Aucun environnement");
             let mut spans = vec![
                 Span::styled("bruno-tui", Style::new().add_modifier(Modifier::BOLD)),
                 Span::raw(" · "),
                 Span::raw(collection.name.clone()),
+                Span::raw(" · "),
+                Span::styled(
+                    env_label.to_owned(),
+                    Style::new().add_modifier(Modifier::DIM),
+                ),
             ];
             let error_count = crate::app::diagnostics::diagnostics(collection).len();
             if error_count > 0 {
@@ -319,6 +331,9 @@ fn status_line(model: &Model) -> String {
         }
         (CollectionState::Loaded(_), Focus::History) => {
             "↑↓ naviguer  r rejouer  Échap arbre".to_owned()
+        }
+        (CollectionState::Loaded(_), Focus::EnvironmentPicker) => {
+            "↑↓ naviguer  Entrée choisir  Échap annuler".to_owned()
         }
         _ => "q quitter".to_owned(),
     }
@@ -829,5 +844,45 @@ mod tests {
             status.contains("↑↓ naviguer  r rejouer  Échap arbre"),
             "{status}"
         );
+
+        model.focus = Focus::EnvironmentPicker;
+        let lines = render(&model, 100, 30);
+        let status = &lines[29];
+        assert!(
+            status.contains("↑↓ naviguer  Entrée choisir  Échap annuler"),
+            "{status}"
+        );
+    }
+
+    /// La fixture `parser-cases/environments/` porte, dans l'ordre
+    /// alphabétique : `local` (valide), `malformed` (en erreur),
+    /// `staging` (valide).
+    #[test]
+    fn environment_picker_panel_and_permanent_indicator() {
+        let mut model = loaded_model((100, 30));
+
+        // Indicateur permanent : « Aucun » par défaut, panneau fermé
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Aucun environnement"), "{screen}");
+        assert!(!screen.contains("Environnement"), "{screen}");
+
+        // Panneau ouvert : « Aucun » + les 3 entrées, celle en erreur marquée
+        model.focus = Focus::EnvironmentPicker;
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Environnement"), "{screen}");
+        assert!(screen.contains("Aucun"), "{screen}");
+        assert!(screen.contains("local"), "{screen}");
+        assert!(screen.contains("staging"), "{screen}");
+        assert!(
+            screen.contains("malformed.bru (invalide)"),
+            "entrée en erreur non marquée : {screen}"
+        );
+
+        // Indicateur mis à jour après sélection
+        model.current_environment = Some("staging".into());
+        model.focus = Focus::Tree;
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("staging"), "{screen}");
+        assert!(!screen.contains("Aucun environnement"), "{screen}");
     }
 }

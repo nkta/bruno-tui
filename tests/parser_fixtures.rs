@@ -140,12 +140,20 @@ fn traversal_skips_ignored_non_bru_and_environments() {
     assert_eq!(misc.path, Path::new("misc"));
     assert_eq!(misc.children[0].path(), Path::new("misc/z.bru"));
 
-    let envs: Vec<&str> = collection
+    let valid_envs: Vec<&str> = collection
         .environments
         .iter()
-        .map(|env| env.as_ref().expect("environnement valide").name.as_str())
+        .filter_map(|env| env.as_ref().ok())
+        .map(|env| env.name.as_str())
         .collect();
-    assert_eq!(envs, ["local"]);
+    assert_eq!(valid_envs, ["local", "staging"]);
+    let error_envs: Vec<&Path> = collection
+        .environments
+        .iter()
+        .filter_map(|env| env.as_ref().err())
+        .map(|err| err.path.as_path())
+        .collect();
+    assert_eq!(error_envs, [Path::new("environments/malformed.bru")]);
 }
 
 #[test]
@@ -362,7 +370,11 @@ fn invalid_files_do_not_stop_loading() {
 // --- Round-trip ----------------------------------------------------------
 
 /// Fichiers `.bru` volontairement invalides structurellement.
-const MALFORMED: [&str; 2] = ["parser-cases/broken.bru", "parser-cases/badmeta/folder.bru"];
+const MALFORMED: [&str; 3] = [
+    "parser-cases/broken.bru",
+    "parser-cases/badmeta/folder.bru",
+    "parser-cases/environments/malformed.bru",
+];
 
 fn bru_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<_> = fs::read_dir(dir)

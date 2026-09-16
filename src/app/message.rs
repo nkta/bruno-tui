@@ -138,6 +138,12 @@ pub enum Message {
     ToggleDiagnostics,
     /// `H`, hors saisie : ouvre ou ferme le panneau d'historique.
     ToggleHistory,
+    /// `E`, hors saisie : ouvre ou ferme le panneau de sélection
+    /// d'environnement. Navigation et validation réutilisent les messages
+    /// génériques `Up`/`Down`/`Home`/`End`/`Right`, dispatchés par
+    /// `update` selon `Focus::EnvironmentPicker`, comme pour les
+    /// panneaux de diagnostics et d'historique.
+    ToggleEnvironmentPicker,
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -190,6 +196,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('r') => Message::RunSelected,
         KeyCode::Char('D') => Message::ToggleDiagnostics,
         KeyCode::Char('H') => Message::ToggleHistory,
+        KeyCode::Char('E') => Message::ToggleEnvironmentPicker,
         KeyCode::Char('/') => Message::StartSearch,
         KeyCode::Char('|') => Message::OpenFilter,
         KeyCode::Char('n') => Message::NextMatch,
@@ -308,6 +315,12 @@ mod tests {
             (KeyCode::Char('D'), KeyModifiers::SHIFT, "ToggleDiagnostics"),
             (KeyCode::Char('H'), none, "ToggleHistory"),
             (KeyCode::Char('H'), KeyModifiers::SHIFT, "ToggleHistory"),
+            (KeyCode::Char('E'), none, "ToggleEnvironmentPicker"),
+            (
+                KeyCode::Char('E'),
+                KeyModifiers::SHIFT,
+                "ToggleEnvironmentPicker",
+            ),
             (KeyCode::Char('c'), KeyModifiers::CONTROL, "ForceQuit"),
             (KeyCode::Char('x'), KeyModifiers::CONTROL, "CancelRun"),
             (KeyCode::Char('/'), none, "StartSearch"),

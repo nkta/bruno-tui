@@ -1,4 +1,5 @@
-//! Rendu des panneaux Diagnostics et Historique.
+//! Rendu des panneaux Diagnostics, Historique, et sélection
+//! d'environnement.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -74,6 +75,57 @@ pub fn render_history(model: &Model, frame: &mut Frame, area: Rect) {
         area,
         &mut list_state,
     );
+}
+
+/// Dessine le panneau plein corps de sélection d'environnement : « Aucun »
+/// puis les entrées de `Collection.environments`, une en erreur marquée
+/// et non mise en valeur comme sélectionnable.
+pub fn render_environment_picker(model: &Model, frame: &mut Frame, area: Rect) {
+    let block = panel(" Environnement ", model.focus == Focus::EnvironmentPicker);
+    let Some(collection) = model.loaded() else {
+        frame.render_widget(Paragraph::new("aucune collection").block(block), area);
+        return;
+    };
+    let mut items = vec![environment_item_line(
+        None,
+        model.current_environment.is_none(),
+    )];
+    items.extend(collection.environments.iter().map(|entry| {
+        let name = entry.as_ref().ok().map(|env| env.name.as_str());
+        let is_current = match (name, model.current_environment.as_deref()) {
+            (Some(n), Some(current)) => n == current,
+            _ => false,
+        };
+        environment_item_line(Some(entry), is_current)
+    }));
+    let items: Vec<ListItem> = items.into_iter().map(ListItem::new).collect();
+    let count = 1 + collection.environments.len();
+    let selected = Some(model.environment_selected.min(count - 1));
+    let mut list_state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        area,
+        &mut list_state,
+    );
+}
+
+/// Une ligne du panneau de sélection : `entry` est `None` pour « Aucun ».
+fn environment_item_line(
+    entry: Option<&Result<crate::collection::Environment, crate::collection::ErrorNode>>,
+    is_current: bool,
+) -> Line<'static> {
+    let marker = if is_current { "● " } else { "  " };
+    let label = match entry {
+        None => Span::styled("Aucun", Style::new().add_modifier(Modifier::BOLD)),
+        Some(Ok(env)) => Span::raw(env.name.clone()),
+        Some(Err(err)) => Span::styled(
+            format!("{} (invalide)", err.path.display()),
+            Style::new().fg(Color::Red),
+        ),
+    };
+    Line::from(vec![Span::raw(marker), label])
 }
 
 fn history_row_line(entry: &HistoryEntry) -> Line<'static> {

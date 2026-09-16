@@ -9,8 +9,8 @@ use super::filter::{FilterState, evaluate};
 use super::message::Message;
 use super::model::{
     CollectionState, DetailSelection, EditMode, EditSession, EditableField, Exit, Focus,
-    HistoryEntry, HistoryOutcome, Model, StatusMessage, field_enabled, field_value, tree_node_at,
-    visible_rows,
+    HistoryEntry, HistoryOutcome, Model, StatusMessage, environment_name_at, field_enabled,
+    field_value, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::view::detail::plain_lines;
@@ -117,6 +117,10 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             model.tree.selected = 0;
             model.tree.offset = 0;
             model.detail_scroll = 0;
+            model.current_environment = None;
+            if model.focus == Focus::EnvironmentPicker {
+                model.focus = Focus::Tree;
+            }
             Command::None
         }
         Message::NextFocus => {
@@ -153,6 +157,20 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                     Focus::History => Focus::Tree,
                     _ => Focus::History,
                 };
+            }
+            Command::None
+        }
+        Message::ToggleEnvironmentPicker => {
+            match model.focus {
+                Focus::EnvironmentPicker => model.focus = Focus::Tree,
+                _ => {
+                    if let Some(collection) = model.loaded() {
+                        let index =
+                            environment_index_for(collection, model.current_environment.as_deref());
+                        model.environment_selected = index;
+                        model.focus = Focus::EnvironmentPicker;
+                    }
+                }
             }
             Command::None
         }
@@ -317,6 +335,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                 }
                 Focus::Diagnostics => navigate_diagnostics(model, navigation),
                 Focus::History => navigate_history(model, navigation),
+                Focus::EnvironmentPicker => navigate_environment_picker(model, navigation),
             }
             Command::None
         }
@@ -339,7 +358,7 @@ fn run_selected(model: &mut Model) -> Command {
             Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
             Some(TreeNode::Error(_)) | None => None,
         },
-        Focus::Diagnostics => None,
+        Focus::Diagnostics | Focus::EnvironmentPicker => None,
     };
     let Some((target, recursive)) = target else {
         return Command::None;
@@ -353,7 +372,7 @@ fn run_selected(model: &mut Model) -> Command {
             collection_root: root,
             targets: vec![target.clone()],
             recursive,
-            env: None,
+            env: model.current_environment.clone(),
             env_vars: Vec::new(),
         },
         target,
@@ -1010,6 +1029,57 @@ fn navigate_history(model: &mut Model, message: Message) {
     }
 }
 
+/// Indice à sélectionner à l'ouverture du panneau, pour retrouver
+/// l'environnement déjà courant (0 si `current` est `None` ou ne
+/// correspond à aucune entrée valide).
+fn environment_index_for(
+    collection: &crate::collection::Collection,
+    current: Option<&str>,
+) -> usize {
+    let Some(name) = current else {
+        return 0;
+    };
+    collection
+        .environments
+        .iter()
+        .position(|entry| matches!(entry, Ok(env) if env.name == name))
+        .map_or(0, |i| i + 1)
+}
+
+/// `↑`/`↓`/`Début`/`Fin`/`Entrée` dans le panneau de sélection
+/// d'environnement.
+fn navigate_environment_picker(model: &mut Model, message: Message) {
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    let count = 1 + collection.environments.len();
+    let before = model.environment_selected.min(count - 1);
+    match message {
+        Message::Up => model.environment_selected = before.saturating_sub(1),
+        Message::Down => model.environment_selected = (before + 1).min(count - 1),
+        Message::Home => model.environment_selected = 0,
+        Message::End => model.environment_selected = count - 1,
+        Message::Right => select_environment_picker(model, before),
+        _ => {}
+    }
+}
+
+/// `Entrée` sur l'entrée courante du panneau : devient l'environnement
+/// courant et referme le panneau, sauf si l'entrée est en erreur ou hors
+/// limites (sans effet, cf. spec « Environnement invalide non
+/// sélectionnable »).
+fn select_environment_picker(model: &mut Model, index: usize) {
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    let Some(name_opt) = environment_name_at(collection, index) else {
+        return;
+    };
+    let name = name_opt.map(str::to_owned);
+    model.current_environment = name;
+    model.focus = Focus::Tree;
+}
+
 /// Navigation croisée depuis le panneau de diagnostics vers l'arbre :
 /// déplie les dossiers ancêtres (et le nœud lui-même si dossier), sélectionne
 /// le nœud et repasse le focus à l'arbre.
@@ -1058,7 +1128,7 @@ fn confirm_search(model: &mut Model) {
     let scope = match model.focus {
         Focus::Tree => SearchScope::Tree,
         Focus::Detail => SearchScope::Detail,
-        Focus::Diagnostics | Focus::History => SearchScope::Tree,
+        Focus::Diagnostics | Focus::History | Focus::EnvironmentPicker => SearchScope::Tree,
     };
     search.pattern = search.draft.clone();
     search.editing = false;
@@ -1758,6 +1828,166 @@ mod tests {
         });
         let command = update(&mut model, Message::RunSelected);
         assert!(matches!(command, Command::None));
+    }
+
+    #[test]
+    fn toggle_environment_picker_opens_and_closes() {
+        let mut model = loaded_model((100, 30));
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Ouverture
+        update(&mut model, Message::ToggleEnvironmentPicker);
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
+        assert_eq!(model.environment_selected, 0);
+
+        // Second appui : fermeture vers l'arbre
+        update(&mut model, Message::ToggleEnvironmentPicker);
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Rouvrir retrouve l'indice de l'environnement déjà courant
+        // (parser-cases/environments : local, malformed, staging)
+        model.current_environment = Some("staging".into());
+        update(&mut model, Message::ToggleEnvironmentPicker);
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
+        assert_eq!(model.environment_selected, 3);
+
+        // Sans collection chargée : aucun effet
+        let mut loading_model = Model::new("/x".into(), (100, 30));
+        update(&mut loading_model, Message::ToggleEnvironmentPicker);
+        assert_eq!(loading_model.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn environment_picker_navigation_is_bounded() {
+        // parser-cases/environments a 3 entrées (+ « Aucun ») -> indices 0..=3
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        assert_eq!(model.environment_selected, 0);
+
+        update(&mut model, Message::Up);
+        assert_eq!(model.environment_selected, 0, "borne haute (0)");
+
+        update(&mut model, Message::Down);
+        assert_eq!(model.environment_selected, 1);
+        update(&mut model, Message::End);
+        assert_eq!(model.environment_selected, 3);
+        update(&mut model, Message::Down);
+        assert_eq!(model.environment_selected, 3, "borne basse (3)");
+        update(&mut model, Message::Home);
+        assert_eq!(model.environment_selected, 0);
+    }
+
+    #[test]
+    fn selecting_none_valid_or_invalid_environment_entry() {
+        let mut model = loaded_model((100, 30));
+
+        // « Aucun » (indice 0) : ferme le panneau, environnement courant None
+        model.current_environment = Some("local".into());
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 0;
+        update(&mut model, Message::Right);
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.current_environment, None);
+
+        // Environnement valide (indice 1 : local)
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1;
+        update(&mut model, Message::Right);
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.current_environment.as_deref(), Some("local"));
+
+        // Entrée en erreur (indice 2 : malformed) : sans effet
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 2;
+        update(&mut model, Message::Right);
+        assert_eq!(model.focus, Focus::EnvironmentPicker, "reste ouvert");
+        assert_eq!(
+            model.current_environment.as_deref(),
+            Some("local"),
+            "inchangé"
+        );
+    }
+
+    #[test]
+    fn escape_closes_environment_picker_without_changing_selection() {
+        let mut model = loaded_model((100, 30));
+        model.current_environment = Some("local".into());
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 3; // survole `staging` sans valider
+
+        update(&mut model, Message::FocusTree);
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.current_environment.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn run_selected_carries_the_current_environment() {
+        // Sans environnement courant : `env` reste `None` (non-régression)
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        match update(&mut model, Message::RunSelected) {
+            Command::StartRun { request, .. } => assert_eq!(request.env, None),
+            other => panic!("StartRun attendu, obtenu {other:?}"),
+        }
+
+        // Requête directe
+        let mut model = loaded_model((100, 30));
+        model.current_environment = Some("public".into());
+        select(&mut model, "simple-get.bru");
+        match update(&mut model, Message::RunSelected) {
+            Command::StartRun { request, .. } => {
+                assert_eq!(request.env.as_deref(), Some("public"));
+            }
+            other => panic!("StartRun attendu, obtenu {other:?}"),
+        }
+
+        // Dossier récursif
+        let mut model = loaded_model((100, 30));
+        model.current_environment = Some("public".into());
+        select(&mut model, "grp");
+        match update(&mut model, Message::RunSelected) {
+            Command::StartRun { request, .. } => {
+                assert_eq!(request.env.as_deref(), Some("public"));
+                assert!(request.recursive);
+            }
+            other => panic!("StartRun attendu, obtenu {other:?}"),
+        }
+
+        // Rejeu depuis l'historique
+        let mut model = loaded_model((100, 30));
+        model.current_environment = Some("public".into());
+        model.focus = Focus::History;
+        model.history.push_back(HistoryEntry {
+            started_at: std::time::SystemTime::now(),
+            target: std::path::PathBuf::from("simple-get.bru"),
+            recursive: false,
+            outcome: HistoryOutcome::Completed {
+                total: 1,
+                failed: 0,
+                duration_secs: 0.1,
+            },
+        });
+        model.history_selected = 0;
+        match update(&mut model, Message::RunSelected) {
+            Command::StartRun { request, .. } => {
+                assert_eq!(request.env.as_deref(), Some("public"));
+            }
+            other => panic!("StartRun attendu, obtenu {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collection_reload_resets_current_environment_and_picker_focus() {
+        let mut model = loaded_model((100, 30));
+        model.current_environment = Some("local".into());
+        model.focus = Focus::EnvironmentPicker;
+
+        use crate::collection::CollectionLoader;
+        let reloaded = crate::collection::BruLoader.load(&model.source.clone());
+        update(&mut model, Message::CollectionLoaded(reloaded));
+
+        assert_eq!(model.current_environment, None);
+        assert_eq!(model.focus, Focus::Tree);
     }
 
     #[test]

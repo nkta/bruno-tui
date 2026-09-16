@@ -33,6 +33,7 @@ pub enum Focus {
     Detail,
     Diagnostics,
     History,
+    EnvironmentPicker,
 }
 
 /// Nombre maximal d'entrées conservées dans le journal d'historique.
@@ -389,6 +390,12 @@ pub struct Model {
     pub editing: Option<EditSession>,
     /// Confirmation en attente avant de fermer l'édition ou l'application.
     pub confirm: Option<PendingConfirm>,
+    /// Nom de l'environnement courant, `None` = « Aucun ».
+    pub current_environment: Option<String>,
+    /// Indice sélectionné dans le panneau de sélection d'environnement :
+    /// 0 = « Aucun », 1..=N = les entrées de `Collection.environments`.
+    /// N'a de sens que pendant que `Focus::EnvironmentPicker` est actif.
+    pub environment_selected: usize,
 }
 
 /// Message affiché temporairement dans la barre d'état.
@@ -425,6 +432,8 @@ impl Model {
             next_clipboard_token: 0,
             editing: None,
             confirm: None,
+            current_environment: None,
+            environment_selected: 0,
         }
     }
 
@@ -522,6 +531,21 @@ pub fn replace_request_in_tree(
         }
     }
     false
+}
+
+/// Nom de l'environnement à l'indice donné dans le panneau de sélection :
+/// 0 est toujours « Aucun » (`Some(None)`) ; 1..=N couvre les entrées de
+/// `Collection.environments` dans l'ordre, `Some(Some(nom))` si l'entrée
+/// est valide, `None` si elle est en erreur ou si l'indice est hors
+/// limites — dans les deux cas, sans effet pour l'appelant (D3, D4).
+pub fn environment_name_at(collection: &Collection, index: usize) -> Option<Option<&str>> {
+    if index == 0 {
+        return Some(None);
+    }
+    match collection.environments.get(index - 1) {
+        Some(Ok(env)) => Some(Some(env.name.as_str())),
+        Some(Err(_)) | None => None,
+    }
 }
 
 /// Nœud désigné par une adresse, dans un arbre donné. Partagé par
@@ -935,5 +959,27 @@ mod tests {
         assert!(model.history.is_empty());
         assert_eq!(model.diagnostics_selected, 0);
         assert_eq!(model.history_selected, 0);
+        assert_eq!(model.current_environment, None);
+        assert_eq!(model.environment_selected, 0);
+    }
+
+    /// La fixture `parser-cases/environments/` porte, dans l'ordre
+    /// alphabétique : `local` (valide), `malformed` (en erreur),
+    /// `staging` (valide).
+    #[test]
+    fn environment_name_at_resolves_none_valid_error_and_out_of_bounds() {
+        let model = loaded_model((100, 30));
+        let collection = model.loaded().expect("collection chargée");
+
+        // Indice 0 : toujours « Aucun ».
+        assert_eq!(environment_name_at(collection, 0), Some(None));
+        // Indice 1 : premier environnement, valide (`local`).
+        assert_eq!(environment_name_at(collection, 1), Some(Some("local")));
+        // Indice 2 : second environnement, en erreur (`malformed`).
+        assert_eq!(environment_name_at(collection, 2), None);
+        // Indice 3 : troisième environnement, valide (`staging`).
+        assert_eq!(environment_name_at(collection, 3), Some(Some("staging")));
+        // Indice hors limites.
+        assert_eq!(environment_name_at(collection, 4), None);
     }
 }
