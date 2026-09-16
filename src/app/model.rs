@@ -4,10 +4,11 @@
 //! lignes visibles de l'arbre y sont précalculées pour que le rendu n'ait
 //! qu'à les parcourir.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::collection::{Collection, LoadError, TreeNode};
 use crate::runner;
@@ -28,6 +29,32 @@ pub enum CollectionState {
 pub enum Focus {
     Tree,
     Detail,
+    Diagnostics,
+    History,
+}
+
+/// Nombre maximal d'entrées conservées dans le journal d'historique.
+pub const HISTORY_LIMIT: usize = 200;
+
+/// Une entrée du journal d'exécutions de la session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryEntry {
+    pub started_at: SystemTime,
+    pub target: PathBuf,
+    pub recursive: bool,
+    pub outcome: HistoryOutcome,
+}
+
+/// Issue d'une exécution dans le journal d'historique.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HistoryOutcome {
+    Completed {
+        total: u64,
+        failed: u64,
+        duration_secs: f64,
+    },
+    Failed(String),
+    Cancelled,
 }
 
 /// Motif d'arrêt de la boucle.
@@ -123,6 +150,12 @@ pub struct Model {
     pub collection: CollectionState,
     pub tree: TreeState,
     pub focus: Focus,
+    /// Indice de l'entrée sélectionnée dans le panneau de diagnostics.
+    pub diagnostics_selected: usize,
+    /// Indice de l'entrée sélectionnée dans le panneau d'historique.
+    pub history_selected: usize,
+    /// Journal des exécutions de la session, les plus récentes en tête.
+    pub history: VecDeque<HistoryEntry>,
     /// Première ligne affichée du détail.
     pub detail_scroll: u16,
     /// Taille du terminal (colonnes, lignes).
@@ -166,6 +199,9 @@ impl Model {
             collection: CollectionState::Loading,
             tree: TreeState::default(),
             focus: Focus::Tree,
+            diagnostics_selected: 0,
+            history_selected: 0,
+            history: VecDeque::new(),
             detail_scroll: 0,
             size,
             exit: None,
@@ -341,5 +377,13 @@ mod tests {
             ]
         );
         assert_eq!(rows.len(), 11 + 4 + 1);
+    }
+
+    #[test]
+    fn new_model_starts_with_empty_history() {
+        let model = Model::new(PathBuf::from("test"), (100, 30));
+        assert!(model.history.is_empty());
+        assert_eq!(model.diagnostics_selected, 0);
+        assert_eq!(model.history_selected, 0);
     }
 }

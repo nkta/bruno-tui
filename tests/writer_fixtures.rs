@@ -425,6 +425,10 @@ fn callers_are_independent_of_the_writer() {
     );
     assert_eq!(fake.calls.lock().expect("verrou").len(), 1);
 
+    // Bref délai pour que l'horloge du système de fichiers avance sur
+    // un fichier réécrit avec une taille identique (110 octets).
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
     let real_stamp = apply_url_edit(&BruWriter, &path, &ast, &stamp, "https://{{host}}/pong")
         .expect("écriture réelle");
     assert_ne!(real_stamp, stamp);

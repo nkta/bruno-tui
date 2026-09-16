@@ -7,7 +7,8 @@ use std::ops::RangeInclusive;
 
 use super::message::Message;
 use super::model::{
-    CollectionState, DetailSelection, Exit, Focus, Model, StatusMessage, tree_node_at, visible_rows,
+    CollectionState, DetailSelection, Exit, Focus, HistoryEntry, HistoryOutcome, Model,
+    StatusMessage, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::view::detail::plain_lines;
@@ -67,7 +68,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
         Message::NextFocus => {
             model.focus = match model.focus {
                 Focus::Tree => Focus::Detail,
-                Focus::Detail => Focus::Tree,
+                _ => Focus::Tree,
             };
             Command::None
         }
@@ -77,6 +78,24 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             // rejoint l'arbre qu'à un `Échap` suivant, sans sélection.
             if model.detail_selection.take().is_none() {
                 model.focus = Focus::Tree;
+            }
+            Command::None
+        }
+        Message::ToggleDiagnostics => {
+            if model.loaded().is_some() {
+                model.focus = match model.focus {
+                    Focus::Diagnostics => Focus::Tree,
+                    _ => Focus::Diagnostics,
+                };
+            }
+            Command::None
+        }
+        Message::ToggleHistory => {
+            if model.loaded().is_some() {
+                model.focus = match model.focus {
+                    Focus::History => Focus::Tree,
+                    _ => Focus::History,
+                };
             }
             Command::None
         }
@@ -150,6 +169,8 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             match model.focus {
                 Focus::Tree => navigate_tree(model, navigation),
                 Focus::Detail => scroll_detail(model, navigation),
+                Focus::Diagnostics => navigate_diagnostics(model, navigation),
+                Focus::History => navigate_history(model, navigation),
             }
             Command::None
         }
@@ -162,10 +183,17 @@ fn run_selected(model: &mut Model) -> Command {
     if model.run.active.is_some() {
         return Command::None;
     }
-    let target = match model.selected_node() {
-        Some(TreeNode::Request(request)) => Some((request.path.clone(), false)),
-        Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
-        Some(TreeNode::Error(_)) | None => None,
+    let target = match model.focus {
+        Focus::History => model
+            .history
+            .get(model.history_selected)
+            .map(|entry| (entry.target.clone(), entry.recursive)),
+        Focus::Tree | Focus::Detail => match model.selected_node() {
+            Some(TreeNode::Request(request)) => Some((request.path.clone(), false)),
+            Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
+            Some(TreeNode::Error(_)) | None => None,
+        },
+        Focus::Diagnostics => None,
     };
     let Some((target, recursive)) = target else {
         return Command::None;
@@ -209,6 +237,35 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
     let Some(active) = model.run.active.take() else {
         return;
     };
+
+    let started_at = std::time::SystemTime::now();
+    let history_outcome = match &event.outcome {
+        crate::runner::RunOutcome::Completed { report, .. } => {
+            let results: Vec<_> = report
+                .iterations()
+                .iter()
+                .flat_map(|it| &it.results)
+                .collect();
+            HistoryOutcome::Completed {
+                total: results.len() as u64,
+                failed: results.iter().filter(|r| r.is_failure()).count() as u64,
+                duration_secs: results.iter().map(|r| r.run_duration).sum(),
+            }
+        }
+        crate::runner::RunOutcome::Failed(error) => HistoryOutcome::Failed(error.to_string()),
+        crate::runner::RunOutcome::Cancelled => HistoryOutcome::Cancelled,
+    };
+    let entry = HistoryEntry {
+        started_at,
+        target: active.target.clone(),
+        recursive: active.recursive,
+        outcome: history_outcome,
+    };
+    if model.history.len() >= super::model::HISTORY_LIMIT {
+        model.history.pop_back();
+    }
+    model.history.push_front(entry);
+
     match event.outcome {
         crate::runner::RunOutcome::Completed { report, exit_code } => {
             for result in report.0.into_iter().flat_map(|iteration| iteration.results) {
@@ -407,6 +464,78 @@ fn scroll_detail(model: &mut Model, message: Message) {
     };
 }
 
+/// Hauteur utile du corps de l'écran (pour les panneaux plein corps).
+fn body_height(model: &Model) -> usize {
+    layout_for(model.size).map_or(1, |areas| usize::from(inner(areas.body).height).max(1))
+}
+
+fn navigate_diagnostics(model: &mut Model, message: Message) {
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    let entries = super::diagnostics::diagnostics(collection);
+    let count = entries.len();
+    if count == 0 {
+        model.diagnostics_selected = 0;
+        return;
+    }
+    let page = body_height(model);
+    let before = model.diagnostics_selected.min(count - 1);
+    match message {
+        Message::Up => model.diagnostics_selected = before.saturating_sub(1),
+        Message::Down => model.diagnostics_selected = (before + 1).min(count - 1),
+        Message::Home => model.diagnostics_selected = 0,
+        Message::End => model.diagnostics_selected = count - 1,
+        Message::PageUp => model.diagnostics_selected = before.saturating_sub(page),
+        Message::PageDown => model.diagnostics_selected = (before + page).min(count - 1),
+        Message::Right => {
+            if let Some(entry) = entries.get(before) {
+                let address = entry.address.clone();
+                cross_navigate_to_tree(model, &address);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn navigate_history(model: &mut Model, message: Message) {
+    let count = model.history.len();
+    if count == 0 {
+        model.history_selected = 0;
+        return;
+    }
+    let page = body_height(model);
+    let before = model.history_selected.min(count - 1);
+    match message {
+        Message::Up => model.history_selected = before.saturating_sub(1),
+        Message::Down => model.history_selected = (before + 1).min(count - 1),
+        Message::Home => model.history_selected = 0,
+        Message::End => model.history_selected = count - 1,
+        Message::PageUp => model.history_selected = before.saturating_sub(page),
+        Message::PageDown => model.history_selected = (before + page).min(count - 1),
+        _ => {}
+    }
+}
+
+/// Navigation croisée depuis le panneau de diagnostics vers l'arbre :
+/// déplie les dossiers ancêtres (et le nœud lui-même si dossier), sélectionne
+/// le nœud et repasse le focus à l'arbre.
+fn cross_navigate_to_tree(model: &mut Model, address: &[usize]) {
+    for prefix_len in 1..=address.len() {
+        let prefix = &address[..prefix_len];
+        if let Some(TreeNode::Folder(folder)) = model.node_at(prefix) {
+            model.tree.expanded.insert(folder.path.clone());
+        }
+    }
+    refresh_rows(model);
+    if let Some(index) = model.tree.rows.iter().position(|r| r.address == address) {
+        model.tree.selected = index;
+    }
+    clear_detail_view_state(model);
+    scroll_tree_into_view(model);
+    model.focus = Focus::Tree;
+}
+
 // --- Recherche -----------------------------------------------------------
 
 /// `/` : ouvre la saisie sur le motif déjà validé, ou vide s'il n'y en a
@@ -436,6 +565,7 @@ fn confirm_search(model: &mut Model) {
     let scope = match model.focus {
         Focus::Tree => SearchScope::Tree,
         Focus::Detail => SearchScope::Detail,
+        Focus::Diagnostics | Focus::History => SearchScope::Tree,
     };
     search.pattern = search.draft.clone();
     search.editing = false;
@@ -616,7 +746,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::app::model::{ActiveRun, RunFailure};
+    use crate::app::model::{ActiveRun, HistoryEntry, HistoryOutcome, RunFailure};
     use crate::app::test_support::{loaded_model, select, selected_name};
     use crate::collection::LoadError;
     use crate::runner;
@@ -811,6 +941,143 @@ mod tests {
     }
 
     #[test]
+    fn toggle_diagnostics_and_history() {
+        let mut model = loaded_model((100, 30));
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Ouverture puis fermeture diagnostics
+        update(&mut model, Message::ToggleDiagnostics);
+        assert_eq!(model.focus, Focus::Diagnostics);
+        update(&mut model, Message::ToggleDiagnostics);
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Ouverture puis fermeture history
+        update(&mut model, Message::ToggleHistory);
+        assert_eq!(model.focus, Focus::History);
+        update(&mut model, Message::ToggleHistory);
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Bascule directe entre les deux
+        update(&mut model, Message::ToggleDiagnostics);
+        assert_eq!(model.focus, Focus::Diagnostics);
+        update(&mut model, Message::ToggleHistory);
+        assert_eq!(model.focus, Focus::History);
+
+        // Échap referme le panneau vers l'arbre
+        update(&mut model, Message::FocusTree);
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Sans collection chargée (Loading ou Failed) : aucun effet
+        let mut loading_model = Model::new("/x".into(), (100, 30));
+        update(&mut loading_model, Message::ToggleDiagnostics);
+        assert_eq!(loading_model.focus, Focus::Tree);
+        update(&mut loading_model, Message::ToggleHistory);
+        assert_eq!(loading_model.focus, Focus::Tree);
+
+        let mut failed_model = Model::new("/x".into(), (100, 30));
+        update(
+            &mut failed_model,
+            Message::CollectionLoaded(Err(LoadError::NotACollection { path: "/x".into() })),
+        );
+        update(&mut failed_model, Message::ToggleDiagnostics);
+        assert_eq!(failed_model.focus, Focus::Tree);
+        update(&mut failed_model, Message::ToggleHistory);
+        assert_eq!(failed_model.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn diagnostics_and_history_navigation() {
+        // parser-cases a 3 erreurs : badmeta, broken.bru, no-method.bru
+        let mut model = loaded_model((100, 12));
+        model.focus = Focus::Diagnostics;
+        assert_eq!(model.diagnostics_selected, 0);
+
+        // Up à 0 reste à 0
+        update(&mut model, Message::Up);
+        assert_eq!(model.diagnostics_selected, 0);
+
+        // Down incrémente
+        update(&mut model, Message::Down);
+        assert_eq!(model.diagnostics_selected, 1);
+        update(&mut model, Message::Down);
+        assert_eq!(model.diagnostics_selected, 2);
+
+        // Down au-delà de la fin reste borné
+        update(&mut model, Message::Down);
+        assert_eq!(model.diagnostics_selected, 2);
+
+        // Home retourne à 0
+        update(&mut model, Message::Home);
+        assert_eq!(model.diagnostics_selected, 0);
+
+        // End va au dernier
+        update(&mut model, Message::End);
+        assert_eq!(model.diagnostics_selected, 2);
+
+        // PageUp et PageDown
+        update(&mut model, Message::PageUp);
+        assert_eq!(model.diagnostics_selected, 0);
+        update(&mut model, Message::PageDown);
+        assert_eq!(model.diagnostics_selected, 2);
+
+        // De même pour History
+        model.focus = Focus::History;
+        for i in 0..3 {
+            model.history.push_back(HistoryEntry {
+                started_at: std::time::SystemTime::now(),
+                target: std::path::PathBuf::from(format!("req{i}.bru")),
+                recursive: false,
+                outcome: HistoryOutcome::Completed {
+                    total: 1,
+                    failed: 0,
+                    duration_secs: 0.1,
+                },
+            });
+        }
+        assert_eq!(model.history_selected, 0);
+        update(&mut model, Message::Up);
+        assert_eq!(model.history_selected, 0);
+        update(&mut model, Message::Down);
+        assert_eq!(model.history_selected, 1);
+        update(&mut model, Message::End);
+        assert_eq!(model.history_selected, 2);
+        update(&mut model, Message::Down);
+        assert_eq!(model.history_selected, 2);
+        update(&mut model, Message::Home);
+        assert_eq!(model.history_selected, 0);
+        update(&mut model, Message::PageDown);
+        assert_eq!(model.history_selected, 2);
+        update(&mut model, Message::PageUp);
+        assert_eq!(model.history_selected, 0);
+    }
+
+    #[test]
+    fn cross_navigation_from_diagnostics_to_tree() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::Diagnostics;
+
+        // Entrée 0 : badmeta (dossier)
+        model.diagnostics_selected = 0;
+        assert!(!model.tree.expanded.contains(Path::new("badmeta")));
+        update(&mut model, Message::Right);
+        assert_eq!(model.focus, Focus::Tree);
+        assert!(model.tree.expanded.contains(Path::new("badmeta")));
+        assert_eq!(selected_name(&model), "badmeta");
+        assert_eq!(model.selected_node().unwrap().path(), Path::new("badmeta"));
+
+        // Entrée 1 : broken.bru (fichier à la racine)
+        model.focus = Focus::Diagnostics;
+        model.diagnostics_selected = 1;
+        update(&mut model, Message::Right);
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(selected_name(&model), "broken.bru");
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("broken.bru")
+        );
+    }
+
+    #[test]
     fn loading_states_and_quit() {
         let mut model = Model::new("/x".into(), (100, 30));
         update(&mut model, Message::Down);
@@ -898,6 +1165,95 @@ mod tests {
             Command::None
         ));
         assert!(model.run.active.is_some());
+    }
+
+    #[test]
+    fn run_selected_from_history_replays_target() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::History;
+        model.history.push_back(HistoryEntry {
+            started_at: std::time::SystemTime::now(),
+            target: std::path::PathBuf::from("grp"),
+            recursive: true,
+            outcome: HistoryOutcome::Completed {
+                total: 2,
+                failed: 0,
+                duration_secs: 0.5,
+            },
+        });
+        model.history_selected = 0;
+
+        // Cas 1 : aucune exécution en cours -> Command::StartRun
+        let command = update(&mut model, Message::RunSelected);
+        match command {
+            Command::StartRun { request, target } => {
+                assert_eq!(target, Path::new("grp"));
+                assert_eq!(request.targets, vec![std::path::PathBuf::from("grp")]);
+                assert!(request.recursive);
+            }
+            other => panic!("attendu StartRun, obtenu {other:?}"),
+        }
+
+        // Cas 2 : exécution en cours -> Command::None
+        model.run.active = Some(ActiveRun {
+            id: runner::RunId(42),
+            target: std::path::PathBuf::from("other"),
+            recursive: false,
+            handle: None,
+        });
+        let command = update(&mut model, Message::RunSelected);
+        assert!(matches!(command, Command::None));
+    }
+
+    #[test]
+    fn replay_entry_does_not_modify_existing_entry_and_adds_new() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::History;
+        let original_entry = HistoryEntry {
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            target: std::path::PathBuf::from("simple-get.bru"),
+            recursive: false,
+            outcome: HistoryOutcome::Completed {
+                total: 1,
+                failed: 0,
+                duration_secs: 0.1,
+            },
+        };
+        model.history.push_back(original_entry.clone());
+        model.history_selected = 0;
+
+        let command = update(&mut model, Message::RunSelected);
+        assert!(matches!(command, Command::StartRun { .. }));
+
+        // L'entrée existante n'a pas été modifiée
+        assert_eq!(model.history.len(), 1);
+        assert_eq!(model.history[0], original_entry);
+
+        // Simulation de la fin de l'exécution rejouée
+        let new_id = runner::RunId(99);
+        model.run.active = Some(ActiveRun {
+            id: new_id,
+            target: std::path::PathBuf::from("simple-get.bru"),
+            recursive: false,
+            handle: None,
+        });
+        let new_report = sample_report(&["simple-get.bru"]);
+        update(
+            &mut model,
+            Message::RunFinished(runner::RunEvent {
+                id: new_id,
+                outcome: runner::RunOutcome::Completed {
+                    report: new_report,
+                    exit_code: Some(0),
+                },
+            }),
+        );
+
+        // Le journal a maintenant 2 entrées : la nouvelle en tête, l'ancienne préservée
+        assert_eq!(model.history.len(), 2);
+        assert_eq!(model.history[1], original_entry);
+        assert_ne!(model.history[0].started_at, original_entry.started_at);
+        assert_eq!(model.history[0].target, Path::new("simple-get.bru"));
     }
 
     #[test]
@@ -990,6 +1346,205 @@ mod tests {
             .as_ref()
             .expect("exécution toujours active");
         assert_eq!(active.id, runner::RunId(1));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_finished_creates_history_entry_with_fake_bru() {
+        let fake_bru =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-bru/fake-bru.sh");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let runner = runner::BruRunner::with_program(fake_bru, tx);
+
+        let mut model = loaded_model((100, 30));
+
+        // 1. Rapport contenant un `pass` avec assertion en échec (mode "ok") -> failed >= 1
+        let handle = runner.start(runner::RunRequest {
+            collection_root: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/runner-probe"),
+            targets: vec![std::path::PathBuf::from("ok")],
+            recursive: false,
+            env: None,
+            env_vars: Vec::new(),
+        });
+        model.run.active = Some(ActiveRun {
+            id: handle.id(),
+            target: std::path::PathBuf::from("ok.bru"),
+            recursive: false,
+            handle: None,
+        });
+        let event = rx.recv().await.expect("événement");
+        update(&mut model, Message::RunFinished(event));
+
+        assert_eq!(model.history.len(), 1);
+        let entry = &model.history[0];
+        assert_eq!(entry.target, Path::new("ok.bru"));
+        assert!(!entry.recursive);
+        match &entry.outcome {
+            HistoryOutcome::Completed {
+                total,
+                failed,
+                duration_secs,
+            } => {
+                assert_eq!(*total, 5);
+                assert!(*failed >= 1, "failed doit être >= 1 : {failed}");
+                assert!(*duration_secs > 0.0);
+            }
+            other => panic!("attendu Completed, obtenu {other:?}"),
+        }
+
+        // 2. Exécution réussie (mode "report" avec un rapport sans échec)
+        let success_json = std::env::temp_dir().join(format!(
+            "bruno-tui-test-success-{}.json",
+            std::process::id()
+        ));
+        let success_content = r#"[
+            {
+                "iterationIndex": 0,
+                "results": [
+                    {
+                        "name": "green",
+                        "path": "green",
+                        "test": { "filename": "green.bru" },
+                        "request": { "method": "GET", "url": "http://x", "headers": {} },
+                        "response": { "status": 200, "statusText": "OK", "headers": null, "data": null, "url": "http://x", "responseTime": 5 },
+                        "error": null,
+                        "status": "pass",
+                        "assertionResults": [],
+                        "testResults": [],
+                        "preRequestTestResults": [],
+                        "postResponseTestResults": [],
+                        "shouldStopRunnerExecution": false,
+                        "runDuration": 0.042,
+                        "iterationIndex": 0
+                    }
+                ],
+                "summary": { "totalRequests": 1, "passedRequests": 1, "failedRequests": 0, "errorRequests": 0, "skippedRequests": 0, "totalAssertions": 0, "passedAssertions": 0, "failedAssertions": 0, "totalTests": 0, "passedTests": 0, "failedTests": 0, "totalPreRequestTests": 0, "passedPreRequestTests": 0, "failedPreRequestTests": 0, "totalPostResponseTests": 0, "passedPostResponseTests": 0, "failedPostResponseTests": 0 }
+            }
+        ]"#;
+        std::fs::write(&success_json, success_content).expect("écriture rapport succès");
+        let handle = runner.start(runner::RunRequest {
+            collection_root: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/runner-probe"),
+            targets: vec![std::path::PathBuf::from("report"), success_json.clone()],
+            recursive: false,
+            env: None,
+            env_vars: Vec::new(),
+        });
+        model.run.active = Some(ActiveRun {
+            id: handle.id(),
+            target: std::path::PathBuf::from("green.bru"),
+            recursive: false,
+            handle: None,
+        });
+        let event = rx.recv().await.expect("événement");
+        let _ = std::fs::remove_file(&success_json);
+        update(&mut model, Message::RunFinished(event));
+
+        assert_eq!(model.history.len(), 2);
+        let entry = &model.history[0];
+        assert_eq!(entry.target, Path::new("green.bru"));
+        match &entry.outcome {
+            HistoryOutcome::Completed {
+                total,
+                failed,
+                duration_secs,
+            } => {
+                assert_eq!(*total, 1);
+                assert_eq!(*failed, 0);
+                assert!((*duration_secs - 0.042).abs() < 1e-6);
+            }
+            other => panic!("attendu Completed, obtenu {other:?}"),
+        }
+
+        // 3. Annulation (mode "sleep", cancel)
+        let pid_path =
+            std::env::temp_dir().join(format!("bruno-tui-test-cancel-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&pid_path);
+        let handle = runner.start(runner::RunRequest {
+            collection_root: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/runner-probe"),
+            targets: vec![std::path::PathBuf::from("sleep"), pid_path.clone()],
+            recursive: false,
+            env: None,
+            env_vars: Vec::new(),
+        });
+        let id = handle.id();
+        model.run.active = Some(ActiveRun {
+            id,
+            target: std::path::PathBuf::from("sleeping.bru"),
+            recursive: false,
+            handle: None,
+        });
+        for _ in 0..100 {
+            if pid_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        handle.cancel();
+        let event = rx.recv().await.expect("événement");
+        let _ = std::fs::remove_file(&pid_path);
+        update(&mut model, Message::RunFinished(event));
+
+        assert_eq!(model.history.len(), 3);
+        let entry = &model.history[0];
+        assert_eq!(entry.target, Path::new("sleeping.bru"));
+        assert_eq!(entry.outcome, HistoryOutcome::Cancelled);
+
+        // 4. Erreur de lancement (mode "none")
+        let handle = runner.start(runner::RunRequest {
+            collection_root: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/runner-probe"),
+            targets: vec![std::path::PathBuf::from("none")],
+            recursive: false,
+            env: None,
+            env_vars: Vec::new(),
+        });
+        model.run.active = Some(ActiveRun {
+            id: handle.id(),
+            target: std::path::PathBuf::from("failed.bru"),
+            recursive: false,
+            handle: None,
+        });
+        let event = rx.recv().await.expect("événement");
+        update(&mut model, Message::RunFinished(event));
+
+        assert_eq!(model.history.len(), 4);
+        let entry = &model.history[0];
+        assert_eq!(entry.target, Path::new("failed.bru"));
+        assert!(matches!(entry.outcome, HistoryOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn history_limit_truncates_oldest_after_201_runs() {
+        let mut model = loaded_model((100, 30));
+        for i in 0..201 {
+            let id = runner::RunId(i as u64);
+            let target = std::path::PathBuf::from(format!("target_{i}.bru"));
+            model.run.active = Some(ActiveRun {
+                id,
+                target: target.clone(),
+                recursive: false,
+                handle: None,
+            });
+            update(
+                &mut model,
+                Message::RunFinished(runner::RunEvent {
+                    id,
+                    outcome: runner::RunOutcome::Cancelled,
+                }),
+            );
+        }
+        assert_eq!(model.history.len(), 200);
+        assert_eq!(
+            model.history.front().unwrap().target,
+            Path::new("target_200.bru")
+        );
+        assert_eq!(
+            model.history.back().unwrap().target,
+            Path::new("target_1.bru")
+        );
     }
 
     // --- Recherche ---------------------------------------------------
