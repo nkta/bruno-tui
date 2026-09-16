@@ -4,14 +4,17 @@
 //! le runner) publient un `AppEvent` sur un unique canal tokio.
 
 use std::io;
+use std::path::PathBuf;
 use std::thread;
 
 use ratatui::crossterm::event::{self, Event};
 use tokio::sync::mpsc;
 
 use super::clipboard::ClipboardError;
+use super::model::SavedEdit;
 use crate::collection::{Collection, LoadError};
 use crate::runner;
+use crate::writer::WriteError;
 
 /// Taille du canal d'événements.
 pub const EVENT_BUFFER: usize = 256;
@@ -33,6 +36,11 @@ pub enum AppEvent {
     ClipboardResult {
         token: u64,
         result: Result<(), ClipboardError>,
+    },
+    /// Issue d'une écriture sur disque (`Command::SaveEdit`).
+    EditSaved {
+        path: PathBuf,
+        result: Result<SavedEdit, WriteError>,
     },
 }
 

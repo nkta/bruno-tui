@@ -13,7 +13,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{CollectionState, Focus, Model, RunFailure, StatusMessage};
+use super::model::{
+    CollectionState, EditMode, Focus, Model, PendingConfirm, RunFailure, StatusMessage,
+};
 use crate::collection::TreeNode;
 
 /// Largeur minimale du terminal.
@@ -113,6 +115,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     .block(panel(" Détail ", model.focus == Focus::Detail)),
                 areas.detail,
             );
+            render_insert_cursor(model, frame, areas.detail);
         }
     }
 
@@ -120,6 +123,39 @@ pub fn view(model: &Model, frame: &mut Frame) {
         Paragraph::new(status_line(model)).style(Style::new().add_modifier(Modifier::DIM)),
         areas.status,
     );
+}
+
+fn render_insert_cursor(model: &Model, frame: &mut Frame, detail_area: Rect) {
+    let Some(session) = &model.editing else {
+        return;
+    };
+    if !matches!(session.mode, EditMode::Insert { .. }) {
+        return;
+    }
+    let Some(TreeNode::Request(req)) = model.selected_node() else {
+        return;
+    };
+    if req.path != session.path {
+        return;
+    }
+    let Some((line_index, col_index)) = detail::cursor_position_in_detail(req, session) else {
+        return;
+    };
+    let inner_area = inner(detail_area);
+    if inner_area.width == 0 || inner_area.height == 0 {
+        return;
+    }
+    let scroll = model.detail_scroll as usize;
+    if line_index < scroll {
+        return;
+    }
+    let rel_y = line_index - scroll;
+    if rel_y >= inner_area.height as usize {
+        return;
+    }
+    let cursor_y = inner_area.y + rel_y as u16;
+    let cursor_x = inner_area.x + (col_index as u16).min(inner_area.width.saturating_sub(1));
+    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn title_line(model: &Model) -> Line<'static> {
@@ -158,10 +194,12 @@ fn run_status(model: &Model, node: &TreeNode) -> tree::RunStatus {
 /// Message décrivant l'exécution en cours, s'il y en a une.
 fn active_run_message(model: &Model) -> Option<String> {
     let active = model.run.active.as_ref()?;
-    Some(format!(
-        "Exécution de {} en cours…  Ctrl+X annuler",
-        active.target.display()
-    ))
+    let target = active.target.display();
+    if active.recursive {
+        Some(format!("Exécution récursive de {target}… (Ctrl+X annuler)"))
+    } else {
+        Some(format!("Exécution de {target}… (Ctrl+X annuler)"))
+    }
 }
 
 /// Message décrivant la dernière exécution n'ayant produit aucun résultat
@@ -190,10 +228,19 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::Copied => "Copié dans le presse-papiers".to_owned(),
         StatusMessage::ClipboardError(reason) => format!("Échec de la copie : {reason}"),
         StatusMessage::NoMatch => "Aucune correspondance".to_owned(),
+        StatusMessage::SaveError(reason) => format!("Échec de sauvegarde : {reason}"),
     }
 }
 
 fn status_line(model: &Model) -> String {
+    if let Some(confirm) = model.confirm {
+        return match confirm {
+            PendingConfirm::DiscardEdit => "Abandonner les modifications ? (y/n)".to_owned(),
+            PendingConfirm::QuitWithUnsavedEdit => {
+                "Quitter sans sauvegarder les modifications ? (y/n)".to_owned()
+            }
+        };
+    }
     if let Some(line) = search_input_line(model) {
         return line;
     }
@@ -205,6 +252,21 @@ fn status_line(model: &Model) -> String {
     }
     if let Some(message) = &model.last_status {
         return status_message_text(message);
+    }
+    if let Some(session) = &model.editing {
+        let mode_str = match &session.mode {
+            EditMode::Normal => "-- NORMAL --",
+            EditMode::Insert { .. } => "-- INSERT --",
+        };
+        let field_name = match (session.fields.get(session.cursor), model.selected_node()) {
+            (Some(field), Some(TreeNode::Request(req))) => field.display_name(&req.view),
+            _ => String::new(),
+        };
+        return if field_name.is_empty() {
+            mode_str.to_owned()
+        } else {
+            format!("{mode_str}  {field_name}")
+        };
     }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
@@ -475,5 +537,111 @@ mod tests {
             ratatui::style::Color::Reset,
             "sélection visible"
         );
+    }
+
+    #[test]
+    fn field_under_cursor_is_distinct_and_shows_pending_edit() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::StartEdit);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+
+        let detail_area = layout_for((100, 30)).expect("layout").detail;
+        let inner_area = inner(detail_area);
+        let buffer = terminal.backend().buffer();
+
+        // Ligne 3 du détail = ligne URL (inner_area.y + 3)
+        let url_row = inner_area.y + 3;
+        let url_cell = &buffer[(inner_area.x, url_row)];
+        assert!(
+            url_cell.modifier.contains(Modifier::REVERSED),
+            "le champ sous le curseur doit être visuellement distinct (REVERSED)"
+        );
+
+        // Édition de l'URL
+        update(&mut model, Message::EnterInsert);
+        update(&mut model, Message::InsertChar('!'));
+        update(&mut model, Message::LeaveInsert);
+
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let buffer = terminal.backend().buffer();
+        let row_text: String = (inner_area.x..inner_area.x + inner_area.width)
+            .map(|x| buffer[(x, url_row)].symbol())
+            .collect();
+        assert!(
+            row_text.contains("https://{{host}}/ping!"),
+            "la valeur affichée reflète l'édition en attente : {row_text}"
+        );
+    }
+
+    #[test]
+    fn status_line_and_confirm_states() {
+        let mut model = loaded_model((100, 30));
+
+        // 1. Aucune session : contenu habituel
+        let line = status_line(&model);
+        assert!(line.contains("q quitter"));
+        assert!(!line.contains("-- NORMAL --"));
+        assert!(!line.contains("-- INSERT --"));
+
+        // 2. Session ouverte en mode Normal
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::StartEdit);
+        let line = status_line(&model);
+        assert!(line.contains("-- NORMAL --"));
+        assert!(line.contains("Url"));
+
+        // 3. Session en mode Insert
+        update(&mut model, Message::EnterInsert);
+        let line = status_line(&model);
+        assert!(line.contains("-- INSERT --"));
+        assert!(line.contains("Url"));
+
+        // 4. Confirmation active (prioritaire)
+        update(&mut model, Message::LeaveInsert);
+        model.confirm = Some(PendingConfirm::DiscardEdit);
+        let line = status_line(&model);
+        assert!(line.contains("Abandonner les modifications ?"), "{line}");
+        assert!(!line.contains("-- NORMAL --"));
+
+        model.confirm = Some(PendingConfirm::QuitWithUnsavedEdit);
+        let line = status_line(&model);
+        assert!(line.contains("Quitter sans sauvegarder"), "{line}");
+    }
+
+    #[test]
+    fn insert_cursor_positioning_and_bounds() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::StartEdit);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+
+        // En mode Normal : pas de curseur positionné
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+
+        // En mode Insert : curseur positionné
+        update(&mut model, Message::EnterInsert);
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let cursor = terminal.get_cursor_position().expect("cursor position");
+
+        let detail_area = layout_for((100, 30)).expect("layout").detail;
+        let inner_area = inner(detail_area);
+        assert_eq!(cursor.y, inner_area.y + 3);
+        assert!(cursor.x >= inner_area.x);
+        assert!(cursor.x < inner_area.x + inner_area.width);
+
+        // Défilement lointain : curseur hors vue, ne panique pas
+        model.detail_scroll = 500;
+        terminal
+            .draw(|frame| view(&model, frame))
+            .expect("rendu sans panique");
     }
 }

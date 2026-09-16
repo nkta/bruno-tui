@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::collection::CollectionLoader;
 use crate::runner::BruRunner;
+use crate::writer::{self, RequestWriter};
 use clipboard::Clipboard;
 use event::{AppEvent, EVENT_BUFFER};
 use message::{Message, to_message};
@@ -38,7 +39,9 @@ use update::{Command, update};
 /// `bru_program` est le programme délégué pour `Command::StartRun` : `bru`
 /// en usage réel, le chemin d'un faux `bru` dans les tests. `clipboard` est
 /// de même injectable, pour les mêmes raisons (une fausse implémentation
-/// en test, `SystemClipboard` en usage réel).
+/// en test, `SystemClipboard` en usage réel). `writer` est également
+/// injectable (`BruWriter` en usage réel).
+#[allow(clippy::too_many_arguments)]
 pub async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     loader: Arc<dyn CollectionLoader>,
@@ -47,6 +50,7 @@ pub async fn run<B: Backend>(
     mut events: mpsc::Receiver<AppEvent>,
     bru_program: OsString,
     clipboard: Arc<dyn Clipboard>,
+    writer: Arc<dyn RequestWriter>,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
@@ -104,6 +108,60 @@ pub async fn run<B: Backend>(
                     tokio::task::spawn_blocking(move || {
                         let result = clipboard.set_text(text);
                         let _ = sender.blocking_send(AppEvent::ClipboardResult { token, result });
+                    });
+                }
+                Command::SaveEdit {
+                    path,
+                    ast,
+                    stamp,
+                    edits,
+                } => {
+                    let root = model
+                        .loaded()
+                        .map(|c| c.root.clone())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    let full_path = root.join(&path);
+                    let writer = Arc::clone(&writer);
+                    let sender = sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = writer
+                            .write_request(&full_path, &ast, &stamp, &edits)
+                            .and_then(|new_stamp| {
+                                let bytes = std::fs::read(&full_path).map_err(|source| {
+                                    writer::WriteError::Io {
+                                        path: full_path.clone(),
+                                        source,
+                                    }
+                                })?;
+                                let text = String::from_utf8(bytes).map_err(|source| {
+                                    writer::WriteError::Io {
+                                        path: full_path.clone(),
+                                        source: io::Error::new(io::ErrorKind::InvalidData, source),
+                                    }
+                                })?;
+                                let ast =
+                                    crate::collection::BruFile::parse(text).map_err(|source| {
+                                        writer::WriteError::Io {
+                                            path: full_path.clone(),
+                                            source: io::Error::new(
+                                                io::ErrorKind::InvalidData,
+                                                source,
+                                            ),
+                                        }
+                                    })?;
+                                let view = crate::collection::RequestView::from_ast(&ast).map_err(
+                                    |source| writer::WriteError::Io {
+                                        path: full_path.clone(),
+                                        source: io::Error::new(io::ErrorKind::InvalidData, source),
+                                    },
+                                )?;
+                                Ok(model::SavedEdit {
+                                    stamp: new_stamp,
+                                    ast,
+                                    view,
+                                })
+                            });
+                        let _ = sender.blocking_send(AppEvent::EditSaved { path, result });
                     });
                 }
             }
