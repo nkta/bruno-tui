@@ -74,6 +74,8 @@ pub fn inner(area: Rect) -> Rect {
 
 /// Dessine l'interface.
 pub fn view(model: &Model, frame: &mut Frame) {
+    frame.render_widget(Block::default().style(theme::BACKGROUND), frame.area());
+
     let Some(areas) = layout(frame.area()) else {
         frame.render_widget(
             Paragraph::new(TOO_SMALL).wrap(Wrap { trim: true }),
@@ -341,7 +343,7 @@ fn status_line(model: &Model) -> String {
 }
 
 pub(crate) fn panel(title: &'static str, focused: bool) -> Block<'static> {
-    let style = if focused { theme::FOCUS } else { Style::new() };
+    let style = if focused { theme::FOCUS } else { theme::BORDER };
     Block::bordered().title(title).border_style(style)
 }
 
@@ -915,5 +917,94 @@ mod tests {
         let screen = render(&model, 100, 30).join("\n");
         assert!(screen.contains("staging"), "{screen}");
         assert!(!screen.contains("Aucun environnement"), "{screen}");
+    }
+
+    /// La bordure d'un panneau porte `theme::BORDER` sans focus,
+    /// `theme::FOCUS` avec focus ; le titre du panneau, posé sur la même
+    /// ligne de bordure, doit porter la même couleur (`visual-theme`).
+    #[test]
+    fn panel_border_and_title_use_border_or_focus_color() {
+        let model = loaded_model((100, 30)); // focus = Tree
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let buffer = terminal.backend().buffer();
+        let areas = layout_for((100, 30)).expect("layout");
+        let focus_fg = theme::FOCUS.fg.expect("fg défini");
+        let border_fg = theme::BORDER.fg.expect("fg défini");
+
+        // Coin de bordure : arbre focalisé en FOCUS, détail non focalisé
+        // en BORDER.
+        assert_eq!(
+            buffer[(areas.tree.x, areas.tree.y)].fg,
+            focus_fg,
+            "bordure du panneau focalisé"
+        );
+        assert_eq!(
+            buffer[(areas.detail.x, areas.detail.y)].fg,
+            border_fg,
+            "bordure du panneau non focalisé"
+        );
+
+        // Titre : porte la même couleur que la bordure du même panneau.
+        assert_eq!(
+            buffer[(areas.tree.x + 1, areas.tree.y)].fg,
+            focus_fg,
+            "titre du panneau focalisé"
+        );
+        assert_eq!(
+            buffer[(areas.detail.x + 1, areas.detail.y)].fg,
+            border_fg,
+            "titre du panneau non focalisé"
+        );
+    }
+
+    /// Le fond d'application (`visual-theme`) est posé une seule fois au
+    /// début de `view()`, avant toute autre chose : il doit donc être
+    /// visible dans tous les états, pas seulement `Loaded`.
+    #[test]
+    fn background_is_applied_in_every_state() {
+        let bg = theme::BACKGROUND.bg.expect("fond défini");
+
+        // État chargé : titre, panneau, barre d'état.
+        let model = loaded_model((100, 30));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].bg, bg, "ligne de titre");
+        assert_eq!(buffer[(2, 5)].bg, bg, "panneau de l'arbre");
+        assert_eq!(buffer[(0, 29)].bg, bg, "barre d'état");
+
+        // État Loading.
+        let loading = Model::new("/somewhere/else".into(), (100, 30));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| view(&loading, frame)).expect("rendu");
+        assert_eq!(terminal.backend().buffer()[(0, 0)].bg, bg, "état Loading");
+
+        // État Failed.
+        let mut failed = Model::new("/somewhere/else".into(), (100, 30));
+        update(
+            &mut failed,
+            Message::CollectionLoaded(Err(LoadError::NotACollection {
+                path: "/somewhere/else".into(),
+            })),
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| view(&failed, frame)).expect("rendu");
+        assert_eq!(terminal.backend().buffer()[(0, 0)].bg, bg, "état Failed");
+
+        // Terminal trop petit.
+        let small = loaded_model((30, 8));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(30, 8)).expect("terminal");
+        terminal.draw(|frame| view(&small, frame)).expect("rendu");
+        assert_eq!(
+            terminal.backend().buffer()[(0, 0)].bg,
+            bg,
+            "terminal trop petit"
+        );
     }
 }

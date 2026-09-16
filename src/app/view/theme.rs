@@ -6,8 +6,13 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+/// Fond de l'application, posé une seule fois sur toute la zone du
+/// terminal au début de `view()`.
+pub const BACKGROUND: Style = Style::new().bg(Color::Rgb(18, 22, 40));
+/// Bordure d'un panneau qui n'a pas le focus.
+pub const BORDER: Style = Style::new().fg(Color::Rgb(90, 150, 110));
 /// Méthode HTTP (`GET`, `POST`, ...), dans l'arbre et le détail.
-pub const METHOD: Style = Style::new().fg(Color::Cyan);
+pub const METHOD: Style = Style::new().fg(Color::Rgb(120, 200, 150));
 /// Dernier résultat connu d'une requête : succès.
 pub const SUCCESS: Style = Style::new().fg(Color::Green);
 /// Dernier résultat connu d'une requête : échec.
@@ -19,14 +24,19 @@ pub const RUNNING: Style = Style::new().fg(Color::Blue);
 /// l'exécution.
 pub const LOAD_ERROR: Style = Style::new().fg(Color::Magenta);
 /// Bordure du panneau ayant le focus, distinct de [`RUNNING`].
-pub const FOCUS: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+pub const FOCUS: Style = Style::new()
+    .fg(Color::Rgb(224, 138, 60))
+    .add_modifier(Modifier::BOLD);
 /// Titre du nœud sélectionné, dans le panneau de détail : le plus mis en
 /// valeur des trois niveaux de hiérarchie du détail.
 pub const TITLE: Style = Style::new().add_modifier(Modifier::BOLD);
 /// Titre de section, dans le panneau de détail : second niveau, distinct
-/// du titre de nœud par la couleur en plus du soulignement.
+/// du titre de nœud par la couleur en plus du soulignement. Même teinte
+/// que [`METHOD`] : aucune exigence de `visual-theme` n'impose qu'elles
+/// soient distinctes, seule la distinction entre les trois niveaux du
+/// détail (titre/section/libellé) est exigée.
 pub const SECTION: Style = Style::new()
-    .fg(Color::Cyan)
+    .fg(Color::Rgb(120, 200, 150))
     .add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED));
 /// Libellé d'un champ (« Chemin », « Méthode », ...), dans le panneau de
 /// détail : atténué pour que la valeur qui le suit ressorte davantage.
@@ -52,7 +62,7 @@ mod tests {
     #[test]
     fn every_category_has_a_foreground_color_except_pure_text_styles() {
         for style in [
-            METHOD, SUCCESS, FAILURE, RUNNING, LOAD_ERROR, FOCUS, SECTION,
+            METHOD, SUCCESS, FAILURE, RUNNING, LOAD_ERROR, FOCUS, SECTION, BORDER,
         ] {
             assert!(style.fg.is_some());
         }
@@ -61,5 +71,10 @@ mod tests {
         for style in [TITLE, LABEL, EMPTY_MESSAGE] {
             assert!(style.fg.is_none());
         }
+    }
+
+    #[test]
+    fn background_has_a_color() {
+        assert!(BACKGROUND.bg.is_some());
     }
 }
