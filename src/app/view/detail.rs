@@ -14,7 +14,8 @@ use super::theme;
 use super::tree::file_name;
 use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
-    EditMode, EditSession, EditableField, Model, RequestOutcome, field_enabled, field_value,
+    EditMode, EditSession, EditableField, Model, RequestOutcome, ResponseTab, field_enabled,
+    field_value,
 };
 use crate::app::update::{response_selection_range, selection_range};
 use crate::collection::{
@@ -72,8 +73,17 @@ pub fn response_text(model: &Model) -> Text<'static> {
     let Some(outcome) = model.run.outcomes.get(&request.path) else {
         return Text::default();
     };
+    let mut lines = status_band(outcome);
+    lines.push(Line::default());
+    lines.push(tab_bar(model.response_tab));
+    lines.push(Line::default());
     let filter = model.filter.as_ref().filter(|f| f.target == request.path);
-    Text::from(result_lines(outcome, filter))
+    match model.response_tab {
+        ResponseTab::Body => lines.extend(body_tab_lines(outcome, filter)),
+        ResponseTab::Headers => lines.extend(headers_tab_lines(outcome)),
+        ResponseTab::Tests => lines.extend(tests_tab_lines(outcome)),
+    }
+    Text::from(lines)
 }
 
 fn title(text: String) -> Line<'static> {
@@ -443,11 +453,16 @@ fn push_checks<I: IntoIterator<Item = Line<'static>>>(
     }
 }
 
+/// Corps de réponse, sans filtre appliqué : une chaîne s'affiche telle
+/// quelle (pas de guillemets ajoutés), un objet ou un tableau est mis en
+/// forme indentée par le même moteur jq qui évalue un filtre explicite
+/// (`response-tabs`), plutôt que sérialisé sur une seule ligne compacte.
 fn body_lines(data: &Value) -> Vec<Line<'static>> {
-    if data.is_null() {
-        return vec![Line::raw("  aucun")];
-    }
-    let text = json_display(data);
+    let text = match data {
+        Value::Null => return vec![Line::raw("  aucun")],
+        Value::String(text) => text.clone(),
+        _ => crate::app::filter::pretty_print(data),
+    };
     text.split('\n')
         .map(|l| Line::raw(format!("  {l}")))
         .collect()
@@ -467,7 +482,9 @@ fn filter_line(draft: &str, editing: bool) -> Line<'static> {
 
 /// Section « Résultat » d'une requête exécutée : verdict, réponse, puis
 /// chaque assertion et test (y compris pré-requête et post-réponse).
-fn result_lines(outcome: &RequestOutcome, filter: Option<&FilterState>) -> Vec<Line<'static>> {
+/// Bandeau de statut, toujours visible en tête du panneau Réponse quel
+/// que soit l'onglet actif (`response-tabs`).
+fn status_band(outcome: &RequestOutcome) -> Vec<Line<'static>> {
     let result = &outcome.result;
     let mut lines = vec![section("Résultat")];
     lines.push(field(
@@ -493,17 +510,15 @@ fn result_lines(outcome: &RequestOutcome, filter: Option<&FilterState>) -> Vec<L
         "Temps de réponse",
         format!("{} ms", result.response.response_time),
     ));
+    lines
+}
 
-    lines.push(section("En-têtes de réponse"));
-    match &result.response.headers {
-        Some(headers) if !headers.is_empty() => {
-            for (key, value) in headers {
-                lines.push(Line::raw(format!("  {key}: {}", json_display(value))));
-            }
-        }
-        _ => lines.push(Line::raw("  aucun")),
-    }
-
+/// Contenu de l'onglet Corps : le résultat filtré s'il y en a un, sinon
+/// le corps brut. Pas de titre de section : la barre d'onglets (D2)
+/// porte déjà ce rôle.
+fn body_tab_lines(outcome: &RequestOutcome, filter: Option<&FilterState>) -> Vec<Line<'static>> {
+    let result = &outcome.result;
+    let mut lines = Vec::new();
     let filter_active = filter.is_some_and(|f| f.editing || f.applied.is_some());
     if let Some(f) = filter.filter(|_| filter_active) {
         lines.push(filter_line(&f.draft, f.editing));
@@ -528,10 +543,31 @@ fn result_lines(outcome: &RequestOutcome, filter: Option<&FilterState>) -> Vec<L
             }
         }
     } else {
-        lines.push(section("Corps de réponse"));
         lines.extend(body_lines(&result.response.data));
     }
+    lines
+}
 
+/// Contenu de l'onglet En-têtes. Pas de titre de section, comme
+/// [`body_tab_lines`].
+fn headers_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match &outcome.result.response.headers {
+        Some(headers) if !headers.is_empty() => {
+            for (key, value) in headers {
+                lines.push(Line::raw(format!("  {key}: {}", json_display(value))));
+            }
+        }
+        _ => lines.push(Line::raw("  aucun")),
+    }
+    lines
+}
+
+/// Contenu de l'onglet Tests : assertions et tests, chaque catégorie
+/// gardant son propre titre puisqu'un seul onglet en regroupe quatre.
+fn tests_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
+    let result = &outcome.result;
+    let mut lines = Vec::new();
     push_checks(
         &mut lines,
         "Assertions",
@@ -552,8 +588,30 @@ fn result_lines(outcome: &RequestOutcome, filter: Option<&FilterState>) -> Vec<L
         "Tests post-réponse",
         result.post_response_test_results.iter().map(test_line),
     );
-
     lines
+}
+
+/// Barre d'onglets du panneau Réponse : l'onglet actif en évidence,
+/// les autres atténués.
+fn tab_bar(active: ResponseTab) -> Line<'static> {
+    let tabs = [
+        (ResponseTab::Body, "Corps"),
+        (ResponseTab::Headers, "En-têtes"),
+        (ResponseTab::Tests, "Tests"),
+    ];
+    let mut spans = Vec::new();
+    for (index, (tab, label)) in tabs.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let style = if tab == active {
+            theme::SECTION
+        } else {
+            theme::LABEL
+        };
+        spans.push(Span::styled(label, style));
+    }
+    Line::from(spans)
 }
 
 fn meta_lines(lines: &mut Vec<Line<'static>>, meta: &FileMeta) {
@@ -882,6 +940,10 @@ mod tests {
         }
     }
 
+    /// Bandeau de statut (toujours visible) + onglet Tests actif, pour
+    /// couvrir en un seul texte le verdict/statut (`status_band`) et les
+    /// assertions/tests (`response-tabs` : ces derniers ne sont visibles
+    /// que quand l'onglet Tests est actif).
     fn result_detail(result: RequestResult) -> String {
         let mut model = loaded_model((100, 30));
         model.run.outcomes.insert(
@@ -892,6 +954,7 @@ mod tests {
             },
         );
         select(&mut model, "simple-get.bru");
+        model.response_tab = ResponseTab::Tests;
         plain(&response_text(&model))
     }
 
@@ -1021,9 +1084,11 @@ mod tests {
         let mut model = runner_probe_model();
         select(&mut model, "json.bru");
 
-        // Avant filtrage : la section s'appelle "Corps de réponse" et contient le JSON brut
+        // Avant filtrage : l'onglet Corps (actif par défaut) contient le
+        // JSON brut, mis en forme indentée (jq).
         let text_before = plain(&response_text(&model));
-        assert!(text_before.contains("Corps de réponse"), "{text_before}");
+        assert!(text_before.contains("\"a\": ["), "{text_before}");
+        assert!(text_before.contains("\"b\": null"), "{text_before}");
         assert!(!text_before.contains("Filtre :"), "{text_before}");
 
         // Applique le filtre `.a` sur json.bru
@@ -1046,13 +1111,14 @@ mod tests {
         assert!(screen.contains("1,"), "{screen}");
         assert!(screen.contains("2"), "{screen}");
         assert!(screen.contains("]"), "{screen}");
-        // "Corps de réponse" a été remplacé par le filtre
-        assert!(!screen.contains("Corps de réponse"), "{screen}");
+        // Le corps brut non filtré (avec sa clé "b") a été remplacé par le
+        // résultat du filtre, qui n'extrait que "a"
+        assert!(!screen.contains("\"b\": null"), "{screen}");
 
         // Si le filtre ne correspond pas au nœud affiché, la réponse reste inchangée
         model.filter.as_mut().unwrap().target = std::path::PathBuf::from("autre.bru");
         let text_other = plain(&response_text(&model));
-        assert!(text_other.contains("Corps de réponse"), "{text_other}");
+        assert!(text_other.contains("\"b\": null"), "{text_other}");
         assert!(!text_other.contains("Filtre :"), "{text_other}");
     }
 

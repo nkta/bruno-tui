@@ -9,8 +9,8 @@ use super::filter::{FilterState, evaluate};
 use super::message::Message;
 use super::model::{
     CollectionState, DetailSelection, EditMode, EditSession, EditableField, Exit, Focus,
-    HistoryEntry, HistoryOutcome, Model, StatusMessage, environment_name_at, field_enabled,
-    field_value, tree_node_at, visible_rows,
+    HistoryEntry, HistoryOutcome, Model, ResponseTab, StatusMessage, environment_name_at,
+    field_enabled, field_value, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::view::detail::{plain_lines, response_plain_lines};
@@ -348,7 +348,11 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                         scroll_detail(model, navigation);
                     }
                 }
-                Focus::Response => scroll_response(model, navigation),
+                Focus::Response => match navigation {
+                    Message::Left => previous_response_tab(model),
+                    Message::Right => next_response_tab(model),
+                    other => scroll_response(model, other),
+                },
                 Focus::Diagnostics => navigate_diagnostics(model, navigation),
                 Focus::History => navigate_history(model, navigation),
                 Focus::EnvironmentPicker => navigate_environment_picker(model, navigation),
@@ -516,6 +520,7 @@ fn clear_detail_view_state(model: &mut Model) {
     model.response_scroll = 0;
     model.response_selection = None;
     model.response_match = None;
+    model.response_tab = ResponseTab::Body;
     model.editing = None;
 }
 
@@ -1061,6 +1066,26 @@ fn scroll_response(model: &mut Model, message: Message) {
     };
 }
 
+/// Réinitialise l'état d'affichage propre à un onglet de la réponse
+/// (défilement, sélection, mise en évidence de recherche) : appelé à
+/// chaque changement d'onglet, comme `clear_detail_view_state` l'est à
+/// chaque changement de sélection (`response-tabs`).
+fn reset_response_tab_view_state(model: &mut Model) {
+    model.response_scroll = 0;
+    model.response_match = None;
+    model.response_selection = None;
+}
+
+fn previous_response_tab(model: &mut Model) {
+    model.response_tab = model.response_tab.previous();
+    reset_response_tab_view_state(model);
+}
+
+fn next_response_tab(model: &mut Model) {
+    model.response_tab = model.response_tab.next();
+    reset_response_tab_view_state(model);
+}
+
 /// Hauteur utile du corps de l'écran (pour les panneaux plein corps).
 fn body_height(model: &Model) -> usize {
     layout_for(model.size).map_or(1, |areas| usize::from(inner(areas.body).height).max(1))
@@ -1366,6 +1391,8 @@ fn open_filter(model: &mut Model) {
     } else {
         model.filter = Some(FilterState::new(target));
     }
+    // Le résultat du filtre s'affiche dans l'onglet Corps (`response-tabs`).
+    model.response_tab = ResponseTab::Body;
 }
 
 /// `Entrée` en saisie de filtre : un filtre vide équivaut à une annulation,
@@ -2629,10 +2656,10 @@ mod tests {
         update(&mut model, Message::NextFocus); // Réponse
         assert_eq!(model.focus, Focus::Response);
         let detail_scroll_before = model.detail_scroll;
-        let expected_line = response_line_index_containing(&model, "[1,2]");
+        let expected_line = response_line_index_containing(&model, "\"a\": [");
 
         update(&mut model, Message::StartSearch);
-        for c in "[1,2]".chars() {
+        for c in "\"a\": [".chars() {
             update(&mut model, Message::SearchInput(c));
         }
         update(&mut model, Message::ConfirmSearch);
@@ -2648,7 +2675,7 @@ mod tests {
         let (line, range) = model.response_match.clone().expect("correspondance");
         assert_eq!(line, expected_line);
         let lines = response_plain_lines(&model);
-        assert_eq!(&lines[line as usize][range], "[1,2]");
+        assert_eq!(&lines[line as usize][range], "\"a\": [");
 
         // Le défilement et la mise en évidence du détail restent
         // inchangés par une recherche dans la réponse.
@@ -3049,6 +3076,92 @@ mod tests {
         assert_eq!(model.focus, Focus::Response);
         update(&mut model, Message::NextFocus);
         assert_eq!(model.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn response_tab_cycles_forward_with_right() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        assert_eq!(model.focus, Focus::Response);
+        assert_eq!(model.response_tab, ResponseTab::Body);
+
+        update(&mut model, Message::Right);
+        assert_eq!(model.response_tab, ResponseTab::Headers);
+        update(&mut model, Message::Right);
+        assert_eq!(model.response_tab, ResponseTab::Tests);
+        // Cycle circulaire : un troisième Right revient à Corps.
+        update(&mut model, Message::Right);
+        assert_eq!(model.response_tab, ResponseTab::Body);
+    }
+
+    #[test]
+    fn response_tab_cycles_backward_with_left() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        assert_eq!(model.response_tab, ResponseTab::Body);
+
+        // Cycle circulaire vers l'arrière : depuis Corps, Left va à Tests.
+        update(&mut model, Message::Left);
+        assert_eq!(model.response_tab, ResponseTab::Tests);
+    }
+
+    #[test]
+    fn changing_selection_resets_the_active_response_tab() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        update(&mut model, Message::Right);
+        update(&mut model, Message::Right);
+        assert_eq!(model.response_tab, ResponseTab::Tests);
+
+        update(&mut model, Message::FocusTree);
+        update(&mut model, Message::Down);
+        assert_eq!(model.response_tab, ResponseTab::Body);
+    }
+
+    #[test]
+    fn opening_the_filter_switches_to_the_body_tab() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        update(&mut model, Message::Right); // En-têtes
+        assert_eq!(model.response_tab, ResponseTab::Headers);
+
+        update(&mut model, Message::OpenFilter);
+        assert_eq!(model.response_tab, ResponseTab::Body);
+    }
+
+    #[test]
+    fn changing_response_tab_resets_scroll_match_and_selection() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        model.response_scroll = 2;
+        model.response_match = Some((2, 0..1));
+        model.response_selection = Some(DetailSelection { anchor: 2 });
+
+        update(&mut model, Message::Right);
+
+        assert_eq!(model.response_scroll, 0);
+        assert!(model.response_match.is_none());
+        assert!(model.response_selection.is_none());
     }
 
     #[test]

@@ -232,6 +232,13 @@ async fn launching_a_request_shows_its_result() {
     // marge suffit très largement, sans risque de fausse détection de
     // blocage (contrairement à `slow-report`, testé séparément).
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // Le message d'assertion est dans l'onglet Tests du panneau Réponse
+    // (`response-tabs`), pas dans l'onglet Corps actif par défaut :
+    // Tab, Tab pour y porter le focus, puis deux fois → pour l'atteindre.
+    sender.send(key(KeyCode::Tab)).await.expect("envoi");
+    sender.send(key(KeyCode::Tab)).await.expect("envoi");
+    sender.send(key(KeyCode::Right)).await.expect("envoi");
+    sender.send(key(KeyCode::Right)).await.expect("envoi");
     sender.send(key(KeyCode::Char('q'))).await.expect("envoi");
 
     let (terminal, exit) = timeout(Duration::from_secs(5), handle)

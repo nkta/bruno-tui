@@ -37,6 +37,33 @@ pub enum Focus {
     EnvironmentPicker,
 }
 
+/// Onglet actif du panneau Réponse (`response-tabs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResponseTab {
+    #[default]
+    Body,
+    Headers,
+    Tests,
+}
+
+impl ResponseTab {
+    pub fn next(self) -> Self {
+        match self {
+            ResponseTab::Body => ResponseTab::Headers,
+            ResponseTab::Headers => ResponseTab::Tests,
+            ResponseTab::Tests => ResponseTab::Body,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            ResponseTab::Body => ResponseTab::Tests,
+            ResponseTab::Headers => ResponseTab::Body,
+            ResponseTab::Tests => ResponseTab::Headers,
+        }
+    }
+}
+
 /// Nombre maximal d'entrées conservées dans le journal d'historique.
 pub const HISTORY_LIMIT: usize = 200;
 
@@ -364,6 +391,8 @@ pub struct Model {
     pub detail_scroll: u16,
     /// Première ligne affichée de la réponse.
     pub response_scroll: u16,
+    /// Onglet actif du panneau Réponse.
+    pub response_tab: ResponseTab,
     /// Taille du terminal (colonnes, lignes).
     pub size: (u16, u16),
     /// `Some` : la boucle doit s'arrêter.
@@ -429,6 +458,7 @@ impl Model {
             history: VecDeque::new(),
             detail_scroll: 0,
             response_scroll: 0,
+            response_tab: ResponseTab::Body,
             size,
             exit: None,
             run: RunState::default(),

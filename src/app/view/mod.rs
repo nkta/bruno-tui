@@ -877,6 +877,57 @@ mod tests {
     }
 
     #[test]
+    fn response_status_band_stays_visible_across_tabs() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+
+        for tab in [
+            crate::app::model::ResponseTab::Body,
+            crate::app::model::ResponseTab::Headers,
+            crate::app::model::ResponseTab::Tests,
+        ] {
+            model.response_tab = tab;
+            let screen = render(&model, 100, 30).join("\n");
+            assert!(screen.contains("Résultat"), "{tab:?} :\n{screen}");
+            assert!(screen.contains("Verdict"), "{tab:?} :\n{screen}");
+            assert!(screen.contains("Statut : 200"), "{tab:?} :\n{screen}");
+        }
+    }
+
+    #[test]
+    fn response_tab_content_is_shown_only_when_active() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+
+        model.response_tab = crate::app::model::ResponseTab::Body;
+        let body_screen = render(&model, 100, 30).join("\n");
+        assert!(body_screen.contains("\"a\": ["), "{body_screen}");
+        assert!(!body_screen.contains("content-type"), "{body_screen}");
+        assert!(!body_screen.contains("body a"), "{body_screen}");
+
+        model.response_tab = crate::app::model::ResponseTab::Headers;
+        let headers_screen = render(&model, 100, 30).join("\n");
+        assert!(headers_screen.contains("content-type"), "{headers_screen}");
+        assert!(!headers_screen.contains("\"a\": ["), "{headers_screen}");
+        assert!(!headers_screen.contains("body a"), "{headers_screen}");
+
+        model.response_tab = crate::app::model::ResponseTab::Tests;
+        let tests_screen = render(&model, 100, 30).join("\n");
+        assert!(tests_screen.contains("body a"), "{tests_screen}");
+        assert!(tests_screen.contains("res.status"), "{tests_screen}");
+        assert!(!tests_screen.contains("\"a\": ["), "{tests_screen}");
+        assert!(!tests_screen.contains("content-type"), "{tests_screen}");
+    }
+
+    #[test]
     fn render_diagnostics_and_history_panels_with_and_without_entries() {
         // 1. Diagnostics avec entrées (sur parser-cases)
         let mut model = loaded_model((100, 30));

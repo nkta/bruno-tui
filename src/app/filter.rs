@@ -94,12 +94,7 @@ pub fn evaluate(filter_src: &str, data: &serde_json::Value) -> FilterResult {
         jaq_core::Vars::new([]),
     );
 
-    let pp = jaq_json::write::Pp {
-        indent: Some("  ".to_string()),
-        sep_space: true,
-        sort_keys: false,
-        ..Default::default()
-    };
+    let pp = pretty_print_config();
 
     let mut outputs = Vec::new();
     for item in filter.id.run((ctx, input)) {
@@ -124,6 +119,33 @@ pub fn evaluate(filter_src: &str, data: &serde_json::Value) -> FilterResult {
     }
 
     FilterResult::Output(outputs)
+}
+
+fn pretty_print_config() -> jaq_json::write::Pp {
+    jaq_json::write::Pp {
+        indent: Some("  ".to_string()),
+        sep_space: true,
+        sort_keys: false,
+        ..Default::default()
+    }
+}
+
+/// Met en forme lisible une valeur JSON structurée (objet ou tableau),
+/// avec le même moteur et la même indentation que l'évaluation d'un
+/// filtre (`evaluate`), pour l'affichage du corps de réponse par
+/// défaut, sans filtre actif (`response-tabs`). Retombe sur la
+/// sérialisation compacte de `serde_json` si la valeur ne peut pas être
+/// convertie ou mise en forme — ne devrait pas arriver en pratique pour
+/// une valeur déjà désérialisée par `bru-runner`.
+pub fn pretty_print(data: &serde_json::Value) -> String {
+    let Ok(val) = serde_json::from_value::<jaq_json::Val>(data.clone()) else {
+        return data.to_string();
+    };
+    let mut buf = Vec::new();
+    if jaq_json::write::write(&mut buf, &pretty_print_config(), 0, &val).is_err() {
+        return data.to_string();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 fn format_load_errors(errors: jaq_core::load::Errors<&str, ()>) -> String {
