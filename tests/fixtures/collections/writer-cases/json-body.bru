@@ -1,0 +1,21 @@
+future:thing {
+  mode: experimental
+}
+
+meta {
+  name: json-body
+  type: http
+  seq: 4
+}
+
+post {
+  url: https://{{host}}/items
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "a": 1
+  }
+}

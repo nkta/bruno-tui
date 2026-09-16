@@ -1,0 +1,15 @@
+meta {
+  name: multiline-target
+  type: http
+  seq: 3
+}
+
+get {
+  url: https://{{host}}/search
+  body: none
+  auth: none
+}
+
+params:query {
+  q: short
+}

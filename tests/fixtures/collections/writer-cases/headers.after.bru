@@ -1,0 +1,17 @@
+meta {
+  name: headers
+  type: http
+  seq: 2
+}
+
+get {
+  url: https://{{host}}/items
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+  X-Trace: xyz789
+  ~X-Debug: 1
+}
