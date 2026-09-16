@@ -72,8 +72,21 @@ fn spawn_run(
     sender: mpsc::Sender<AppEvent>,
     events: mpsc::Receiver<AppEvent>,
 ) -> tokio::task::JoinHandle<RunResult> {
+    spawn_run_sized(loader, sender, events, 100)
+}
+
+/// Comme `spawn_run`, avec une largeur de terminal choisie : le titre
+/// affiche le chemin absolu de la fixture sans repli à la ligne, dont la
+/// longueur dépend de l'emplacement du dépôt (utile pour les tests qui
+/// inspectent la première image, avant tout redimensionnement).
+fn spawn_run_sized(
+    loader: Arc<dyn CollectionLoader>,
+    sender: mpsc::Sender<AppEvent>,
+    events: mpsc::Receiver<AppEvent>,
+    width: u16,
+) -> tokio::task::JoinHandle<RunResult> {
     tokio::spawn(async move {
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        let mut terminal = Terminal::new(TestBackend::new(width, 30)).expect("terminal");
         let result = run(&mut terminal, loader, fixture(), sender, events).await;
         let Ok(exit) = result;
         (terminal, exit)
@@ -84,7 +97,10 @@ fn spawn_run(
 async fn first_frame_shows_loading_then_q_quits() {
     let (loader, open, _) = GateLoader::new();
     let (sender, events) = mpsc::channel(EVENT_BUFFER);
-    let handle = spawn_run(loader, sender.clone(), events);
+    // Largeur calculée sur le chemin réel de la fixture : le titre ne
+    // replie pas à la ligne, sa longueur dépend de l'emplacement du dépôt.
+    let width = (fixture().display().to_string().len() + 30) as u16;
+    let handle = spawn_run_sized(loader, sender.clone(), events, width);
 
     sender.send(key(KeyCode::Char('q'))).await.expect("envoi");
     let (terminal, exit) = timeout(Duration::from_secs(5), handle)
