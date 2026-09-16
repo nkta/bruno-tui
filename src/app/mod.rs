@@ -12,6 +12,7 @@ pub mod model;
 pub mod update;
 pub mod view;
 
+use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,24 +22,41 @@ use ratatui::backend::Backend;
 use tokio::sync::mpsc;
 
 use crate::collection::CollectionLoader;
-use event::AppEvent;
-use message::to_message;
+use crate::runner::BruRunner;
+use event::{AppEvent, EVENT_BUFFER};
+use message::{Message, to_message};
 use model::{Exit, Model};
-use update::update;
+use update::{Command, update};
 
 /// Fait tourner l'interface jusqu'à la demande de sortie.
 ///
 /// Le chargement est lancé par `spawn_blocking` ; `events` reçoit aussi
 /// les événements du terminal, publiés par l'appelant sur `sender`.
+/// `bru_program` est le programme délégué pour `Command::StartRun` : `bru`
+/// en usage réel, le chemin d'un faux `bru` dans les tests.
 pub async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     loader: Arc<dyn CollectionLoader>,
     source: PathBuf,
     sender: mpsc::Sender<AppEvent>,
     mut events: mpsc::Receiver<AppEvent>,
+    bru_program: OsString,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
+
+    let (run_tx, mut run_rx) = mpsc::channel(EVENT_BUFFER);
+    let runner = BruRunner::with_program(bru_program, run_tx);
+    {
+        let sender = sender.clone();
+        tokio::spawn(async move {
+            while let Some(event) = run_rx.recv().await {
+                if sender.send(AppEvent::Run(event)).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
 
     tokio::task::spawn_blocking(move || {
         let result = loader.load(&source);
@@ -55,7 +73,20 @@ pub async fn run<B: Backend>(
             )));
         };
         if let Some(message) = to_message(event) {
-            update(&mut model, message);
+            let command = update(&mut model, message);
+            if let Command::StartRun { request, target } = command {
+                let recursive = request.recursive;
+                let handle = runner.start(request);
+                update(
+                    &mut model,
+                    Message::RunStarted {
+                        id: handle.id(),
+                        target,
+                        recursive,
+                        handle,
+                    },
+                );
+            }
         }
         if let Some(exit) = model.exit.take() {
             return Ok(exit);

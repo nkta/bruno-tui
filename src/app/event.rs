@@ -10,6 +10,7 @@ use ratatui::crossterm::event::{self, Event};
 use tokio::sync::mpsc;
 
 use crate::collection::{Collection, LoadError};
+use crate::runner;
 
 /// Taille du canal d'événements.
 pub const EVENT_BUFFER: usize = 256;
@@ -23,6 +24,8 @@ pub enum AppEvent {
     TerminalClosed(io::Error),
     /// Fin du chargement de la collection.
     CollectionLoaded(Result<Collection, LoadError>),
+    /// Issue d'une exécution `bru run`.
+    Run(runner::RunEvent),
 }
 
 /// Lance le thread qui lit le terminal et publie ses événements.

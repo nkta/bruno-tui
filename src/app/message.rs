@@ -6,10 +6,13 @@
 
 use std::io;
 
+use std::path::PathBuf;
+
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::event::AppEvent;
 use crate::collection::{Collection, LoadError};
+use crate::runner::{RunEvent, RunHandle, RunId};
 
 #[derive(Debug)]
 pub enum Message {
@@ -36,6 +39,19 @@ pub enum Message {
     },
     CollectionLoaded(Result<Collection, LoadError>),
     TerminalClosed(io::Error),
+    /// `r`, hors navigation : agit sur `model.tree.selected`.
+    RunSelected,
+    /// `Ctrl+X`.
+    CancelRun,
+    /// Renvoyé par la boucle après avoir exécuté `Command::StartRun`.
+    RunStarted {
+        id: RunId,
+        target: PathBuf,
+        recursive: bool,
+        handle: RunHandle,
+    },
+    /// Issue reçue sur le canal d'événements.
+    RunFinished(RunEvent),
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -46,6 +62,7 @@ pub fn to_message(event: AppEvent) -> Option<Message> {
         AppEvent::Terminal(_) => None,
         AppEvent::TerminalClosed(error) => Some(Message::TerminalClosed(error)),
         AppEvent::CollectionLoaded(result) => Some(Message::CollectionLoaded(result)),
+        AppEvent::Run(event) => Some(Message::RunFinished(event)),
     }
 }
 
@@ -54,7 +71,11 @@ fn key_message(key: KeyEvent) -> Option<Message> {
         return None;
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
-        return (key.code == KeyCode::Char('c')).then_some(Message::ForceQuit);
+        return match key.code {
+            KeyCode::Char('c') => Some(Message::ForceQuit),
+            KeyCode::Char('x') => Some(Message::CancelRun),
+            _ => None,
+        };
     }
     if key.modifiers.contains(KeyModifiers::ALT) {
         return None;
@@ -71,6 +92,7 @@ fn key_message(key: KeyEvent) -> Option<Message> {
         KeyCode::Tab => Message::NextFocus,
         KeyCode::Esc => Message::FocusTree,
         KeyCode::Char('q') => Message::Quit,
+        KeyCode::Char('r') => Message::RunSelected,
         _ => return None,
     };
     Some(message)
@@ -117,7 +139,9 @@ mod tests {
             (KeyCode::Tab, none, "NextFocus"),
             (KeyCode::Esc, none, "FocusTree"),
             (KeyCode::Char('q'), none, "Quit"),
+            (KeyCode::Char('r'), none, "RunSelected"),
             (KeyCode::Char('c'), KeyModifiers::CONTROL, "ForceQuit"),
+            (KeyCode::Char('x'), KeyModifiers::CONTROL, "CancelRun"),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(
@@ -134,6 +158,9 @@ mod tests {
         assert!(name(key(KeyCode::Char('q'), KeyModifiers::CONTROL)).is_none());
         assert!(name(key(KeyCode::Char('j'), KeyModifiers::ALT)).is_none());
         assert!(name(key(KeyCode::F(1), KeyModifiers::NONE)).is_none());
+        // Toute autre combinaison `Ctrl+<lettre>` reste ignorée.
+        assert!(name(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).is_none());
+        assert!(name(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).is_none());
         let mut release = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         assert!(to_message(AppEvent::Terminal(Event::Key(release))).is_none());
@@ -158,6 +185,20 @@ mod tests {
         assert!(matches!(
             to_message(loaded),
             Some(Message::CollectionLoaded(Err(_)))
+        ));
+
+        // Aucun `bru` réel nécessaire : un `RunOutcome::Cancelled` suffit à
+        // construire l'événement sans I/O.
+        let run = AppEvent::Run(RunEvent {
+            id: RunId(1),
+            outcome: crate::runner::RunOutcome::Cancelled,
+        });
+        assert!(matches!(
+            to_message(run),
+            Some(Message::RunFinished(RunEvent {
+                id: RunId(1),
+                outcome: crate::runner::RunOutcome::Cancelled,
+            }))
         ));
     }
 }

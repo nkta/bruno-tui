@@ -6,18 +6,27 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
+use serde_json::Value;
 
 use super::tree::file_name;
-use crate::app::model::Model;
+use crate::app::model::{Model, RequestOutcome};
 use crate::collection::{
     AuthMode, BodyContent, BodyKind, ErrorNode, FileMeta, FolderNode, KeyValue, RequestNode,
     TreeNode,
 };
+use crate::runner::report::{AssertionResult, ResponseStatus, ResultStatus, TestResult};
 
 /// Texte du détail du nœud sélectionné ; vide sans sélection.
 pub fn detail_text(model: &Model) -> Text<'static> {
     match model.selected_node() {
-        Some(TreeNode::Request(request)) => request_text(request),
+        Some(TreeNode::Request(request)) => {
+            let mut text = request_text(request);
+            if let Some(outcome) = model.run.outcomes.get(&request.path) {
+                text.lines.push(Line::default());
+                text.lines.extend(result_lines(outcome));
+            }
+            text
+        }
         Some(TreeNode::Folder(folder)) => folder_text(folder),
         Some(TreeNode::Error(error)) => error_text(error),
         None => Text::default(),
@@ -167,6 +176,140 @@ fn request_text(request: &RequestNode) -> Text<'static> {
         entries(&mut lines, &view.assertions);
     }
     Text::from(lines)
+}
+
+/// Représentation d'une valeur JSON pour l'affichage : sans guillemets pour
+/// une chaîne, telle quelle sinon.
+fn json_display(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn status_word(status: &ResultStatus) -> String {
+    match status {
+        ResultStatus::Pass => "succès".to_owned(),
+        ResultStatus::Fail => "échec".to_owned(),
+        ResultStatus::Error => "erreur".to_owned(),
+        ResultStatus::Skipped => "ignoré".to_owned(),
+        ResultStatus::Other(other) => other.clone(),
+    }
+}
+
+fn assertion_line(assertion: &AssertionResult) -> Line<'static> {
+    let mut text = format!(
+        "  {} {} {} : {}",
+        assertion.lhs_expr,
+        assertion.operator,
+        assertion.rhs_expr,
+        status_word(&assertion.status)
+    );
+    if let Some(error) = &assertion.error {
+        text.push_str(&format!(" — {error}"));
+    }
+    Line::raw(text)
+}
+
+fn test_line(test: &TestResult) -> Line<'static> {
+    let mut text = format!("  {} : {}", test.description, status_word(&test.status));
+    if let Some(error) = &test.error {
+        text.push_str(&format!(" — {error}"));
+    }
+    Line::raw(text)
+}
+
+/// Ajoute une sous-section titrée ; « aucun » si `items` est vide.
+fn push_checks<I: IntoIterator<Item = Line<'static>>>(
+    lines: &mut Vec<Line<'static>>,
+    title: &str,
+    items: I,
+) {
+    lines.push(section(title));
+    let mut any = false;
+    for line in items {
+        lines.push(line);
+        any = true;
+    }
+    if !any {
+        lines.push(Line::raw("  aucun"));
+    }
+}
+
+fn body_lines(data: &Value) -> Vec<Line<'static>> {
+    if data.is_null() {
+        return vec![Line::raw("  aucun")];
+    }
+    let text = json_display(data);
+    text.split('\n')
+        .map(|l| Line::raw(format!("  {l}")))
+        .collect()
+}
+
+/// Section « Résultat » d'une requête exécutée : verdict, réponse, puis
+/// chaque assertion et test (y compris pré-requête et post-réponse).
+fn result_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
+    let result = &outcome.result;
+    let mut lines = vec![section("Résultat")];
+    lines.push(field(
+        "Verdict",
+        if result.is_failure() {
+            "échec"
+        } else {
+            "réussi"
+        },
+    ));
+    match &result.response.status {
+        ResponseStatus::Http(code) => lines.push(field("Statut", code.to_string())),
+        ResponseStatus::Error => {
+            lines.push(field("Statut", "aucune réponse"));
+            if let Some(error) = &result.error {
+                lines.push(field("Erreur", error.clone()));
+            }
+        }
+        ResponseStatus::Skipped => lines.push(field("Statut", "ignorée")),
+        ResponseStatus::Other(other) => lines.push(field("Statut", other.clone())),
+    }
+    lines.push(field(
+        "Temps de réponse",
+        format!("{} ms", result.response.response_time),
+    ));
+
+    lines.push(section("En-têtes de réponse"));
+    match &result.response.headers {
+        Some(headers) if !headers.is_empty() => {
+            for (key, value) in headers {
+                lines.push(Line::raw(format!("  {key}: {}", json_display(value))));
+            }
+        }
+        _ => lines.push(Line::raw("  aucun")),
+    }
+
+    lines.push(section("Corps de réponse"));
+    lines.extend(body_lines(&result.response.data));
+
+    push_checks(
+        &mut lines,
+        "Assertions",
+        result.assertion_results.iter().map(assertion_line),
+    );
+    push_checks(
+        &mut lines,
+        "Tests",
+        result.test_results.iter().map(test_line),
+    );
+    push_checks(
+        &mut lines,
+        "Tests pré-requête",
+        result.pre_request_test_results.iter().map(test_line),
+    );
+    push_checks(
+        &mut lines,
+        "Tests post-réponse",
+        result.post_response_test_results.iter().map(test_line),
+    );
+
+    lines
 }
 
 fn meta_lines(lines: &mut Vec<Line<'static>>, meta: &FileMeta) {
@@ -320,5 +463,148 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("En-têtes\n  aucun"), "{text}");
+    }
+
+    use crate::runner::report::{RequestFile, RequestInfo, RequestResult, ResponseInfo};
+
+    fn base_result() -> RequestResult {
+        RequestResult {
+            name: "ping".to_owned(),
+            path: "simple-get".to_owned(),
+            test: RequestFile {
+                filename: "simple-get.bru".to_owned(),
+            },
+            request: RequestInfo {
+                method: "GET".into(),
+                url: "https://x/ping".into(),
+                headers: Default::default(),
+            },
+            response: ResponseInfo {
+                status: ResponseStatus::Http(200),
+                status_text: Some("OK".into()),
+                headers: Some(Default::default()),
+                data: Value::Null,
+                url: Some("https://x/ping".into()),
+                response_time: 12,
+            },
+            error: None,
+            status: ResultStatus::Pass,
+            skipped: false,
+            assertion_results: Vec::new(),
+            test_results: Vec::new(),
+            pre_request_test_results: Vec::new(),
+            post_response_test_results: Vec::new(),
+            should_stop_runner_execution: false,
+            run_duration: 0.01,
+            iteration_index: 0,
+        }
+    }
+
+    fn result_detail(result: RequestResult) -> String {
+        let mut model = loaded_model((100, 30));
+        model.run.outcomes.insert(
+            "simple-get.bru".into(),
+            RequestOutcome {
+                result,
+                exit_code: Some(0),
+            },
+        );
+        select(&mut model, "simple-get.bru");
+        plain(&detail_text(&model))
+    }
+
+    #[test]
+    fn result_section_for_a_fully_successful_request() {
+        let text = result_detail(RequestResult {
+            response: ResponseInfo {
+                data: serde_json::json!({"a": [1, 2]}),
+                ..base_result().response
+            },
+            ..base_result()
+        });
+        assert!(text.contains("Résultat"), "{text}");
+        assert!(text.contains("Verdict : réussi"), "{text}");
+        assert!(text.contains("Statut : 200"), "{text}");
+        assert!(text.contains("Temps de réponse : 12 ms"), "{text}");
+    }
+
+    #[test]
+    fn result_section_for_a_failing_assertion() {
+        let text = result_detail(RequestResult {
+            status: ResultStatus::Pass,
+            assertion_results: vec![AssertionResult {
+                uid: "1".into(),
+                lhs_expr: "res.status".into(),
+                rhs_expr: "eq 404".into(),
+                rhs_operand: "404".into(),
+                operator: "eq".into(),
+                status: ResultStatus::Fail,
+                error: Some("expected 200 to equal 404".into()),
+            }],
+            ..base_result()
+        });
+        assert!(text.contains("Verdict : échec"), "{text}");
+        assert!(text.contains("expected 200 to equal 404"), "{text}");
+    }
+
+    #[test]
+    fn result_section_for_a_failing_post_response_test() {
+        let text = result_detail(RequestResult {
+            post_response_test_results: vec![TestResult {
+                uid: "1".into(),
+                description: "post ko".into(),
+                status: ResultStatus::Fail,
+                error: Some("expected 2 to equal 3".into()),
+                actual: None,
+                expected: None,
+            }],
+            ..base_result()
+        });
+        assert!(text.contains("Verdict : échec"), "{text}");
+        assert!(text.contains("post ko"), "{text}");
+        assert!(text.contains("expected 2 to equal 3"), "{text}");
+    }
+
+    #[test]
+    fn result_section_for_no_response() {
+        let text = result_detail(RequestResult {
+            status: ResultStatus::Error,
+            error: Some("connect ECONNREFUSED 127.0.0.1:18799".into()),
+            response: ResponseInfo {
+                status: ResponseStatus::Error,
+                status_text: None,
+                headers: None,
+                data: Value::Null,
+                url: None,
+                response_time: 0,
+            },
+            ..base_result()
+        });
+        assert!(text.contains("Verdict : échec"), "{text}");
+        assert!(text.contains("Statut : aucune réponse"), "{text}");
+        assert!(
+            text.contains("connect ECONNREFUSED 127.0.0.1:18799"),
+            "{text}"
+        );
+        assert!(!text.contains("Statut : 200"), "{text}");
+    }
+
+    #[test]
+    fn result_section_for_a_skipped_request() {
+        let text = result_detail(RequestResult {
+            status: ResultStatus::Skipped,
+            skipped: true,
+            response: ResponseInfo {
+                status: ResponseStatus::Skipped,
+                status_text: Some("request skipped via pre-request script".into()),
+                headers: None,
+                data: Value::Null,
+                url: None,
+                response_time: 0,
+            },
+            ..base_result()
+        });
+        assert!(text.contains("Statut : ignorée"), "{text}");
+        assert!(!text.contains("Verdict : échec"), "{text}");
     }
 }

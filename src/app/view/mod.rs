@@ -13,7 +13,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::model::{CollectionState, Focus, Model};
+use super::model::{CollectionState, Focus, Model, RunFailure};
+use crate::collection::TreeNode;
 
 /// Largeur minimale du terminal.
 pub const MIN_WIDTH: u16 = 40;
@@ -134,15 +135,66 @@ fn title_line(model: &Model) -> Line<'static> {
     ])
 }
 
-fn status_line(model: &Model) -> &'static str {
+/// Statut d'exécution d'un nœud, pour l'indicateur de la ligne de l'arbre.
+fn run_status(model: &Model, node: &TreeNode) -> tree::RunStatus {
+    let TreeNode::Request(request) = node else {
+        return tree::RunStatus::None;
+    };
+    if model
+        .run
+        .active
+        .as_ref()
+        .is_some_and(|active| active.target == request.path)
+    {
+        return tree::RunStatus::Running;
+    }
+    match model.run.outcomes.get(&request.path) {
+        Some(outcome) if outcome.result.is_failure() => tree::RunStatus::Failure,
+        Some(_) => tree::RunStatus::Success,
+        None => tree::RunStatus::None,
+    }
+}
+
+/// Message décrivant l'exécution en cours, s'il y en a une.
+fn active_run_message(model: &Model) -> Option<String> {
+    let active = model.run.active.as_ref()?;
+    Some(format!(
+        "Exécution de {} en cours…  Ctrl+X annuler",
+        active.target.display()
+    ))
+}
+
+/// Message décrivant la dernière exécution n'ayant produit aucun résultat
+/// exploitable, s'il y en a un.
+fn last_failure_message(model: &Model) -> Option<String> {
+    match model.run.last_failure.as_ref()? {
+        RunFailure::Error { target, error } => Some(format!(
+            "Échec de l'exécution de {} : {error}",
+            target.display()
+        )),
+        RunFailure::Cancelled { target } => {
+            Some(format!("Exécution de {} annulée", target.display()))
+        }
+    }
+}
+
+fn status_line(model: &Model) -> String {
+    if let Some(message) = active_run_message(model) {
+        return message;
+    }
+    if let Some(message) = last_failure_message(model) {
+        return message;
+    }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
-            "↑↓ naviguer  → déplier  ← replier  Tab détail  q quitter"
+            "↑↓ naviguer  → déplier  ← replier  r lancer  Ctrl+X annuler  Tab détail  q quitter"
+                .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
-            "↑↓ défiler  PgPréc/PgSuiv page  Début/Fin  Échap arbre  q quitter"
+            "↑↓ défiler  PgPréc/PgSuiv page  Début/Fin  Échap arbre  r lancer  Ctrl+X annuler  q quitter"
+                .to_owned()
         }
-        _ => "q quitter",
+        _ => "q quitter".to_owned(),
     }
 }
 
@@ -173,6 +225,7 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
                 node,
                 row.depth,
                 model.is_expanded(node),
+                run_status(model, node),
             )))
         })
         .collect();
@@ -300,5 +353,41 @@ mod tests {
         assert_eq!(areas.tree.width, MIN_TREE_WIDTH);
         assert_eq!(areas.tree.width + areas.detail.width, 40);
         assert_eq!(areas.tree.height, 8);
+    }
+
+    #[test]
+    fn status_line_shows_the_active_target_and_cancel_hint() {
+        let mut model = loaded_model((100, 30));
+        model.run.active = Some(crate::app::model::ActiveRun {
+            id: crate::runner::RunId(1),
+            target: "simple-get.bru".into(),
+            recursive: false,
+            handle: None,
+        });
+        let line = status_line(&model);
+        assert!(line.contains("simple-get.bru"), "{line}");
+        assert!(line.contains("Ctrl+X"), "{line}");
+    }
+
+    #[test]
+    fn status_line_shows_the_last_failure_message() {
+        let mut model = loaded_model((100, 30));
+        model.run.last_failure = Some(RunFailure::Error {
+            target: "simple-get.bru".into(),
+            error: crate::runner::RunError::BruNotFound,
+        });
+        let line = status_line(&model);
+        assert!(line.contains("simple-get.bru"), "{line}");
+        assert!(line.contains("introuvable"), "{line}");
+    }
+
+    #[test]
+    fn status_line_shows_the_usual_hint_otherwise() {
+        let model = loaded_model((100, 30));
+        assert!(model.run.active.is_none());
+        assert!(model.run.last_failure.is_none());
+        let line = status_line(&model);
+        assert!(line.contains("q quitter"), "{line}");
+        assert!(line.contains("r lancer"), "{line}");
     }
 }

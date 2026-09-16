@@ -69,6 +69,7 @@ fn main() -> ExitCode {
             path,
             sender,
             events,
+            "bru".into(),
         )),
         Err(error) => Ok(Exit::TerminalError(error)),
     };
