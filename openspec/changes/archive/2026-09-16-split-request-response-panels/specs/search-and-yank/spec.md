@@ -1,26 +1,18 @@
-# search-and-yank Specification
-
-## Purpose
-
-Permettre de retrouver rapidement un nœud ou un passage du détail par
-motif de texte, et de copier un passage du détail vers le presse-papiers
-du système, sans modifier le contrat de navigation déjà posé par
-`tui-shell`.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Ouverture et saisie d'une recherche
-Depuis l'arbre, le détail ou la réponse, `/` SHALL ouvrir une ligne de saisie de motif
-à la place de la barre d'état, associée au panneau qui avait le focus au
-moment de l'appui. Pendant la saisie, tout caractère imprimable sans
-modificateur MUST être ajouté au motif et `Retour arrière` MUST retirer le
-dernier caractère ; les autres touches de navigation (flèches, `Tab`,
-pagination) MUST être sans effet, à l'exception de `Ctrl+C` qui MUST
-continuer à fermer l'application. `Entrée` SHALL valider le motif et
-lancer la recherche décrite par les exigences suivantes ; un motif vide
-SHALL annuler la saisie sans lancer de recherche, comme `Échap`. `Échap`
-SHALL fermer la ligne de saisie sans modifier la sélection, le défilement
-ni le dernier motif validé par une recherche précédente.
+Depuis l'arbre, le détail ou la réponse, `/` SHALL ouvrir une ligne de
+saisie de motif à la place de la barre d'état, associée au panneau qui
+avait le focus au moment de l'appui. Pendant la saisie, tout caractère
+imprimable sans modificateur MUST être ajouté au motif et `Retour
+arrière` MUST retirer le dernier caractère ; les autres touches de
+navigation (flèches, `Tab`, pagination) MUST être sans effet, à
+l'exception de `Ctrl+C` qui MUST continuer à fermer l'application.
+`Entrée` SHALL valider le motif et lancer la recherche décrite par les
+exigences suivantes ; un motif vide SHALL annuler la saisie sans lancer
+de recherche, comme `Échap`. `Échap` SHALL fermer la ligne de saisie sans
+modifier la sélection, le défilement ni le dernier motif validé par une
+recherche précédente.
 
 #### Scenario: Ouverture depuis l'arbre
 - **WHEN** l'arbre a le focus et l'utilisateur appuie sur `/`
@@ -38,36 +30,6 @@ ni le dernier motif validé par une recherche précédente.
 - **WHEN** l'utilisateur appuie sur `/` puis directement sur `Entrée`
 - **THEN** la ligne de saisie se ferme sans qu'aucune recherche ne soit
   lancée
-
-### Requirement: Recherche dans l'arbre
-Une recherche validée depuis l'arbre SHALL parcourir tous les nœuds de la
-collection, dossiers repliés compris, et comparer le motif au nom affiché
-de chaque nœud (`display_name`) par sous-chaîne insensible à la casse.
-Une correspondance trouvée après le nœud actuellement sélectionné (ordre
-d'affichage, dossiers dépliés en profondeur d'abord) MUST devenir la
-sélection ; le système MUST déplier tout dossier ancêtre nécessaire pour
-que le nœud trouvé soit visible, comme le fait déjà la navigation entre
-parent et enfant. Si aucun nœud après la sélection ne correspond, la
-recherche MUST reprendre depuis le premier nœud de la collection
-(recherche circulaire). Si aucun nœud de la collection ne correspond, la
-sélection et le dépliage MUST rester inchangés et l'absence de résultat
-MUST être signalée dans la barre d'état.
-
-#### Scenario: Correspondance dans un dossier replié
-- **WHEN** l'arbre de `parser-cases` est chargé, tous les dossiers
-  repliés, et l'utilisateur cherche `inherit`
-- **THEN** `Groupe` est déplié et sa requête `inherit` est sélectionnée
-
-#### Scenario: Recherche circulaire
-- **WHEN** `unknown-block` (dernier nœud du premier niveau) est
-  sélectionné et l'utilisateur cherche `ping`
-- **THEN** la recherche reprend depuis le début de la collection et
-  sélectionne `ping`
-
-#### Scenario: Aucune correspondance
-- **WHEN** l'utilisateur cherche `zzz-inexistant` dans l'arbre
-- **THEN** la sélection ne change pas et la barre d'état signale
-  l'absence de résultat pour ce motif
 
 ### Requirement: Recherche dans le détail
 Une recherche validée depuis le détail ou depuis la réponse SHALL
@@ -105,31 +67,6 @@ cours, dans le détail comme dans la réponse.
   motif
 - **THEN** le panneau réponse défile jusqu'à la ligne correspondante, la
   met en évidence, et le défilement du détail reste inchangé
-
-### Requirement: Répétition de la recherche
-Une fois un motif validé au moins une fois, `n` SHALL rechercher la
-prochaine correspondance dans le même sens que la dernière recherche, et
-`N` SHALL rechercher dans le sens opposé, quel que soit le panneau ayant
-le focus au moment de l'appui : `n`/`N` MUST utiliser le panneau associé
-au motif enregistré (celui actif au moment de sa validation), pas le
-panneau ayant le focus courant. `n`/`N` MUST NOT avoir d'effet tant
-qu'aucun motif n'a été validé.
-
-#### Scenario: n répète dans l'arbre depuis le détail
-- **WHEN** une recherche `x` a été validée dans l'arbre, puis le focus
-  passe au détail, et l'utilisateur appuie sur `n`
-- **THEN** la sélection de l'arbre avance à la correspondance suivante,
-  sans changer le focus
-
-#### Scenario: N inverse le sens
-- **WHEN** une recherche a fait passer la sélection de `simple-get.bru` à
-  `no-seq.bru`, et l'utilisateur appuie sur `N`
-- **THEN** la sélection revient à `simple-get.bru`
-
-#### Scenario: Aucun motif validé
-- **WHEN** l'utilisateur appuie sur `n` avant toute recherche validée dans
-  cette session
-- **THEN** rien ne change
 
 ### Requirement: Sélection visuelle dans le détail
 Quand le détail ou la réponse a le focus, hors saisie de recherche, `v`
@@ -199,23 +136,3 @@ SHALL être sans effet.
   appuie sur `y`
 - **THEN** l'application reste réactive, la barre d'état signale l'échec
   de la copie, et rien n'est modifié dans la sélection ou le défilement
-
-### Requirement: Compatibilité avec la navigation existante
-En dehors d'une saisie de recherche active, les touches déjà définies par
-`tui-shell` (navigation de l'arbre, défilement du détail, focus, sortie)
-MUST conserver exactement le comportement de leur spécification d'origine.
-Les nouvelles touches (`/`, `n`, `N`, `v`, `y`) MUST NOT réutiliser une
-touche déjà affectée par `tui-shell`.
-
-#### Scenario: Navigation de l'arbre inchangée
-- **WHEN** aucune recherche ni sélection visuelle n'est active
-- **THEN** `↓`/`j`, `↑`/`k`, `→`/`l`/`Entrée`, `←`/`h`, `Début`/`g`,
-  `Fin`/`G`, `Tab`, `Échap` et `q` se comportent comme décrit dans
-  `tui-shell`
-
-#### Scenario: Défilement du détail inchangé hors sélection
-- **WHEN** le détail a le focus, sans sélection visuelle ni recherche
-  active
-- **THEN** `↑`/`k`, `↓`/`j`, `Page précédente`, `Page suivante`, `Début`
-  et `Fin` défilent exactement comme décrit dans `tui-shell`, sans mise en
-  évidence de ligne courante ajoutée par cette capacité

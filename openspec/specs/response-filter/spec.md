@@ -115,7 +115,7 @@ résultat ou une erreur de filtre sur le disque, ni modifier le fichier
 #### Scenario: Changement de sélection efface le filtre
 - **WHEN** un filtre est appliqué sur la requête sélectionnée et
   l'utilisateur sélectionne une autre requête
-- **THEN** le panneau de détail de la nouvelle sélection affiche son
+- **THEN** le panneau de réponse de la nouvelle sélection affiche son
   corps brut, sans filtre ni erreur résiduelle
 
 #### Scenario: Retour sur la requête filtrée
