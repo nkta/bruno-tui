@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::collection::{Collection, LoadError, TreeNode};
 use crate::runner;
 
+use super::filter::FilterState;
 use super::message::TextCapture;
 use super::search::SearchState;
 
@@ -131,6 +132,8 @@ pub struct Model {
     pub exit: Option<Exit>,
     /// État des exécutions de requêtes.
     pub run: RunState,
+    /// État du filtre de réponse, `None` tant que `|` n'a pas été ouvert.
+    pub filter: Option<FilterState>,
     /// État de la recherche, `None` tant que `/` n'a jamais été pressé.
     pub search: Option<SearchState>,
     /// Sélection visuelle active dans le détail.
@@ -170,6 +173,7 @@ impl Model {
             size,
             exit: None,
             run: RunState::default(),
+            filter: None,
             search: None,
             detail_selection: None,
             detail_match: None,
@@ -183,10 +187,13 @@ impl Model {
     /// Conçu pour que `add-field-editing`/`add-response-filter` y ajoutent
     /// leur propre branche sans toucher à celle-ci.
     pub fn text_capture(&self) -> Option<TextCapture> {
-        self.search
-            .as_ref()
-            .is_some_and(SearchState::is_editing)
-            .then_some(TextCapture::Search)
+        if self.search.as_ref().is_some_and(SearchState::is_editing) {
+            return Some(TextCapture::Search);
+        }
+        if self.filter.as_ref().is_some_and(|f| f.editing) {
+            return Some(TextCapture::Filter);
+        }
+        None
     }
 
     /// Collection chargée, s'il y en a une.

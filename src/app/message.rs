@@ -28,6 +28,7 @@ use crate::runner::{RunEvent, RunHandle, RunId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextCapture {
     Search,
+    Filter,
 }
 
 #[derive(Debug)]
@@ -78,6 +79,16 @@ pub enum Message {
     ConfirmSearch,
     /// `Échap` pendant une saisie de recherche.
     CancelSearch,
+    /// `|`, hors saisie.
+    OpenFilter,
+    /// Caractère tapé pendant une saisie de filtre.
+    FilterInput(char),
+    /// `Retour arrière` pendant une saisie de filtre.
+    FilterBackspace,
+    /// `Entrée` pendant une saisie de filtre.
+    ConfirmFilter,
+    /// `Échap` pendant une saisie de filtre.
+    CancelFilter,
     /// `n`, hors saisie.
     NextMatch,
     /// `N`, hors saisie.
@@ -141,6 +152,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('q') => Message::Quit,
         KeyCode::Char('r') => Message::RunSelected,
         KeyCode::Char('/') => Message::StartSearch,
+        KeyCode::Char('|') => Message::OpenFilter,
         KeyCode::Char('n') => Message::NextMatch,
         KeyCode::Char('N') => Message::PreviousMatch,
         KeyCode::Char('v') => Message::ToggleVisual,
@@ -155,6 +167,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
 fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
     match capture {
         TextCapture::Search => search_capture_message(key),
+        TextCapture::Filter => filter_capture_message(key),
     }
 }
 
@@ -167,6 +180,16 @@ fn search_capture_message(key: KeyEvent) -> Option<Message> {
         KeyCode::Backspace => Some(Message::SearchBackspace),
         KeyCode::Enter => Some(Message::ConfirmSearch),
         KeyCode::Esc => Some(Message::CancelSearch),
+        _ => None,
+    }
+}
+
+fn filter_capture_message(key: KeyEvent) -> Option<Message> {
+    match key.code {
+        KeyCode::Char(c) => Some(Message::FilterInput(c)),
+        KeyCode::Backspace => Some(Message::FilterBackspace),
+        KeyCode::Enter => Some(Message::ConfirmFilter),
+        KeyCode::Esc => Some(Message::CancelFilter),
         _ => None,
     }
 }
@@ -227,6 +250,7 @@ mod tests {
             (KeyCode::Char('c'), KeyModifiers::CONTROL, "ForceQuit"),
             (KeyCode::Char('x'), KeyModifiers::CONTROL, "CancelRun"),
             (KeyCode::Char('/'), none, "StartSearch"),
+            (KeyCode::Char('|'), none, "OpenFilter"),
             (KeyCode::Char('n'), none, "NextMatch"),
             (KeyCode::Char('N'), KeyModifiers::SHIFT, "PreviousMatch"),
             (KeyCode::Char('v'), none, "ToggleVisual"),
@@ -345,5 +369,46 @@ mod tests {
         // pagination) reste sans effet en saisie.
         assert!(name_capturing(key(KeyCode::Tab, none), TextCapture::Search).is_none());
         assert!(name_capturing(key(KeyCode::PageDown, none), TextCapture::Search).is_none());
+    }
+
+    /// En saisie de filtre, les touches de navigation redeviennent du
+    /// texte ; `Ctrl+C` reste prioritaire.
+    #[test]
+    fn filter_capture_redirects_navigation_keys_to_input() {
+        let none = KeyModifiers::NONE;
+        for (code, expected) in [
+            (KeyCode::Char('j'), "FilterInput"),
+            (KeyCode::Char('q'), "FilterInput"),
+            (KeyCode::Char('.'), "FilterInput"),
+            (KeyCode::Backspace, "FilterBackspace"),
+            (KeyCode::Enter, "ConfirmFilter"),
+            (KeyCode::Esc, "CancelFilter"),
+        ] {
+            assert_eq!(
+                name_capturing(key(code, none), TextCapture::Filter).as_deref(),
+                Some(expected),
+                "{code:?}"
+            );
+        }
+        // Un caractère composé (Alt) reste un caractère pendant la saisie.
+        assert_eq!(
+            name_capturing(
+                key(KeyCode::Char('e'), KeyModifiers::ALT),
+                TextCapture::Filter
+            )
+            .as_deref(),
+            Some("FilterInput")
+        );
+        // Ctrl+C reste prioritaire même en saisie.
+        assert_eq!(
+            name_capturing(
+                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                TextCapture::Filter
+            )
+            .as_deref(),
+            Some("ForceQuit")
+        );
+        assert!(name_capturing(key(KeyCode::Tab, none), TextCapture::Filter).is_none());
+        assert!(name_capturing(key(KeyCode::PageDown, none), TextCapture::Filter).is_none());
     }
 }

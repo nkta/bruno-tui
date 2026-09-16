@@ -178,6 +178,13 @@ fn last_failure_message(model: &Model) -> Option<String> {
     }
 }
 
+/// Ligne de saisie de filtre, tant qu'elle est ouverte : remplace la
+/// barre d'état, à la place des rappels de touches habituels.
+fn filter_input_line(model: &Model) -> Option<String> {
+    let filter = model.filter.as_ref()?;
+    filter.editing.then(|| format!("|{}", filter.draft))
+}
+
 /// Ligne de saisie de recherche, tant qu'elle est ouverte : remplace la
 /// barre d'état, à la place des rappels de touches habituels.
 fn search_input_line(model: &Model) -> Option<String> {
@@ -194,6 +201,9 @@ fn status_message_text(message: &StatusMessage) -> String {
 }
 
 fn status_line(model: &Model) -> String {
+    if let Some(line) = filter_input_line(model) {
+        return line;
+    }
     if let Some(line) = search_input_line(model) {
         return line;
     }
@@ -424,6 +434,44 @@ mod tests {
         update(&mut model, Message::ConfirmSearch);
         let line = status_line(&model);
         assert!(!line.starts_with('/'), "{line}");
+    }
+
+    #[test]
+    fn filter_input_line_shows_draft_in_status_bar_before_confirmation() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+
+        // Avant ouverture : status_line ordinaire
+        let line_before = status_line(&model);
+        assert!(!line_before.starts_with('|'), "{line_before}");
+
+        // Ouvre le filtre et tape `.a`
+        update(&mut model, Message::OpenFilter);
+        update(&mut model, Message::FilterInput('.'));
+        update(&mut model, Message::FilterInput('a'));
+        assert!(model.filter.as_ref().unwrap().editing);
+
+        // La barre d'état logique affiche le draft préfixé par |
+        let line = status_line(&model);
+        assert_eq!(line, "|.a");
+
+        // Rendu à l'écran via TestBackend
+        let screen = render(&model, 100, 30);
+        let status_row = &screen[29]; // ligne 29 = barre d'état sur hauteur 30
+        assert!(
+            status_row.contains("|.a"),
+            "la barre d'état à l'écran doit contenir |.a mais vaut :\n{status_row}"
+        );
+
+        // Après validation : le texte tapé disparaît de la barre d'état
+        update(&mut model, Message::ConfirmFilter);
+        assert!(!model.filter.as_ref().unwrap().editing);
+        let line_after = status_line(&model);
+        assert!(!line_after.starts_with('|'), "{line_after}");
+        let screen_after = render(&model, 100, 30);
+        assert!(!screen_after[29].contains("|.a"), "{}", screen_after[29]);
     }
 
     #[test]

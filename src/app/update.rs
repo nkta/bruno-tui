@@ -5,6 +5,7 @@
 
 use std::ops::RangeInclusive;
 
+use super::filter::{FilterState, evaluate};
 use super::message::Message;
 use super::model::{
     CollectionState, DetailSelection, Exit, Focus, Model, StatusMessage, tree_node_at, visible_rows,
@@ -14,6 +15,7 @@ use super::view::detail::plain_lines;
 use super::view::{detail::detail_text, inner, layout_for};
 use crate::collection::TreeNode;
 use crate::runner::RunRequest;
+use crate::runner::report::ResponseStatus;
 
 /// Effet demandé par `update`, à exécuter par la boucle `run`, qui seule
 /// détient le `BruRunner` et tourne dans un contexte tokio.
@@ -126,6 +128,36 @@ pub fn update(model: &mut Model, message: Message) -> Command {
         Message::CancelSearch => {
             if let Some(search) = &mut model.search {
                 search.editing = false;
+            }
+            Command::None
+        }
+        Message::OpenFilter => {
+            open_filter(model);
+            Command::None
+        }
+        Message::FilterInput(c) => {
+            if let Some(filter) = &mut model.filter
+                && filter.editing
+            {
+                filter.draft.push(c);
+            }
+            Command::None
+        }
+        Message::FilterBackspace => {
+            if let Some(filter) = &mut model.filter
+                && filter.editing
+            {
+                filter.draft.pop();
+            }
+            Command::None
+        }
+        Message::ConfirmFilter => {
+            confirm_filter(model);
+            Command::None
+        }
+        Message::CancelFilter => {
+            if let Some(filter) = &mut model.filter {
+                filter.editing = false;
             }
             Command::None
         }
@@ -250,6 +282,7 @@ fn navigate_tree(model: &mut Model, message: Message) {
     if len == 0 {
         return;
     }
+    let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
     let before = model.tree.selected;
     match message {
         Message::Up => model.tree.selected = before.saturating_sub(1),
@@ -263,6 +296,7 @@ fn navigate_tree(model: &mut Model, message: Message) {
     if model.tree.selected != before {
         clear_detail_view_state(model);
     }
+    reset_filter_if_selection_changed(model, previous_path.as_deref());
     scroll_tree_into_view(model);
 }
 
@@ -519,6 +553,7 @@ fn search_tree(model: &mut Model, pattern: &str, forward: bool) -> bool {
         model.tree.expanded.insert(path);
     }
     refresh_rows(model);
+    let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
     if let Some(index) = model
         .tree
         .rows
@@ -528,6 +563,7 @@ fn search_tree(model: &mut Model, pattern: &str, forward: bool) -> bool {
         model.tree.selected = index;
     }
     clear_detail_view_state(model);
+    reset_filter_if_selection_changed(model, previous_path.as_deref());
     scroll_tree_into_view(model);
     true
 }
@@ -545,6 +581,63 @@ fn search_detail(model: &mut Model, pattern: &str, forward: bool) -> bool {
     model.detail_scroll = line.min(detail_max_scroll(model));
     model.detail_match = Some((line, range));
     true
+}
+
+// --- Filtre de réponse ---------------------------------------------------
+
+/// `|` : ouvre la saisie du filtre jq si la sélection courante a produit
+/// une réponse HTTP avec un corps non nul (D4).
+fn open_filter(model: &mut Model) {
+    let Some(TreeNode::Request(request)) = model.selected_node() else {
+        return;
+    };
+    let Some(outcome) = model.run.outcomes.get(&request.path) else {
+        return;
+    };
+    if !matches!(outcome.result.response.status, ResponseStatus::Http(_)) {
+        return;
+    }
+    if outcome.result.response.data.is_null() {
+        return;
+    }
+    let target = request.path.clone();
+    if let Some(filter) = &mut model.filter
+        && filter.target == target
+    {
+        filter.editing = true;
+    } else {
+        model.filter = Some(FilterState::new(target));
+    }
+}
+
+/// `Entrée` en saisie de filtre : un filtre vide équivaut à une annulation,
+/// sinon évalue le filtre jq et stocke le résultat dans `model.filter.applied` (D6).
+fn confirm_filter(model: &mut Model) {
+    let Some(filter) = &mut model.filter else {
+        return;
+    };
+    if !filter.editing {
+        return;
+    }
+    if filter.draft.is_empty() {
+        filter.editing = false;
+        return;
+    }
+    let Some(outcome) = model.run.outcomes.get(&filter.target) else {
+        filter.editing = false;
+        return;
+    };
+    let result = evaluate(&filter.draft, &outcome.result.response.data);
+    filter.applied = Some(result);
+    filter.editing = false;
+}
+
+/// Réinitialise le filtre si le chemin du nœud sélectionné a changé (D5).
+fn reset_filter_if_selection_changed(model: &mut Model, previous_path: Option<&std::path::Path>) {
+    let current_path = model.selected_node().map(TreeNode::path);
+    if previous_path != current_path {
+        model.filter = None;
+    }
 }
 
 // --- Sélection visuelle et copie -----------------------------------------
@@ -617,7 +710,7 @@ mod tests {
 
     use super::*;
     use crate::app::model::{ActiveRun, RunFailure};
-    use crate::app::test_support::{loaded_model, select, selected_name};
+    use crate::app::test_support::{loaded_model, runner_probe_model, select, selected_name};
     use crate::collection::LoadError;
     use crate::runner;
 
@@ -1314,5 +1407,193 @@ mod tests {
         );
         assert!(model.last_status.is_none());
         assert!(model.pending_clipboard_token.is_some());
+    }
+
+    #[test]
+    fn open_filter_availability_conditions() {
+        let mut model = runner_probe_model();
+
+        // 1. Aucune exécution (retire green.bru des outcomes pour simuler une requête non exécutée)
+        model.run.outcomes.remove(Path::new("green.bru"));
+        select(&mut model, "green.bru");
+        assert!(!model.run.outcomes.contains_key(Path::new("green.bru")));
+        update(&mut model, Message::OpenFilter);
+        assert!(
+            model.filter.is_none(),
+            "requête sans exécution : filtre indisponible"
+        );
+
+        // Nœud non requête (dossier)
+        select(&mut model, "folder");
+        update(&mut model, Message::OpenFilter);
+        assert!(model.filter.is_none(), "dossier : filtre indisponible");
+
+        // 2. Erreur de connexion (folder/down.bru)
+        select(&mut model, "folder/down.bru");
+        update(&mut model, Message::OpenFilter);
+        assert!(
+            model.filter.is_none(),
+            "erreur de connexion : filtre indisponible"
+        );
+
+        // 3. Requête ignorée (skip.bru)
+        select(&mut model, "skip.bru");
+        update(&mut model, Message::OpenFilter);
+        assert!(
+            model.filter.is_none(),
+            "requête ignorée : filtre indisponible"
+        );
+
+        // 4. Contre-exemples disponibles (ok.bru et json.bru)
+        select(&mut model, "ok.bru");
+        update(&mut model, Message::OpenFilter);
+        assert!(model.filter.is_some(), "ok.bru : filtre disponible");
+        assert_eq!(model.filter.as_ref().unwrap().target, Path::new("ok.bru"));
+        assert!(model.filter.as_ref().unwrap().editing);
+
+        select(&mut model, "json.bru");
+        update(&mut model, Message::OpenFilter);
+        assert!(model.filter.is_some(), "json.bru : filtre disponible");
+        assert_eq!(model.filter.as_ref().unwrap().target, Path::new("json.bru"));
+        assert!(model.filter.as_ref().unwrap().editing);
+    }
+
+    #[test]
+    fn filter_composition_and_correction_and_cancel() {
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+        update(&mut model, Message::OpenFilter);
+        assert!(model.filter.is_some());
+
+        // Tape `.a.b`
+        for c in ".a.b".chars() {
+            update(&mut model, Message::FilterInput(c));
+        }
+        assert_eq!(model.filter.as_ref().unwrap().draft, ".a.b");
+
+        // Deux effacements (retire 'b' et '.') -> ".a"
+        update(&mut model, Message::FilterBackspace);
+        update(&mut model, Message::FilterBackspace);
+        assert_eq!(model.filter.as_ref().unwrap().draft, ".a");
+
+        // Tape 'x' -> ".ax"
+        update(&mut model, Message::FilterInput('x'));
+        assert_eq!(model.filter.as_ref().unwrap().draft, ".ax");
+
+        // Correction pour atteindre ".a.x"
+        update(&mut model, Message::FilterBackspace);
+        update(&mut model, Message::FilterInput('.'));
+        update(&mut model, Message::FilterInput('x'));
+        assert_eq!(model.filter.as_ref().unwrap().draft, ".a.x");
+
+        // Annulation : referme la saisie sans toucher à applied
+        update(&mut model, Message::CancelFilter);
+        assert!(!model.filter.as_ref().unwrap().editing);
+        assert!(model.filter.as_ref().unwrap().applied.is_none());
+        assert_eq!(model.filter.as_ref().unwrap().draft, ".a.x");
+    }
+
+    #[test]
+    fn confirm_filter_scenarios() {
+        use super::super::filter::FilterResult;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+
+        // Scénario : validation d'un filtre vide équivaut à annuler
+        update(&mut model, Message::OpenFilter);
+        update(&mut model, Message::ConfirmFilter);
+        assert!(!model.filter.as_ref().unwrap().editing);
+        assert!(model.filter.as_ref().unwrap().applied.is_none());
+
+        // Scénario : filtre extrayant une valeur (`.a` sur `{"a": [1, 2], "b": null}`)
+        update(&mut model, Message::OpenFilter);
+        for c in ".a".chars() {
+            update(&mut model, Message::FilterInput(c));
+        }
+        update(&mut model, Message::ConfirmFilter);
+        assert!(!model.filter.as_ref().unwrap().editing);
+        match &model.filter.as_ref().unwrap().applied {
+            Some(FilterResult::Output(out)) => {
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0], "[\n  1,\n  2\n]");
+            }
+            other => panic!("attendu Output, obtenu {other:?}"),
+        }
+
+        // Scénario : filtre à plusieurs sorties (`.a[]`)
+        update(&mut model, Message::OpenFilter);
+        model.filter.as_mut().unwrap().draft.clear();
+        for c in ".a[]".chars() {
+            update(&mut model, Message::FilterInput(c));
+        }
+        update(&mut model, Message::ConfirmFilter);
+        match &model.filter.as_ref().unwrap().applied {
+            Some(FilterResult::Output(out)) => {
+                assert_eq!(out.len(), 2);
+                assert_eq!(out[0], "1");
+                assert_eq!(out[1], "2");
+            }
+            other => panic!("attendu Output à 2 sorties, obtenu {other:?}"),
+        }
+
+        // Scénario : correction après erreur
+        // 1. Filtre syntaxiquement invalide `.a.b |`
+        update(&mut model, Message::OpenFilter);
+        model.filter.as_mut().unwrap().draft.clear();
+        for c in ".a.b |".chars() {
+            update(&mut model, Message::FilterInput(c));
+        }
+        update(&mut model, Message::ConfirmFilter);
+        assert!(matches!(
+            model.filter.as_ref().unwrap().applied,
+            Some(FilterResult::Error(_))
+        ));
+
+        // 2. Correction par filtre valide `.b`
+        update(&mut model, Message::OpenFilter);
+        model.filter.as_mut().unwrap().draft.clear();
+        for c in ".b".chars() {
+            update(&mut model, Message::FilterInput(c));
+        }
+        update(&mut model, Message::ConfirmFilter);
+        match &model.filter.as_ref().unwrap().applied {
+            Some(FilterResult::Output(out)) => {
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0], "null");
+            }
+            other => panic!("attendu Output après correction, obtenu {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_cleared_on_selection_change_and_not_reapplied() {
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+
+        // Applique un filtre sur json.bru
+        update(&mut model, Message::OpenFilter);
+        for c in ".a".chars() {
+            update(&mut model, Message::FilterInput(c));
+        }
+        update(&mut model, Message::ConfirmFilter);
+        assert!(model.filter.is_some());
+
+        // Navigation vers un autre nœud (Down)
+        let initial_selected = model.tree.selected;
+        update(&mut model, Message::Down);
+        assert_ne!(model.tree.selected, initial_selected);
+        assert!(
+            model.filter.is_none(),
+            "le filtre doit disparaître au changement de sélection"
+        );
+
+        // Revenir sur la requête précédemment filtrée (Up)
+        update(&mut model, Message::Up);
+        assert_eq!(model.tree.selected, initial_selected);
+        assert!(
+            model.filter.is_none(),
+            "le filtre ne doit pas être réappliqué"
+        );
     }
 }
