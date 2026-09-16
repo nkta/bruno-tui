@@ -17,7 +17,7 @@ use crate::app::model::{Focus, HistoryEntry, HistoryOutcome, Model};
 /// verticalement dans la zone intérieure plutôt que collé en haut d'une
 /// zone par ailleurs vide (`visual-theme`). Ne convient qu'à un message
 /// tenant sur une seule ligne (voir design.md, Risks/Trade-offs).
-fn empty_state_message(area: Rect, message: &'static str) -> Paragraph<'static> {
+pub(crate) fn empty_state_message(area: Rect, message: &'static str) -> Paragraph<'static> {
     let padding = inner(area).height.saturating_sub(1) / 2;
     let mut lines: Vec<Line<'static>> = (0..padding).map(|_| Line::default()).collect();
     lines.push(Line::styled(message, theme::EMPTY_MESSAGE));

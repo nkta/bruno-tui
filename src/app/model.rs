@@ -31,6 +31,7 @@ pub enum CollectionState {
 pub enum Focus {
     Tree,
     Detail,
+    Response,
     Diagnostics,
     History,
     EnvironmentPicker,
@@ -361,6 +362,8 @@ pub struct Model {
     pub history: VecDeque<HistoryEntry>,
     /// Première ligne affichée du détail.
     pub detail_scroll: u16,
+    /// Première ligne affichée de la réponse.
+    pub response_scroll: u16,
     /// Taille du terminal (colonnes, lignes).
     pub size: (u16, u16),
     /// `Some` : la boucle doit s'arrêter.
@@ -373,9 +376,14 @@ pub struct Model {
     pub search: Option<SearchState>,
     /// Sélection visuelle active dans le détail.
     pub detail_selection: Option<DetailSelection>,
+    /// Sélection visuelle active dans la réponse.
+    pub response_selection: Option<DetailSelection>,
     /// Ligne et position en octets de la dernière correspondance de
     /// recherche trouvée dans le détail, pour la surbrillance.
     pub detail_match: Option<(u16, Range<usize>)>,
+    /// Ligne et position en octets de la dernière correspondance de
+    /// recherche trouvée dans la réponse, pour la surbrillance.
+    pub response_match: Option<(u16, Range<usize>)>,
     /// Dernier statut à afficher dans la barre d'état (copie, recherche
     /// sans résultat), en plus des rappels habituels. Persiste jusqu'au
     /// prochain statut, aucune minuterie.
@@ -420,13 +428,16 @@ impl Model {
             history_selected: 0,
             history: VecDeque::new(),
             detail_scroll: 0,
+            response_scroll: 0,
             size,
             exit: None,
             run: RunState::default(),
             filter: None,
             search: None,
             detail_selection: None,
+            response_selection: None,
             detail_match: None,
+            response_match: None,
             last_status: None,
             pending_clipboard_token: None,
             next_clipboard_token: 0,

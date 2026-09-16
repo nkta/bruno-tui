@@ -20,23 +20,31 @@ use super::model::{
 };
 use crate::collection::TreeNode;
 
-/// Largeur minimale du terminal.
-pub const MIN_WIDTH: u16 = 40;
+/// Largeur minimale du terminal : exactement la somme des planchers de
+/// l'arbre, du détail et de la réponse (`MIN_TREE_WIDTH +
+/// MIN_DETAIL_WIDTH + MIN_RESPONSE_WIDTH`), pour qu'à cette taille chaque
+/// panneau soit exactement à son plancher, sans marge (`design.md`, D4).
+pub const MIN_WIDTH: u16 = 60;
 /// Hauteur minimale du terminal.
 pub const MIN_HEIGHT: u16 = 10;
 /// Largeur minimale du panneau de l'arbre.
 const MIN_TREE_WIDTH: u16 = 24;
+/// Largeur minimale du panneau de détail.
+const MIN_DETAIL_WIDTH: u16 = 18;
+/// Largeur minimale du panneau de réponse.
+const MIN_RESPONSE_WIDTH: u16 = 18;
 
-const TOO_SMALL: &str = "Terminal trop petit : agrandir à 40×10 au moins.";
+const TOO_SMALL: &str = "Terminal trop petit : agrandir à 60×10 au moins.";
 
 /// Zones de l'écran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Areas {
     pub title: Rect,
-    /// Arbre et détail réunis.
+    /// Arbre, détail et réponse réunis.
     pub body: Rect,
     pub tree: Rect,
     pub detail: Rect,
+    pub response: Rect,
     pub status: Rect,
 }
 
@@ -48,14 +56,18 @@ pub fn layout(area: Rect) -> Option<Areas> {
     let body_height = area.height - 2;
     let tree_width = (area.width * 35 / 100).max(MIN_TREE_WIDTH);
     let body = Rect::new(area.x, area.y + 1, area.width, body_height);
+    let remaining = area.width - tree_width;
+    let detail_width = (remaining * 50 / 100).max(MIN_DETAIL_WIDTH);
+    let response_width = (remaining - detail_width).max(MIN_RESPONSE_WIDTH);
     Some(Areas {
         title: Rect::new(area.x, area.y, area.width, 1),
         body,
         tree: Rect::new(body.x, body.y, tree_width, body_height),
-        detail: Rect::new(
-            body.x + tree_width,
+        detail: Rect::new(body.x + tree_width, body.y, detail_width, body_height),
+        response: Rect::new(
+            body.x + tree_width + detail_width,
             body.y,
-            area.width - tree_width,
+            response_width,
             body_height,
         ),
         status: Rect::new(area.x, area.y + area.height - 1, area.width, 1),
@@ -93,6 +105,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 areas.tree,
             );
             frame.render_widget(panel(" Détail ", false), areas.detail);
+            frame.render_widget(panel(" Réponse ", false), areas.response);
         }
         CollectionState::Failed(error) => {
             let lines = vec![
@@ -120,7 +133,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
             Focus::EnvironmentPicker => {
                 panels::render_environment_picker(model, frame, areas.body);
             }
-            Focus::Tree | Focus::Detail => {
+            Focus::Tree | Focus::Detail | Focus::Response => {
                 render_tree(model, frame, areas.tree);
                 frame.render_widget(
                     Paragraph::new(detail::render_text(model))
@@ -130,6 +143,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     areas.detail,
                 );
                 render_insert_cursor(model, frame, areas.detail);
+                render_response(model, frame, areas.response);
             }
         },
     }
@@ -383,6 +397,28 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
+/// Dessine le panneau Réponse : le résultat de la dernière exécution de la
+/// requête sélectionnée, ou un message unique délibérément centré quand
+/// il n'y en a aucun (`visual-theme`, `split-request-response-panels`).
+fn render_response(model: &Model, frame: &mut Frame, area: Rect) {
+    let block = panel(" Réponse ", model.focus == Focus::Response);
+    let text = detail::render_response_text(model);
+    if text.lines.is_empty() {
+        frame.render_widget(
+            panels::empty_state_message(area, "aucun résultat").block(block),
+            area,
+        );
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((model.response_scroll, 0))
+            .block(block),
+        area,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,12 +525,32 @@ mod tests {
 
     #[test]
     fn layout_respects_minimums() {
-        assert_eq!(layout_for((39, 30)), None);
+        assert_eq!(layout_for((59, 30)), None);
         assert_eq!(layout_for((100, 9)), None);
-        let areas = layout_for((40, 10)).expect("taille minimale");
+        let areas = layout_for((60, 10)).expect("taille minimale");
         assert_eq!(areas.tree.width, MIN_TREE_WIDTH);
-        assert_eq!(areas.tree.width + areas.detail.width, 40);
+        assert_eq!(areas.detail.width, MIN_DETAIL_WIDTH);
+        assert_eq!(areas.response.width, MIN_RESPONSE_WIDTH);
+        assert_eq!(
+            areas.tree.width + areas.detail.width + areas.response.width,
+            60
+        );
         assert_eq!(areas.tree.height, 8);
+    }
+
+    /// À la taille minimale, les trois panneaux sont affichés ; juste
+    /// en dessous, le message « trop petit » remplace tout le reste
+    /// (`tui-shell`, exigence « Disposition et barre d'état »).
+    #[test]
+    fn too_small_just_below_the_new_minimum_width() {
+        let model = loaded_model((59, 30));
+        let screen = crate::app::test_support::render(&model, 59, 30).join("\n");
+        assert!(screen.contains("trop petit"), "{screen}");
+
+        let model = loaded_model((60, 30));
+        let screen = crate::app::test_support::render(&model, 60, 30).join("\n");
+        assert!(!screen.contains("trop petit"), "{screen}");
+        assert!(screen.contains("Réponse"), "{screen}");
     }
 
     #[test]
@@ -771,6 +827,53 @@ mod tests {
             "Titre ne doit pas contenir ⚠: {}",
             clean_lines[0]
         );
+    }
+
+    #[test]
+    fn response_panel_shows_result_separately_from_detail() {
+        use crate::app::test_support::runner_probe_model;
+
+        // 1. Requête exécutée : le résultat est dans la réponse, pas
+        // dans le détail.
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        let lines = render(&model, 100, 30);
+        let screen = lines.join("\n");
+        assert!(screen.contains("Réponse"), "{screen}");
+        assert!(screen.contains("Résultat"), "{screen}");
+        assert!(screen.contains("Verdict"), "{screen}");
+        let detail_col_end = layout_for((100, 30)).expect("layout").detail.right();
+        let detail_only: String = lines
+            .iter()
+            .map(|line| {
+                line.chars()
+                    .take(detail_col_end as usize)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !detail_only.contains("Résultat"),
+            "le détail ne doit plus afficher le résultat :\n{detail_only}"
+        );
+
+        // 2. Requête sans exécution : message unique dans la réponse.
+        select(&mut model, "skip.bru");
+        model.run.outcomes.remove(std::path::Path::new("skip.bru"));
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("aucun résultat"), "{screen}");
+
+        // 3. Dossier sélectionné : même message.
+        let mut folder_model = loaded_model((100, 30));
+        select(&mut folder_model, "grp");
+        let screen = render(&folder_model, 100, 30).join("\n");
+        assert!(screen.contains("aucun résultat"), "{screen}");
+
+        // 4. Nœud en erreur sélectionné : même message.
+        let mut error_model = loaded_model((100, 30));
+        select(&mut error_model, "broken.bru");
+        let screen = render(&error_model, 100, 30).join("\n");
+        assert!(screen.contains("aucun résultat"), "{screen}");
     }
 
     #[test]

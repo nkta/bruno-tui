@@ -16,7 +16,7 @@ use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
     EditMode, EditSession, EditableField, Model, RequestOutcome, field_enabled, field_value,
 };
-use crate::app::update::selection_range;
+use crate::app::update::{response_selection_range, selection_range};
 use crate::collection::{
     AuthMode, BodyContent, BodyKind, ErrorNode, FileMeta, FolderNode, KeyValue, RequestNode,
     RequestView, TreeNode,
@@ -31,30 +31,49 @@ pub const FIELD_CURSOR_STYLE: Style = Style::new().add_modifier(Modifier::REVERS
 /// cette même unité de ligne que `update::detail_line_count` compte pour
 /// le défilement (voir sa documentation pour la raison du choix).
 pub fn plain_lines(model: &Model) -> Vec<String> {
-    detail_text(model)
-        .lines
+    lines_to_strings(&detail_text(model))
+}
+
+/// Même principe que [`plain_lines`], pour la réponse.
+pub fn response_plain_lines(model: &Model) -> Vec<String> {
+    lines_to_strings(&response_text(model))
+}
+
+fn lines_to_strings(text: &Text<'static>) -> Vec<String> {
+    text.lines
         .iter()
         .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect()
 }
 
-/// Texte du détail du nœud sélectionné ; vide sans sélection.
+/// Texte du détail du nœud sélectionné ; vide sans sélection. Ne contient
+/// plus le résultat d'exécution d'une requête, affiché séparément par
+/// [`response_text`] (`split-request-response-panels`).
 pub fn detail_text(model: &Model) -> Text<'static> {
     match model.selected_node() {
         Some(TreeNode::Request(request)) => {
             let session = model.editing.as_ref().filter(|s| s.path == request.path);
-            let mut text = request_text_with_session(request, session);
-            if let Some(outcome) = model.run.outcomes.get(&request.path) {
-                let filter = model.filter.as_ref().filter(|f| f.target == request.path);
-                text.lines.push(Line::default());
-                text.lines.extend(result_lines(outcome, filter));
-            }
-            text
+            request_text_with_session(request, session)
         }
         Some(TreeNode::Folder(folder)) => folder_text(folder),
         Some(TreeNode::Error(error)) => error_text(error),
         None => Text::default(),
     }
+}
+
+/// Texte de la réponse du nœud sélectionné : le résultat de la dernière
+/// exécution de la requête sélectionnée, ou vide quand la sélection n'a
+/// aucun résultat exploitable (pas de sélection, nœud non-requête, ou
+/// requête jamais exécutée).
+pub fn response_text(model: &Model) -> Text<'static> {
+    let Some(TreeNode::Request(request)) = model.selected_node() else {
+        return Text::default();
+    };
+    let Some(outcome) = model.run.outcomes.get(&request.path) else {
+        return Text::default();
+    };
+    let filter = model.filter.as_ref().filter(|f| f.target == request.path);
+    Text::from(result_lines(outcome, filter))
 }
 
 fn title(text: String) -> Line<'static> {
@@ -606,6 +625,24 @@ pub fn render_text(model: &Model) -> Text<'static> {
     text
 }
 
+/// Même principe que [`render_text`], pour la réponse.
+pub fn render_response_text(model: &Model) -> Text<'static> {
+    let mut text = response_text(model);
+    if let Some(range) = response_selection_range(model) {
+        for (index, line) in text.lines.iter_mut().enumerate() {
+            if range.contains(&(index as u16)) {
+                *line = tint_line(std::mem::take(line), SELECTION_TINT);
+            }
+        }
+    }
+    if let Some((line_index, range)) = &model.response_match
+        && let Some(line) = text.lines.get_mut(usize::from(*line_index))
+    {
+        *line = highlight_match(line, range.clone());
+    }
+    text
+}
+
 fn tint_line(line: Line<'static>, tint: Style) -> Line<'static> {
     Line::from(
         line.spans
@@ -855,7 +892,7 @@ mod tests {
             },
         );
         select(&mut model, "simple-get.bru");
-        plain(&detail_text(&model))
+        plain(&response_text(&model))
     }
 
     #[test]
@@ -953,6 +990,28 @@ mod tests {
         assert!(!text.contains("Verdict : échec"), "{text}");
     }
 
+    /// Le résultat d'exécution n'apparaît plus dans `detail_text` : il est
+    /// exclusivement dans `response_text` (`split-request-response-panels`).
+    #[test]
+    fn detail_text_no_longer_contains_the_execution_result() {
+        let mut model = loaded_model((100, 30));
+        model.run.outcomes.insert(
+            "simple-get.bru".into(),
+            RequestOutcome {
+                result: base_result(),
+                exit_code: Some(0),
+            },
+        );
+        select(&mut model, "simple-get.bru");
+        let detail = plain(&detail_text(&model));
+        assert!(!detail.contains("Résultat"), "{detail}");
+        assert!(!detail.contains("Verdict"), "{detail}");
+        assert!(!detail.contains("Corps de réponse"), "{detail}");
+        let response = plain(&response_text(&model));
+        assert!(response.contains("Résultat"), "{response}");
+        assert!(response.contains("Verdict"), "{response}");
+    }
+
     #[test]
     fn filter_applied_replaces_body_with_formatted_result_and_filter_line() {
         use crate::app::message::Message;
@@ -963,7 +1022,7 @@ mod tests {
         select(&mut model, "json.bru");
 
         // Avant filtrage : la section s'appelle "Corps de réponse" et contient le JSON brut
-        let text_before = plain(&detail_text(&model));
+        let text_before = plain(&response_text(&model));
         assert!(text_before.contains("Corps de réponse"), "{text_before}");
         assert!(!text_before.contains("Filtre :"), "{text_before}");
 
@@ -990,9 +1049,9 @@ mod tests {
         // "Corps de réponse" a été remplacé par le filtre
         assert!(!screen.contains("Corps de réponse"), "{screen}");
 
-        // Si le filtre ne correspond pas au nœud affiché, le détail reste inchangé
+        // Si le filtre ne correspond pas au nœud affiché, la réponse reste inchangée
         model.filter.as_mut().unwrap().target = std::path::PathBuf::from("autre.bru");
-        let text_other = plain(&detail_text(&model));
+        let text_other = plain(&response_text(&model));
         assert!(text_other.contains("Corps de réponse"), "{text_other}");
         assert!(!text_other.contains("Filtre :"), "{text_other}");
     }
@@ -1023,13 +1082,13 @@ mod tests {
 
         assert!(screen.contains("Filtre : .a.b |"), "{screen}");
         // Un message d'erreur de syntaxe doit être visible
-        let text = plain(&detail_text(&model));
+        let text = plain(&response_text(&model));
         assert!(
             text.contains("erreur de syntaxe")
                 || text.contains("syntax error")
                 || text.contains("attendait")
                 || text.contains("attendu"),
-            "message d'erreur attendu dans le détail :\n{text}"
+            "message d'erreur attendu dans la réponse :\n{text}"
         );
 
         // Vérifier que le message d'erreur est affiché en rouge dans le buffer

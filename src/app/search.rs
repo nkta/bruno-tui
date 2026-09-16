@@ -15,6 +15,7 @@ use crate::collection::TreeNode;
 pub enum SearchScope {
     Tree,
     Detail,
+    Response,
 }
 
 #[derive(Debug, Default)]

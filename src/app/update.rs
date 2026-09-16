@@ -13,8 +13,11 @@ use super::model::{
     field_value, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
-use super::view::detail::plain_lines;
-use super::view::{detail::detail_text, inner, layout_for};
+use super::view::detail::{plain_lines, response_plain_lines};
+use super::view::{
+    detail::{detail_text, response_text},
+    inner, layout_for,
+};
 use crate::collection::TreeNode;
 use crate::runner::RunRequest;
 use crate::runner::report::ResponseStatus;
@@ -126,6 +129,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
         Message::NextFocus => {
             model.focus = match model.focus {
                 Focus::Tree => Focus::Detail,
+                Focus::Detail => Focus::Response,
                 _ => Focus::Tree,
             };
             Command::None
@@ -137,8 +141,19 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                 } else {
                     model.editing = None;
                 }
-            } else if model.detail_selection.take().is_none() {
-                model.focus = Focus::Tree;
+            } else {
+                // `Échap` annule d'abord la sélection visuelle du panneau
+                // focalisé, s'il y en a une, avant de rendre le focus à
+                // l'arbre (`search-and-yank`, généralisé au détail et à
+                // la réponse par `split-request-response-panels`).
+                let cancelled_selection = match model.focus {
+                    Focus::Detail => model.detail_selection.take().is_some(),
+                    Focus::Response => model.response_selection.take().is_some(),
+                    _ => false,
+                };
+                if !cancelled_selection {
+                    model.focus = Focus::Tree;
+                }
             }
             Command::None
         }
@@ -333,6 +348,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                         scroll_detail(model, navigation);
                     }
                 }
+                Focus::Response => scroll_response(model, navigation),
                 Focus::Diagnostics => navigate_diagnostics(model, navigation),
                 Focus::History => navigate_history(model, navigation),
                 Focus::EnvironmentPicker => navigate_environment_picker(model, navigation),
@@ -353,7 +369,7 @@ fn run_selected(model: &mut Model) -> Command {
             .history
             .get(model.history_selected)
             .map(|entry| (entry.target.clone(), entry.recursive)),
-        Focus::Tree | Focus::Detail => match model.selected_node() {
+        Focus::Tree | Focus::Detail | Focus::Response => match model.selected_node() {
             Some(TreeNode::Request(request)) => Some((request.path.clone(), false)),
             Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
             Some(TreeNode::Error(_)) | None => None,
@@ -490,13 +506,16 @@ fn navigate_tree(model: &mut Model, message: Message) {
     scroll_tree_into_view(model);
 }
 
-/// Efface l'état propre à l'affichage du détail d'un nœud précis : appelé à
-/// chaque changement de sélection dans l'arbre, qu'il vienne de la
-/// navigation normale ou d'une recherche.
+/// Efface l'état propre à l'affichage du détail et de la réponse d'un
+/// nœud précis : appelé à chaque changement de sélection dans l'arbre,
+/// qu'il vienne de la navigation normale ou d'une recherche.
 fn clear_detail_view_state(model: &mut Model) {
     model.detail_scroll = 0;
     model.detail_selection = None;
     model.detail_match = None;
+    model.response_scroll = 0;
+    model.response_selection = None;
+    model.response_match = None;
     model.editing = None;
 }
 
@@ -923,33 +942,76 @@ fn detail_line_count(model: &Model) -> usize {
     detail_text(model).lines.len()
 }
 
+/// Même principe que [`detail_line_count`], pour la réponse
+/// (`split-request-response-panels`).
+fn response_line_count(model: &Model) -> usize {
+    response_text(model).lines.len()
+}
+
+/// Défilement maximal étant donné un nombre de lignes logiques et la
+/// hauteur intérieure du panneau. Pure : partagée par le détail et la
+/// réponse, qui ne diffèrent que par la source du nombre de lignes et de
+/// la hauteur (`design.md`, D3).
+fn max_scroll(line_count: usize, height: u16) -> u16 {
+    let max = line_count.saturating_sub(usize::from(height));
+    u16::try_from(max).unwrap_or(u16::MAX)
+}
+
+/// Dernière ligne visible d'un panneau étant donné son défilement
+/// courant, sa hauteur intérieure et son nombre de lignes logiques.
+/// Toujours la vraie dernière ligne du contenu quand `scroll` est à son
+/// maximum (voir le calcul dans `design.md`, D5 de
+/// `improve-visual-design`) : c'est ce qui permet à une sélection
+/// visuelle d'atteindre des lignes qu'aucun sommet de panneau ne peut
+/// jamais atteindre seul.
+fn viewport_bottom(scroll: u16, height: u16, line_count: usize) -> u16 {
+    if line_count == 0 {
+        return 0;
+    }
+    let bottom = scroll.saturating_add(height.saturating_sub(1));
+    bottom.min(u16::try_from(line_count - 1).unwrap_or(u16::MAX))
+}
+
 /// Défilement maximal du détail : lignes logiques moins la hauteur du
 /// panneau.
 fn detail_max_scroll(model: &Model) -> u16 {
     let Some(areas) = layout_for(model.size) else {
         return 0;
     };
-    let height = inner(areas.detail).height;
-    let max = detail_line_count(model).saturating_sub(usize::from(height));
-    u16::try_from(max).unwrap_or(u16::MAX)
+    max_scroll(detail_line_count(model), inner(areas.detail).height)
+}
+
+/// Même principe que [`detail_max_scroll`], pour la réponse.
+fn response_max_scroll(model: &Model) -> u16 {
+    let Some(areas) = layout_for(model.size) else {
+        return 0;
+    };
+    max_scroll(response_line_count(model), inner(areas.response).height)
 }
 
 /// Dernière ligne visible du panneau de détail, à la position de
-/// défilement courante. Toujours la vraie dernière ligne du contenu quand
-/// `detail_scroll` est à son maximum (voir le calcul dans `design.md`,
-/// D5) : c'est ce qui permet à une sélection visuelle d'atteindre des
-/// lignes qu'aucun sommet de panneau ne peut jamais atteindre seul.
+/// défilement courante.
 pub(crate) fn bottom_of_viewport(model: &Model) -> u16 {
     let Some(areas) = layout_for(model.size) else {
         return model.detail_scroll;
     };
-    let height = inner(areas.detail).height;
-    let lines = detail_line_count(model);
-    if lines == 0 {
-        return 0;
-    }
-    let bottom = model.detail_scroll.saturating_add(height.saturating_sub(1));
-    bottom.min(u16::try_from(lines - 1).unwrap_or(u16::MAX))
+    viewport_bottom(
+        model.detail_scroll,
+        inner(areas.detail).height,
+        detail_line_count(model),
+    )
+}
+
+/// Même principe que [`bottom_of_viewport`], pour la réponse.
+pub(crate) fn response_bottom_of_viewport(model: &Model) -> u16 {
+    let Some(areas) = layout_for(model.size) else {
+        return model.response_scroll;
+    };
+    viewport_bottom(
+        model.response_scroll,
+        inner(areas.response).height,
+        response_line_count(model),
+    )
 }
 
 /// Plage de lignes couvertes par la sélection visuelle active, s'il y en a
@@ -961,11 +1023,34 @@ pub(crate) fn selection_range(model: &Model) -> Option<RangeInclusive<u16>> {
     Some(anchor.min(bottom)..=anchor.max(bottom))
 }
 
+/// Même principe que [`selection_range`], pour la réponse.
+pub(crate) fn response_selection_range(model: &Model) -> Option<RangeInclusive<u16>> {
+    let anchor = model.response_selection?.anchor;
+    let bottom = response_bottom_of_viewport(model);
+    Some(anchor.min(bottom)..=anchor.max(bottom))
+}
+
 fn scroll_detail(model: &mut Model, message: Message) {
     let page = layout_for(model.size).map_or(1, |areas| inner(areas.detail).height.max(1));
     let max = detail_max_scroll(model);
     let scroll = model.detail_scroll;
     model.detail_scroll = match message {
+        Message::Up => scroll.saturating_sub(1),
+        Message::Down => scroll.saturating_add(1).min(max),
+        Message::PageUp => scroll.saturating_sub(page),
+        Message::PageDown => scroll.saturating_add(page).min(max),
+        Message::Home => 0,
+        Message::End => max,
+        _ => scroll,
+    };
+}
+
+/// Même principe que [`scroll_detail`], pour la réponse.
+fn scroll_response(model: &mut Model, message: Message) {
+    let page = layout_for(model.size).map_or(1, |areas| inner(areas.response).height.max(1));
+    let max = response_max_scroll(model);
+    let scroll = model.response_scroll;
+    model.response_scroll = match message {
         Message::Up => scroll.saturating_sub(1),
         Message::Down => scroll.saturating_add(1).min(max),
         Message::PageUp => scroll.saturating_sub(page),
@@ -1128,6 +1213,7 @@ fn confirm_search(model: &mut Model) {
     let scope = match model.focus {
         Focus::Tree => SearchScope::Tree,
         Focus::Detail => SearchScope::Detail,
+        Focus::Response => SearchScope::Response,
         Focus::Diagnostics | Focus::History | Focus::EnvironmentPicker => SearchScope::Tree,
     };
     search.pattern = search.draft.clone();
@@ -1173,6 +1259,7 @@ fn run_search(model: &mut Model, forward: bool) {
     let found = match scope {
         SearchScope::Tree => search_tree(model, &pattern, forward),
         SearchScope::Detail => search_detail(model, &pattern, forward),
+        SearchScope::Response => search_response(model, &pattern, forward),
     };
     if let Some(search) = &mut model.search {
         search.last_result = Some(found);
@@ -1242,6 +1329,18 @@ fn search_detail(model: &mut Model, pattern: &str, forward: bool) -> bool {
     true
 }
 
+/// Même principe que [`search_detail`], pour la réponse.
+fn search_response(model: &mut Model, pattern: &str, forward: bool) -> bool {
+    let lines = response_plain_lines(model);
+    let Some((line, range)) = find_detail_match(&lines, model.response_scroll, pattern, forward)
+    else {
+        return false;
+    };
+    model.response_scroll = line.min(response_max_scroll(model));
+    model.response_match = Some((line, range));
+    true
+}
+
 // --- Filtre de réponse ---------------------------------------------------
 
 /// `|` : ouvre la saisie du filtre jq si la sélection courante a produit
@@ -1301,29 +1400,51 @@ fn reset_filter_if_selection_changed(model: &mut Model, previous_path: Option<&s
 
 // --- Sélection visuelle et copie -----------------------------------------
 
-/// `v`, hors saisie, en focus Détail seulement (produit uniquement dans ce
-/// cas par `message.rs`, mais revérifié ici par défense).
+/// `v`, hors saisie, en focus Détail ou Réponse seulement (produit
+/// inconditionnellement par `message.rs`, filtré ici selon le focus
+/// courant). Chaque panneau porte sa propre sélection, indépendamment de
+/// l'autre (`split-request-response-panels`).
 fn toggle_visual(model: &mut Model) {
-    if model.focus != Focus::Detail {
-        return;
+    match model.focus {
+        Focus::Detail => {
+            if model.detail_selection.take().is_some() {
+                return;
+            }
+            model.detail_selection = Some(DetailSelection {
+                anchor: model.detail_scroll,
+            });
+        }
+        Focus::Response => {
+            if model.response_selection.take().is_some() {
+                return;
+            }
+            model.response_selection = Some(DetailSelection {
+                anchor: model.response_scroll,
+            });
+        }
+        _ => {}
     }
-    if model.detail_selection.take().is_some() {
-        return;
-    }
-    model.detail_selection = Some(DetailSelection {
-        anchor: model.detail_scroll,
-    });
 }
 
 /// `y` : copie la sélection visuelle si elle est active, sinon la seule
-/// ligne au sommet du panneau. Sans effet hors focus Détail (l'arbre et la
-/// saisie de recherche n'ont pas de notion de ligne à copier).
+/// ligne au sommet du panneau. Sans effet hors focus Détail ou Réponse
+/// (l'arbre et la saisie de recherche n'ont pas de notion de ligne à
+/// copier), à partir du panneau qui a le focus.
 fn yank(model: &mut Model) -> Command {
-    if model.focus != Focus::Detail {
-        return Command::None;
-    }
-    let lines = plain_lines(model);
-    let text = match selection_range(model) {
+    let (lines, range, scroll) = match model.focus {
+        Focus::Detail => (
+            plain_lines(model),
+            selection_range(model),
+            model.detail_scroll,
+        ),
+        Focus::Response => (
+            response_plain_lines(model),
+            response_selection_range(model),
+            model.response_scroll,
+        ),
+        _ => return Command::None,
+    };
+    let text = match range {
         Some(range) => {
             let selected: Vec<&str> = lines
                 .iter()
@@ -1331,13 +1452,14 @@ fn yank(model: &mut Model) -> Command {
                 .filter(|(index, _)| range.contains(&(*index as u16)))
                 .map(|(_, line)| line.as_str())
                 .collect();
-            model.detail_selection = None;
+            match model.focus {
+                Focus::Detail => model.detail_selection = None,
+                Focus::Response => model.response_selection = None,
+                _ => {}
+            }
             selected.join("\n")
         }
-        None => lines
-            .get(usize::from(model.detail_scroll))
-            .cloned()
-            .unwrap_or_default(),
+        None => lines.get(usize::from(scroll)).cloned().unwrap_or_default(),
     };
     let token = model.next_clipboard_token;
     model.next_clipboard_token += 1;
@@ -2457,6 +2579,13 @@ mod tests {
             .expect("ligne attendue") as u16
     }
 
+    fn response_line_index_containing(model: &Model, needle: &str) -> u16 {
+        response_plain_lines(model)
+            .iter()
+            .position(|line| line.contains(needle))
+            .expect("ligne attendue") as u16
+    }
+
     #[test]
     fn detail_search_finds_a_match_beyond_the_top_of_the_panel() {
         // Panneau court : le détail de `scripted` dépasse ses 8 lignes
@@ -2485,6 +2614,46 @@ mod tests {
         assert_eq!(line, expected_line);
         let lines = crate::app::view::detail::plain_lines(&model);
         assert_eq!(&lines[line as usize][range], "res.body.ok");
+    }
+
+    #[test]
+    fn response_search_finds_a_match_without_moving_the_detail_scroll() {
+        use crate::app::test_support::runner_probe_model;
+
+        // Panneau court : le résultat de `green.bru` dépasse ses lignes
+        // utiles, ce qui force un vrai défilement pour rendre la ligne
+        // visible.
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        assert_eq!(model.focus, Focus::Response);
+        let detail_scroll_before = model.detail_scroll;
+        let expected_line = response_line_index_containing(&model, "[1,2]");
+
+        update(&mut model, Message::StartSearch);
+        for c in "[1,2]".chars() {
+            update(&mut model, Message::SearchInput(c));
+        }
+        update(&mut model, Message::ConfirmSearch);
+
+        let areas = crate::app::view::layout_for(model.size).expect("taille suffisante");
+        let height = crate::app::view::inner(areas.response).height;
+        assert!(
+            model.response_scroll <= expected_line
+                && expected_line < model.response_scroll + height,
+            "ligne {expected_line} non visible à scroll={}, hauteur={height}",
+            model.response_scroll
+        );
+        let (line, range) = model.response_match.clone().expect("correspondance");
+        assert_eq!(line, expected_line);
+        let lines = response_plain_lines(&model);
+        assert_eq!(&lines[line as usize][range], "[1,2]");
+
+        // Le défilement et la mise en évidence du détail restent
+        // inchangés par une recherche dans la réponse.
+        assert_eq!(model.detail_scroll, detail_scroll_before);
+        assert!(model.detail_match.is_none());
     }
 
     #[test]
@@ -2521,6 +2690,26 @@ mod tests {
     }
 
     #[test]
+    fn toggle_visual_then_escape_in_response_does_not_change_focus_or_detail_selection() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        let scroll_before = model.response_scroll;
+        update(&mut model, Message::ToggleVisual);
+        assert!(model.response_selection.is_some());
+        update(&mut model, Message::FocusTree);
+        assert!(model.response_selection.is_none());
+        assert_eq!(model.response_scroll, scroll_before);
+        // Le premier Échap annule seulement la sélection : le focus reste
+        // sur la réponse, et la sélection du détail n'est pas concernée.
+        assert_eq!(model.focus, Focus::Response);
+        assert!(model.detail_selection.is_none());
+    }
+
+    #[test]
     fn a_second_toggle_visual_cancels_the_selection_without_copying() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "scripted.bru");
@@ -2553,7 +2742,9 @@ mod tests {
         update(&mut model, Message::NextFocus); // Tab : focus Détail
         update(&mut model, Message::ToggleVisual);
         assert!(model.detail_selection.is_some());
+        update(&mut model, Message::NextFocus); // Tab : focus Réponse, sélection intacte
         update(&mut model, Message::NextFocus); // Tab : focus Arbre, sélection intacte
+        assert_eq!(model.focus, Focus::Tree);
         assert!(model.detail_selection.is_some());
         update(&mut model, Message::Down); // change le nœud sélectionné
         assert!(model.detail_selection.is_none());
@@ -2595,6 +2786,63 @@ mod tests {
     fn yank_outside_detail_focus_does_nothing() {
         let mut model = loaded_model((100, 30));
         assert!(matches!(update(&mut model, Message::Yank), Command::None));
+    }
+
+    #[test]
+    fn visual_selections_in_detail_and_response_are_independent() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+
+        // Sélection visuelle dans le détail.
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::ToggleVisual);
+        assert!(model.detail_selection.is_some());
+
+        // Bascule vers la réponse et active sa propre sélection.
+        update(&mut model, Message::NextFocus); // Réponse
+        assert!(model.response_selection.is_none());
+        update(&mut model, Message::ToggleVisual);
+        assert!(model.response_selection.is_some());
+
+        // Les deux sélections coexistent, chacune bornée à son panneau.
+        assert!(model.detail_selection.is_some());
+        assert!(model.response_selection.is_some());
+
+        // Copier depuis la réponse ne lève que la sélection de la réponse.
+        update(&mut model, Message::Yank);
+        assert!(model.response_selection.is_none());
+        assert!(model.detail_selection.is_some());
+    }
+
+    #[test]
+    fn changing_selection_clears_both_detail_and_response_view_state() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        model.detail_scroll = 2;
+        model.detail_match = Some((2, 0..1));
+        update(&mut model, Message::NextFocus); // Réponse
+        model.response_scroll = 3;
+        model.response_match = Some((3, 0..1));
+
+        update(&mut model, Message::FocusTree);
+        assert_eq!(
+            model.focus,
+            Focus::Tree,
+            "aucune sélection à annuler d'abord"
+        );
+        update(&mut model, Message::Down);
+
+        assert_eq!(model.detail_scroll, 0);
+        assert!(model.detail_selection.is_none());
+        assert!(model.detail_match.is_none());
+        assert_eq!(model.response_scroll, 0);
+        assert!(model.response_selection.is_none());
+        assert!(model.response_match.is_none());
     }
 
     #[test]
@@ -2779,6 +3027,28 @@ mod tests {
         let stamp = session.stamp;
         update(&mut model, Message::StartEdit);
         assert_eq!(model.editing.as_ref().unwrap().stamp, stamp);
+
+        // 6. Sur une requête valide avec Focus::Response : sans effet
+        // (l'édition ne porte que sur le panneau Détail,
+        // `split-request-response-panels`). Focus déjà sur Détail depuis
+        // le cas 4 : un seul Tab suffit pour atteindre la réponse.
+        model.editing = None;
+        update(&mut model, Message::NextFocus);
+        assert_eq!(model.focus, Focus::Response);
+        update(&mut model, Message::StartEdit);
+        assert!(model.editing.is_none());
+    }
+
+    #[test]
+    fn next_focus_cycles_through_tree_detail_and_response() {
+        let mut model = loaded_model((100, 30));
+        assert_eq!(model.focus, Focus::Tree);
+        update(&mut model, Message::NextFocus);
+        assert_eq!(model.focus, Focus::Detail);
+        update(&mut model, Message::NextFocus);
+        assert_eq!(model.focus, Focus::Response);
+        update(&mut model, Message::NextFocus);
+        assert_eq!(model.focus, Focus::Tree);
     }
 
     #[test]
