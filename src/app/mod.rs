@@ -9,6 +9,7 @@ pub mod cli;
 pub mod clipboard;
 pub mod diagnostics;
 pub mod event;
+pub mod filter;
 pub mod message;
 pub mod model;
 pub mod search;
@@ -200,6 +201,31 @@ pub(crate) mod test_support {
             &mut model,
             Message::CollectionLoaded(BruLoader.load(&fixture())),
         );
+        model
+    }
+
+    /// Modèle avec `runner-probe` chargée et le rapport `mixed.json` appliqué.
+    pub fn runner_probe_model() -> Model {
+        let probe_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/runner-probe");
+        let mut model = Model::new(probe_path.clone(), (100, 30));
+        update(
+            &mut model,
+            Message::CollectionLoaded(crate::collection::BruLoader.load(&probe_path)),
+        );
+        let mixed_report: crate::runner::report::Report =
+            serde_json::from_str(include_str!("../../tests/fixtures/reports/mixed.json"))
+                .expect("mixed.json doit se désérialiser");
+        for result in mixed_report.0.into_iter().flat_map(|it| it.results) {
+            let key = std::path::PathBuf::from(&result.test.filename);
+            model.run.outcomes.insert(
+                key,
+                super::model::RequestOutcome {
+                    result,
+                    exit_code: Some(0),
+                },
+            );
+        }
         model
     }
 

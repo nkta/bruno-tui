@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span, Text};
 use serde_json::Value;
 
 use super::tree::file_name;
+use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
     EditMode, EditSession, EditableField, Model, RequestOutcome, field_enabled, field_value,
 };
@@ -43,8 +44,9 @@ pub fn detail_text(model: &Model) -> Text<'static> {
             let session = model.editing.as_ref().filter(|s| s.path == request.path);
             let mut text = request_text_with_session(request, session);
             if let Some(outcome) = model.run.outcomes.get(&request.path) {
+                let filter = model.filter.as_ref().filter(|f| f.target == request.path);
                 text.lines.push(Line::default());
-                text.lines.extend(result_lines(outcome));
+                text.lines.extend(result_lines(outcome, filter));
             }
             text
         }
@@ -440,9 +442,21 @@ fn body_lines(data: &Value) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Ligne affichant le filtre en cours d'édition ou appliqué.
+fn filter_line(draft: &str, editing: bool) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled("Filtre : ", Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw(draft.to_owned()),
+    ];
+    if editing {
+        spans.push(Span::raw("█"));
+    }
+    Line::from(spans)
+}
+
 /// Section « Résultat » d'une requête exécutée : verdict, réponse, puis
 /// chaque assertion et test (y compris pré-requête et post-réponse).
-fn result_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
+fn result_lines(outcome: &RequestOutcome, filter: Option<&FilterState>) -> Vec<Line<'static>> {
     let result = &outcome.result;
     let mut lines = vec![section("Résultat")];
     lines.push(field(
@@ -479,8 +493,33 @@ fn result_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
         _ => lines.push(Line::raw("  aucun")),
     }
 
-    lines.push(section("Corps de réponse"));
-    lines.extend(body_lines(&result.response.data));
+    let filter_active = filter.is_some_and(|f| f.editing || f.applied.is_some());
+    if let Some(f) = filter.filter(|_| filter_active) {
+        lines.push(filter_line(&f.draft, f.editing));
+        match &f.applied {
+            Some(FilterResult::Output(outputs)) => {
+                for out in outputs {
+                    for line in out.lines() {
+                        lines.push(Line::raw(format!("  {line}")));
+                    }
+                }
+            }
+            Some(FilterResult::Error(error)) => {
+                for line in error.lines() {
+                    lines.push(Line::styled(
+                        format!("  {line}"),
+                        Style::new().fg(Color::Red),
+                    ));
+                }
+            }
+            None => {
+                lines.extend(body_lines(&result.response.data));
+            }
+        }
+    } else {
+        lines.push(section("Corps de réponse"));
+        lines.extend(body_lines(&result.response.data));
+    }
 
     push_checks(
         &mut lines,
@@ -872,5 +911,109 @@ mod tests {
         });
         assert!(text.contains("Statut : ignorée"), "{text}");
         assert!(!text.contains("Verdict : échec"), "{text}");
+    }
+
+    #[test]
+    fn filter_applied_replaces_body_with_formatted_result_and_filter_line() {
+        use crate::app::message::Message;
+        use crate::app::test_support::{runner_probe_model, screen_lines};
+        use crate::app::update::update;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+
+        // Avant filtrage : la section s'appelle "Corps de réponse" et contient le JSON brut
+        let text_before = plain(&detail_text(&model));
+        assert!(text_before.contains("Corps de réponse"), "{text_before}");
+        assert!(!text_before.contains("Filtre :"), "{text_before}");
+
+        // Applique le filtre `.a` sur json.bru
+        update(&mut model, Message::OpenFilter);
+        for c in ".a".chars() {
+            update(&mut model, Message::FilterInput(c));
+        }
+        update(&mut model, Message::ConfirmFilter);
+
+        // Vérification par TestBackend
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 50)).expect("terminal");
+        terminal
+            .draw(|frame| super::super::view(&model, frame))
+            .expect("rendu");
+        let screen = screen_lines(terminal.backend()).join("\n");
+
+        assert!(screen.contains("Filtre : .a"), "{screen}");
+        assert!(screen.contains("["), "{screen}");
+        assert!(screen.contains("1,"), "{screen}");
+        assert!(screen.contains("2"), "{screen}");
+        assert!(screen.contains("]"), "{screen}");
+        // "Corps de réponse" a été remplacé par le filtre
+        assert!(!screen.contains("Corps de réponse"), "{screen}");
+
+        // Si le filtre ne correspond pas au nœud affiché, le détail reste inchangé
+        model.filter.as_mut().unwrap().target = std::path::PathBuf::from("autre.bru");
+        let text_other = plain(&detail_text(&model));
+        assert!(text_other.contains("Corps de réponse"), "{text_other}");
+        assert!(!text_other.contains("Filtre :"), "{text_other}");
+    }
+
+    #[test]
+    fn filter_error_shows_visible_error_message_and_survives_absurd_terminal_size() {
+        use crate::app::message::Message;
+        use crate::app::test_support::{runner_probe_model, screen_lines};
+        use crate::app::update::update;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+
+        // Applique un filtre invalide `.a.b |`
+        update(&mut model, Message::OpenFilter);
+        for c in ".a.b |".chars() {
+            update(&mut model, Message::FilterInput(c));
+        }
+        update(&mut model, Message::ConfirmFilter);
+
+        // Vérification par TestBackend sur terminal 120x50
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 50)).expect("terminal");
+        terminal
+            .draw(|frame| super::super::view(&model, frame))
+            .expect("rendu");
+        let screen = screen_lines(terminal.backend()).join("\n");
+
+        assert!(screen.contains("Filtre : .a.b |"), "{screen}");
+        // Un message d'erreur de syntaxe doit être visible
+        let text = plain(&detail_text(&model));
+        assert!(
+            text.contains("erreur de syntaxe")
+                || text.contains("syntax error")
+                || text.contains("attendait")
+                || text.contains("attendu"),
+            "message d'erreur attendu dans le détail :\n{text}"
+        );
+
+        // Vérifier que le message d'erreur est affiché en rouge dans le buffer
+        let buffer = terminal.backend().buffer();
+        let mut found_red = false;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.fg == ratatui::style::Color::Red && !cell.symbol().trim().is_empty() {
+                    found_red = true;
+                    break;
+                }
+            }
+            if found_red {
+                break;
+            }
+        }
+        assert!(found_red, "le message d'erreur doit être stylé en rouge");
+
+        // Sur un terminal 1x1, aucun panic ne doit survenir
+        let mut small_terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(1, 1)).expect("terminal");
+        small_terminal
+            .draw(|frame| super::super::view(&model, frame))
+            .expect("rendu 1x1");
     }
 }
