@@ -123,6 +123,10 @@ pub enum Message {
     ConfirmYes,
     /// Réponse 'non' à un `PendingConfirm`.
     ConfirmNo,
+    /// `D`, hors saisie : ouvre ou ferme le panneau de diagnostics.
+    ToggleDiagnostics,
+    /// `H`, hors saisie : ouvre ou ferme le panneau d'historique.
+    ToggleHistory,
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -173,6 +177,8 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Esc => Message::FocusTree,
         KeyCode::Char('q') => Message::Quit,
         KeyCode::Char('r') => Message::RunSelected,
+        KeyCode::Char('D') => Message::ToggleDiagnostics,
+        KeyCode::Char('H') => Message::ToggleHistory,
         KeyCode::Char('/') => Message::StartSearch,
         KeyCode::Char('n') => Message::NextMatch,
         KeyCode::Char('N') => Message::PreviousMatch,
@@ -275,6 +281,10 @@ mod tests {
             (KeyCode::Esc, none, "FocusTree"),
             (KeyCode::Char('q'), none, "Quit"),
             (KeyCode::Char('r'), none, "RunSelected"),
+            (KeyCode::Char('D'), none, "ToggleDiagnostics"),
+            (KeyCode::Char('D'), KeyModifiers::SHIFT, "ToggleDiagnostics"),
+            (KeyCode::Char('H'), none, "ToggleHistory"),
+            (KeyCode::Char('H'), KeyModifiers::SHIFT, "ToggleHistory"),
             (KeyCode::Char('c'), KeyModifiers::CONTROL, "ForceQuit"),
             (KeyCode::Char('x'), KeyModifiers::CONTROL, "CancelRun"),
             (KeyCode::Char('/'), none, "StartSearch"),

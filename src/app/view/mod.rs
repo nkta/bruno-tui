@@ -5,6 +5,7 @@
 //! panneaux pour garder la sélection visible et borner le défilement.
 
 pub mod detail;
+pub mod panels;
 pub mod tree;
 
 use ratatui::Frame;
@@ -106,17 +107,25 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 areas.body,
             );
         }
-        CollectionState::Loaded(_) => {
-            render_tree(model, frame, areas.tree);
-            frame.render_widget(
-                Paragraph::new(detail::render_text(model))
-                    .wrap(Wrap { trim: false })
-                    .scroll((model.detail_scroll, 0))
-                    .block(panel(" Détail ", model.focus == Focus::Detail)),
-                areas.detail,
-            );
-            render_insert_cursor(model, frame, areas.detail);
-        }
+        CollectionState::Loaded(_) => match model.focus {
+            Focus::Diagnostics => {
+                panels::render_diagnostics(model, frame, areas.body);
+            }
+            Focus::History => {
+                panels::render_history(model, frame, areas.body);
+            }
+            Focus::Tree | Focus::Detail => {
+                render_tree(model, frame, areas.tree);
+                frame.render_widget(
+                    Paragraph::new(detail::render_text(model))
+                        .wrap(Wrap { trim: false })
+                        .scroll((model.detail_scroll, 0))
+                        .block(panel(" Détail ", model.focus == Focus::Detail)),
+                    areas.detail,
+                );
+                render_insert_cursor(model, frame, areas.detail);
+            }
+        },
     }
 
     frame.render_widget(
@@ -159,16 +168,34 @@ fn render_insert_cursor(model: &Model, frame: &mut Frame, detail_area: Rect) {
 }
 
 fn title_line(model: &Model) -> Line<'static> {
-    let title = match &model.collection {
-        CollectionState::Loading => format!("Chargement de {}…", model.source.display()),
-        CollectionState::Loaded(collection) => collection.name.clone(),
-        CollectionState::Failed(_) => "Erreur de chargement".to_owned(),
-    };
-    Line::from(vec![
-        Span::styled("bruno-tui", Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(" · "),
-        Span::raw(title),
-    ])
+    match &model.collection {
+        CollectionState::Loading => Line::from(vec![
+            Span::styled("bruno-tui", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw(" · "),
+            Span::raw(format!("Chargement de {}…", model.source.display())),
+        ]),
+        CollectionState::Failed(_) => Line::from(vec![
+            Span::styled("bruno-tui", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw(" · "),
+            Span::raw("Erreur de chargement".to_owned()),
+        ]),
+        CollectionState::Loaded(collection) => {
+            let mut spans = vec![
+                Span::styled("bruno-tui", Style::new().add_modifier(Modifier::BOLD)),
+                Span::raw(" · "),
+                Span::raw(collection.name.clone()),
+            ];
+            let error_count = crate::app::diagnostics::diagnostics(collection).len();
+            if error_count > 0 {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    format!("⚠ {error_count}"),
+                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
+        }
+    }
 }
 
 /// Statut d'exécution d'un nœud, pour l'indicateur de la ligne de l'arbre.
@@ -277,11 +304,17 @@ fn status_line(model: &Model) -> String {
             "↑↓ défiler  Début/Fin  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
                 .to_owned()
         }
+        (CollectionState::Loaded(_), Focus::Diagnostics) => {
+            "↑↓ naviguer  → aller au nœud  Échap arbre".to_owned()
+        }
+        (CollectionState::Loaded(_), Focus::History) => {
+            "↑↓ naviguer  r rejouer  Échap arbre".to_owned()
+        }
         _ => "q quitter".to_owned(),
     }
 }
 
-fn panel(title: &'static str, focused: bool) -> Block<'static> {
+pub(crate) fn panel(title: &'static str, focused: bool) -> Block<'static> {
     let style = if focused {
         Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
@@ -330,9 +363,11 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use crate::app::message::Message;
+    use crate::app::model::{HistoryEntry, HistoryOutcome};
     use crate::app::test_support::{fixture, loaded_model, render, select};
     use crate::app::update::update;
     use crate::collection::{Collection, LoadError};
+    use std::path::PathBuf;
 
     #[test]
     fn initial_tree_lists_first_level_in_order_with_error_marks() {
@@ -643,5 +678,108 @@ mod tests {
         terminal
             .draw(|frame| view(&model, frame))
             .expect("rendu sans panique");
+    }
+
+    #[test]
+    fn title_line_badge_rendered_on_errors_and_hidden_otherwise() {
+        // parser-cases a 3 erreurs
+        let model = loaded_model((100, 30));
+        let lines = render(&model, 100, 30);
+        assert!(
+            lines[0].contains("⚠ 3"),
+            "Titre attendu avec ⚠ 3: {}",
+            lines[0]
+        );
+
+        // Collection sans erreur
+        let mut clean_model = Model::new(fixture(), (100, 30));
+        update(
+            &mut clean_model,
+            Message::CollectionLoaded(Ok(Collection {
+                root: "/clean".into(),
+                name: "clean".into(),
+                settings: None,
+                tree: Vec::new(),
+                environments: Vec::new(),
+            })),
+        );
+        let clean_lines = render(&clean_model, 100, 30);
+        assert!(
+            !clean_lines[0].contains('⚠'),
+            "Titre ne doit pas contenir ⚠: {}",
+            clean_lines[0]
+        );
+    }
+
+    #[test]
+    fn render_diagnostics_and_history_panels_with_and_without_entries() {
+        // 1. Diagnostics avec entrées (sur parser-cases)
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::Diagnostics;
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Diagnostics"), "{screen}");
+        assert!(screen.contains("badmeta"), "{screen}");
+        assert!(screen.contains("broken.bru"), "{screen}");
+        assert!(screen.contains("no-method.bru"), "{screen}");
+
+        // 2. Diagnostics sans erreur
+        let mut clean_model = Model::new(fixture(), (100, 30));
+        update(
+            &mut clean_model,
+            Message::CollectionLoaded(Ok(Collection {
+                root: "/clean".into(),
+                name: "clean".into(),
+                settings: None,
+                tree: Vec::new(),
+                environments: Vec::new(),
+            })),
+        );
+        clean_model.focus = Focus::Diagnostics;
+        let screen = render(&clean_model, 100, 30).join("\n");
+        assert!(screen.contains("aucune erreur"), "{screen}");
+
+        // 3. Historique sans entrée
+        let mut hist_model = loaded_model((100, 30));
+        hist_model.focus = Focus::History;
+        let screen = render(&hist_model, 100, 30).join("\n");
+        assert!(screen.contains("Historique"), "{screen}");
+        assert!(screen.contains("aucune exécution"), "{screen}");
+
+        // 4. Historique avec entrée
+        hist_model.history.push_back(HistoryEntry {
+            started_at: std::time::SystemTime::now(),
+            target: PathBuf::from("ping.bru"),
+            recursive: false,
+            outcome: HistoryOutcome::Completed {
+                total: 1,
+                failed: 0,
+                duration_secs: 0.25,
+            },
+        });
+        let screen = render(&hist_model, 100, 30).join("\n");
+        assert!(screen.contains("ping.bru"), "{screen}");
+        assert!(screen.contains("succès"), "{screen}");
+        assert!(screen.contains("0.25s"), "{screen}");
+    }
+
+    #[test]
+    fn status_line_shows_expected_keys_for_diagnostics_and_history() {
+        let mut model = loaded_model((100, 30));
+
+        model.focus = Focus::Diagnostics;
+        let lines = render(&model, 100, 30);
+        let status = &lines[29];
+        assert!(
+            status.contains("↑↓ naviguer  → aller au nœud  Échap arbre"),
+            "{status}"
+        );
+
+        model.focus = Focus::History;
+        let lines = render(&model, 100, 30);
+        let status = &lines[29];
+        assert!(
+            status.contains("↑↓ naviguer  r rejouer  Échap arbre"),
+            "{status}"
+        );
     }
 }

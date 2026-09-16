@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub mod clipboard;
+pub mod diagnostics;
 pub mod event;
 pub mod message;
 pub mod model;
