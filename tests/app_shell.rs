@@ -94,6 +94,7 @@ fn spawn_run_sized(
             sender,
             events,
             "bru".into(),
+            Arc::new(bruno_tui::app::clipboard::SystemClipboard),
         )
         .await;
         let Ok(exit) = result;

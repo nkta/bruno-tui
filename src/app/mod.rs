@@ -6,9 +6,11 @@
 //! la boucle, qui ne bloque jamais.
 
 pub mod cli;
+pub mod clipboard;
 pub mod event;
 pub mod message;
 pub mod model;
+pub mod search;
 pub mod update;
 pub mod view;
 
@@ -23,6 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::collection::CollectionLoader;
 use crate::runner::BruRunner;
+use clipboard::Clipboard;
 use event::{AppEvent, EVENT_BUFFER};
 use message::{Message, to_message};
 use model::{Exit, Model};
@@ -33,7 +36,9 @@ use update::{Command, update};
 /// Le chargement est lancé par `spawn_blocking` ; `events` reçoit aussi
 /// les événements du terminal, publiés par l'appelant sur `sender`.
 /// `bru_program` est le programme délégué pour `Command::StartRun` : `bru`
-/// en usage réel, le chemin d'un faux `bru` dans les tests.
+/// en usage réel, le chemin d'un faux `bru` dans les tests. `clipboard` est
+/// de même injectable, pour les mêmes raisons (une fausse implémentation
+/// en test, `SystemClipboard` en usage réel).
 pub async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     loader: Arc<dyn CollectionLoader>,
@@ -41,6 +46,7 @@ pub async fn run<B: Backend>(
     sender: mpsc::Sender<AppEvent>,
     mut events: mpsc::Receiver<AppEvent>,
     bru_program: OsString,
+    clipboard: Arc<dyn Clipboard>,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
@@ -58,11 +64,14 @@ pub async fn run<B: Backend>(
         });
     }
 
-    tokio::task::spawn_blocking(move || {
-        let result = loader.load(&source);
-        // Boucle terminée : plus personne n'attend la collection.
-        let _ = sender.blocking_send(AppEvent::CollectionLoaded(result));
-    });
+    {
+        let sender = sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = loader.load(&source);
+            // Boucle terminée : plus personne n'attend la collection.
+            let _ = sender.blocking_send(AppEvent::CollectionLoaded(result));
+        });
+    }
 
     terminal.draw(|frame| view::view(&model, frame))?;
     loop {
@@ -72,20 +81,31 @@ pub async fn run<B: Backend>(
                 "flux d'événements fermé",
             )));
         };
-        if let Some(message) = to_message(event) {
+        if let Some(message) = to_message(event, model.text_capture()) {
             let command = update(&mut model, message);
-            if let Command::StartRun { request, target } = command {
-                let recursive = request.recursive;
-                let handle = runner.start(request);
-                update(
-                    &mut model,
-                    Message::RunStarted {
-                        id: handle.id(),
-                        target,
-                        recursive,
-                        handle,
-                    },
-                );
+            match command {
+                Command::None => {}
+                Command::StartRun { request, target } => {
+                    let recursive = request.recursive;
+                    let handle = runner.start(request);
+                    update(
+                        &mut model,
+                        Message::RunStarted {
+                            id: handle.id(),
+                            target,
+                            recursive,
+                            handle,
+                        },
+                    );
+                }
+                Command::CopyToClipboard { token, text } => {
+                    let clipboard = Arc::clone(&clipboard);
+                    let sender = sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = clipboard.set_text(text);
+                        let _ = sender.blocking_send(AppEvent::ClipboardResult { token, result });
+                    });
+                }
             }
         }
         if let Some(exit) = model.exit.take() {

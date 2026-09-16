@@ -6,10 +6,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::ops::Range;
 use std::path::PathBuf;
 
 use crate::collection::{Collection, LoadError, TreeNode};
 use crate::runner;
+
+use super::message::TextCapture;
+use super::search::SearchState;
 
 /// État du chargement de la collection.
 #[derive(Debug)]
@@ -104,6 +108,14 @@ pub enum RunFailure {
     },
 }
 
+/// Sélection visuelle de lignes dans le détail, ancrée au sommet du
+/// panneau au moment de son activation ; la borne mobile se déduit du
+/// défilement courant (`update::selection_range`), jamais stockée à part.
+#[derive(Debug, Clone, Copy)]
+pub struct DetailSelection {
+    pub anchor: u16,
+}
+
 #[derive(Debug)]
 pub struct Model {
     /// Chemin demandé au lancement.
@@ -119,6 +131,32 @@ pub struct Model {
     pub exit: Option<Exit>,
     /// État des exécutions de requêtes.
     pub run: RunState,
+    /// État de la recherche, `None` tant que `/` n'a jamais été pressé.
+    pub search: Option<SearchState>,
+    /// Sélection visuelle active dans le détail.
+    pub detail_selection: Option<DetailSelection>,
+    /// Ligne et position en octets de la dernière correspondance de
+    /// recherche trouvée dans le détail, pour la surbrillance.
+    pub detail_match: Option<(u16, Range<usize>)>,
+    /// Dernier statut à afficher dans la barre d'état (copie, recherche
+    /// sans résultat), en plus des rappels habituels. Persiste jusqu'au
+    /// prochain statut, aucune minuterie.
+    pub last_status: Option<StatusMessage>,
+    /// Jeton de la copie en cours, s'il y en a une : un `ClipboardResult`
+    /// dont le jeton ne correspond plus est ignoré (résultat en retard sur
+    /// une copie plus récente).
+    pub(crate) pending_clipboard_token: Option<u64>,
+    /// Prochain jeton à distribuer à une copie.
+    pub(crate) next_clipboard_token: u64,
+}
+
+/// Message affiché temporairement dans la barre d'état.
+#[derive(Debug, Clone)]
+pub enum StatusMessage {
+    Copied,
+    ClipboardError(String),
+    /// Recherche validée sans aucune correspondance.
+    NoMatch,
 }
 
 impl Model {
@@ -132,7 +170,23 @@ impl Model {
             size,
             exit: None,
             run: RunState::default(),
+            search: None,
+            detail_selection: None,
+            detail_match: None,
+            last_status: None,
+            pending_clipboard_token: None,
+            next_clipboard_token: 0,
         }
+    }
+
+    /// Ce que la boucle doit capturer au clavier hors navigation normale.
+    /// Conçu pour que `add-field-editing`/`add-response-filter` y ajoutent
+    /// leur propre branche sans toucher à celle-ci.
+    pub fn text_capture(&self) -> Option<TextCapture> {
+        self.search
+            .as_ref()
+            .is_some_and(SearchState::is_editing)
+            .then_some(TextCapture::Search)
     }
 
     /// Collection chargée, s'il y en a une.
@@ -145,15 +199,7 @@ impl Model {
 
     /// Nœud désigné par une adresse.
     pub fn node_at(&self, address: &[usize]) -> Option<&TreeNode> {
-        let (first, rest) = address.split_first()?;
-        let mut node = self.loaded()?.tree.get(*first)?;
-        for index in rest {
-            node = match node {
-                TreeNode::Folder(folder) => folder.children.get(*index)?,
-                _ => return None,
-            };
-        }
-        Some(node)
+        tree_node_at(&self.loaded()?.tree, address)
     }
 
     /// Nœud de la ligne sélectionnée.
@@ -166,6 +212,21 @@ impl Model {
     pub fn is_expanded(&self, node: &TreeNode) -> bool {
         matches!(node, TreeNode::Folder(folder) if self.tree.expanded.contains(&folder.path))
     }
+}
+
+/// Nœud désigné par une adresse, dans un arbre donné. Partagé par
+/// `Model::node_at` et par la recherche, qui doit résoudre des adresses de
+/// `all_rows` sans dépendre du `Model`.
+pub(crate) fn tree_node_at<'a>(tree: &'a [TreeNode], address: &[usize]) -> Option<&'a TreeNode> {
+    let (first, rest) = address.split_first()?;
+    let mut node = tree.get(*first)?;
+    for index in rest {
+        node = match node {
+            TreeNode::Folder(folder) => folder.children.get(*index)?,
+            _ => return None,
+        };
+    }
+    Some(node)
 }
 
 /// Calcule les lignes visibles : les enfants d'un dossier ne sont listés
@@ -193,6 +254,27 @@ pub fn visible_rows(tree: &[TreeNode], expanded: &HashSet<PathBuf>) -> Vec<Row> 
     }
     let mut rows = Vec::new();
     walk(tree, expanded, &mut Vec::new(), &mut rows);
+    rows
+}
+
+/// Toutes les lignes de la collection, dossiers repliés compris : pour la
+/// recherche, qui doit pouvoir trouver un nœud non visible.
+pub fn all_rows(tree: &[TreeNode]) -> Vec<Row> {
+    fn walk(nodes: &[TreeNode], prefix: &mut Vec<usize>, rows: &mut Vec<Row>) {
+        for (index, node) in nodes.iter().enumerate() {
+            prefix.push(index);
+            rows.push(Row {
+                address: prefix.clone(),
+                depth: prefix.len() - 1,
+            });
+            if let TreeNode::Folder(folder) = node {
+                walk(&folder.children, prefix, rows);
+            }
+            prefix.pop();
+        }
+    }
+    let mut rows = Vec::new();
+    walk(tree, &mut Vec::new(), &mut rows);
     rows
 }
 

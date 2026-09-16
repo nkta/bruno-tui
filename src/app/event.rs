@@ -9,6 +9,7 @@ use std::thread;
 use ratatui::crossterm::event::{self, Event};
 use tokio::sync::mpsc;
 
+use super::clipboard::ClipboardError;
 use crate::collection::{Collection, LoadError};
 use crate::runner;
 
@@ -26,6 +27,13 @@ pub enum AppEvent {
     CollectionLoaded(Result<Collection, LoadError>),
     /// Issue d'une exécution `bru run`.
     Run(runner::RunEvent),
+    /// Issue d'une copie vers le presse-papiers (`Command::CopyToClipboard`).
+    /// `token` identifie l'action pour ignorer un résultat en retard sur
+    /// une action plus récente.
+    ClipboardResult {
+        token: u64,
+        result: Result<(), ClipboardError>,
+    },
 }
 
 /// Lance le thread qui lit le terminal et publie ses événements.
