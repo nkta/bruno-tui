@@ -425,6 +425,8 @@ fn callers_are_independent_of_the_writer() {
     );
     assert_eq!(fake.calls.lock().expect("verrou").len(), 1);
 
+    // Assure un saut d'horloge pour que l'instantané change même si la taille est identique.
+    std::thread::sleep(std::time::Duration::from_millis(10));
     let real_stamp = apply_url_edit(&BruWriter, &path, &ast, &stamp, "https://{{host}}/pong")
         .expect("écriture réelle");
     assert_ne!(real_stamp, stamp);

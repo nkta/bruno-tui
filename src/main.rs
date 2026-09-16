@@ -72,6 +72,7 @@ fn main() -> ExitCode {
             events,
             "bru".into(),
             Arc::new(SystemClipboard),
+            Arc::new(bruno_tui::writer::BruWriter),
         )),
         Err(error) => Ok(Exit::TerminalError(error)),
     };

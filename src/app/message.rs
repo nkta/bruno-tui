@@ -28,6 +28,7 @@ use crate::runner::{RunEvent, RunHandle, RunId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextCapture {
     Search,
+    Insert,
 }
 
 #[derive(Debug)]
@@ -91,6 +92,37 @@ pub enum Message {
         token: u64,
         result: Result<(), ClipboardError>,
     },
+    /// `e`, hors saisie.
+    StartEdit,
+    /// `↓`/`j` (+1), `↑`/`k` (-1), en session Normal.
+    MoveFieldCursor(i8),
+    /// `Espace`, en session Normal.
+    ToggleField,
+    /// `i`, en session Normal.
+    EnterInsert,
+    /// `w`, en session Normal.
+    SaveEdit,
+    /// `Échap`, en saisie Insert.
+    LeaveInsert,
+    /// Caractère tapé pendant une saisie Insert.
+    InsertChar(char),
+    /// `Retour arrière` pendant une saisie Insert.
+    InsertBackspace,
+    /// Flèche gauche pendant une saisie Insert.
+    InsertCursorLeft,
+    /// Flèche droite pendant une saisie Insert.
+    InsertCursorRight,
+    /// `Entrée` pendant une saisie Insert.
+    InsertEnter,
+    /// Renvoyé par la boucle après `Command::SaveEdit`.
+    EditSaved {
+        path: PathBuf,
+        result: Result<super::model::SavedEdit, crate::writer::WriteError>,
+    },
+    /// Réponse 'oui' à un `PendingConfirm`.
+    ConfirmYes,
+    /// Réponse 'non' à un `PendingConfirm`.
+    ConfirmNo,
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -107,6 +139,7 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
         AppEvent::ClipboardResult { token, result } => {
             Some(Message::ClipboardResult { token, result })
         }
+        AppEvent::EditSaved { path, result } => Some(Message::EditSaved { path, result }),
     }
 }
 
@@ -145,6 +178,10 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('N') => Message::PreviousMatch,
         KeyCode::Char('v') => Message::ToggleVisual,
         KeyCode::Char('y') => Message::Yank,
+        KeyCode::Char('e') => Message::StartEdit,
+        KeyCode::Char(' ') => Message::ToggleField,
+        KeyCode::Char('i') => Message::EnterInsert,
+        KeyCode::Char('w') => Message::SaveEdit,
         _ => return None,
     };
     Some(message)
@@ -155,6 +192,20 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
 fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
     match capture {
         TextCapture::Search => search_capture_message(key),
+        TextCapture::Insert => insert_capture_message(key),
+    }
+}
+
+/// Capture des caractères en mode Insert de session d'édition.
+fn insert_capture_message(key: KeyEvent) -> Option<Message> {
+    match key.code {
+        KeyCode::Char(c) => Some(Message::InsertChar(c)),
+        KeyCode::Backspace => Some(Message::InsertBackspace),
+        KeyCode::Left => Some(Message::InsertCursorLeft),
+        KeyCode::Right => Some(Message::InsertCursorRight),
+        KeyCode::Enter => Some(Message::InsertEnter),
+        KeyCode::Esc => Some(Message::LeaveInsert),
+        _ => None,
     }
 }
 
@@ -231,6 +282,10 @@ mod tests {
             (KeyCode::Char('N'), KeyModifiers::SHIFT, "PreviousMatch"),
             (KeyCode::Char('v'), none, "ToggleVisual"),
             (KeyCode::Char('y'), none, "Yank"),
+            (KeyCode::Char('e'), none, "StartEdit"),
+            (KeyCode::Char(' '), none, "ToggleField"),
+            (KeyCode::Char('i'), none, "EnterInsert"),
+            (KeyCode::Char('w'), none, "SaveEdit"),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(
@@ -345,5 +400,55 @@ mod tests {
         // pagination) reste sans effet en saisie.
         assert!(name_capturing(key(KeyCode::Tab, none), TextCapture::Search).is_none());
         assert!(name_capturing(key(KeyCode::PageDown, none), TextCapture::Search).is_none());
+    }
+
+    /// En mode Insert, les caractères, flèches gauche/droite, retour arrière,
+    /// Entrée et Échap sont capturés ; Ctrl+C reste prioritaire.
+    #[test]
+    fn insert_capture_redirects_navigation_keys_to_input() {
+        let none = KeyModifiers::NONE;
+        for (code, expected) in [
+            (KeyCode::Char('a'), "InsertChar"),
+            (KeyCode::Char('j'), "InsertChar"),
+            (KeyCode::Char('q'), "InsertChar"),
+            (KeyCode::Char(' '), "InsertChar"),
+            (KeyCode::Backspace, "InsertBackspace"),
+            (KeyCode::Left, "InsertCursorLeft"),
+            (KeyCode::Right, "InsertCursorRight"),
+            (KeyCode::Enter, "InsertEnter"),
+            (KeyCode::Esc, "LeaveInsert"),
+        ] {
+            assert_eq!(
+                name_capturing(key(code, none), TextCapture::Insert).as_deref(),
+                Some(expected),
+                "{code:?}"
+            );
+        }
+        // Alt inclus lors de la saisie
+        assert_eq!(
+            name_capturing(
+                key(KeyCode::Char('e'), KeyModifiers::ALT),
+                TextCapture::Insert
+            )
+            .as_deref(),
+            Some("InsertChar")
+        );
+        // Ctrl+C reste prioritaire
+        assert_eq!(
+            name_capturing(
+                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                TextCapture::Insert
+            )
+            .as_deref(),
+            Some("ForceQuit")
+        );
+        // Touches non liées en saisie Insert
+        assert!(name_capturing(key(KeyCode::Up, none), TextCapture::Insert).is_none());
+        assert!(name_capturing(key(KeyCode::Down, none), TextCapture::Insert).is_none());
+        assert!(name_capturing(key(KeyCode::Tab, none), TextCapture::Insert).is_none());
+        assert!(name_capturing(key(KeyCode::PageDown, none), TextCapture::Insert).is_none());
+        assert!(name_capturing(key(KeyCode::Home, none), TextCapture::Insert).is_none());
+        assert!(name_capturing(key(KeyCode::End, none), TextCapture::Insert).is_none());
+        assert!(name_capturing(key(KeyCode::F(1), none), TextCapture::Insert).is_none());
     }
 }

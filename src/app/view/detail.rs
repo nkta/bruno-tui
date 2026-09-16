@@ -11,13 +11,18 @@ use ratatui::text::{Line, Span, Text};
 use serde_json::Value;
 
 use super::tree::file_name;
-use crate::app::model::{Model, RequestOutcome};
+use crate::app::model::{
+    EditMode, EditSession, EditableField, Model, RequestOutcome, field_enabled, field_value,
+};
 use crate::app::update::selection_range;
 use crate::collection::{
     AuthMode, BodyContent, BodyKind, ErrorNode, FileMeta, FolderNode, KeyValue, RequestNode,
-    TreeNode,
+    RequestView, TreeNode,
 };
 use crate::runner::report::{AssertionResult, ResponseStatus, ResultStatus, TestResult};
+
+/// Style de mise en valeur de la ligne du champ sous le curseur en session d'édition (D8).
+pub const FIELD_CURSOR_STYLE: Style = Style::new().add_modifier(Modifier::REVERSED);
 
 /// Texte brut du détail, une entrée par ligne logique (`Text.lines`),
 /// spans concaténés. Utilisé par la recherche et par la copie : c'est
@@ -35,7 +40,8 @@ pub fn plain_lines(model: &Model) -> Vec<String> {
 pub fn detail_text(model: &Model) -> Text<'static> {
     match model.selected_node() {
         Some(TreeNode::Request(request)) => {
-            let mut text = request_text(request);
+            let session = model.editing.as_ref().filter(|s| s.path == request.path);
+            let mut text = request_text_with_session(request, session);
             if let Some(outcome) = model.run.outcomes.get(&request.path) {
                 text.lines.push(Line::default());
                 text.lines.extend(result_lines(outcome));
@@ -125,7 +131,44 @@ pub fn body_label(kind: &BodyKind) -> &str {
     }
 }
 
-fn request_text(request: &RequestNode) -> Text<'static> {
+fn editable_entries<F>(
+    lines: &mut Vec<Line<'static>>,
+    values: &[KeyValue],
+    session: Option<&EditSession>,
+    view: &RequestView,
+    field_ctor: F,
+) where
+    F: Fn(usize) -> EditableField,
+{
+    if values.is_empty() {
+        lines.push(Line::raw("  aucun"));
+        return;
+    }
+    for (i, entry) in values.iter().enumerate() {
+        let field = field_ctor(i);
+        let val = session.map_or(entry.value.as_str(), |s| field_value(s, view, &field));
+        let enabled = session.map_or(entry.enabled, |s| field_enabled(s, view, &field));
+        let text = format!("  {}: {}", entry.key, val);
+        let mut line = if enabled {
+            Line::raw(text)
+        } else {
+            Line::styled(
+                format!("{text} (désactivé)"),
+                Style::new().add_modifier(Modifier::DIM),
+            )
+        };
+        if session.is_some_and(|s| s.fields.get(s.cursor) == Some(&field)) {
+            line = tint_line(line, FIELD_CURSOR_STYLE);
+        }
+        lines.push(line);
+    }
+}
+
+/// Construit le texte de détail d'une requête en tenant compte de la session d'édition (D8).
+pub fn request_text_with_session(
+    request: &RequestNode,
+    session: Option<&EditSession>,
+) -> Text<'static> {
     let view = &request.view;
     let node_name = view.name.clone().unwrap_or_else(|| {
         request
@@ -138,28 +181,57 @@ fn request_text(request: &RequestNode) -> Text<'static> {
         title(node_name),
         field("Chemin", request.path.display().to_string()),
         Line::default(),
-        Line::from(vec![
-            Span::styled(
-                format!("{} ", view.method),
-                Style::new().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(view.url.clone()),
-        ]),
-        field(
-            "Auth",
-            view.auth
-                .as_ref()
-                .map_or("non déclarée", auth_label)
-                .to_owned(),
-        ),
-        Line::default(),
-        section("En-têtes"),
     ];
-    entries(&mut lines, &view.headers);
+
+    let url_field = EditableField::Url;
+    let url_val = session.map_or(view.url.as_str(), |s| field_value(s, view, &url_field));
+    let mut url_line = Line::from(vec![
+        Span::styled(
+            format!("{} ", view.method),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(url_val.to_owned()),
+    ]);
+    if session.is_some_and(|s| s.fields.get(s.cursor) == Some(&url_field)) {
+        url_line = tint_line(url_line, FIELD_CURSOR_STYLE);
+    }
+    lines.push(url_line);
+
+    lines.push(field(
+        "Auth",
+        view.auth
+            .as_ref()
+            .map_or("non déclarée", auth_label)
+            .to_owned(),
+    ));
+    lines.push(Line::default());
+
+    lines.push(section("En-têtes"));
+    editable_entries(
+        &mut lines,
+        &view.headers,
+        session,
+        view,
+        EditableField::HeaderValue,
+    );
+
     lines.push(section("Paramètres de requête"));
-    entries(&mut lines, &view.query_params);
+    editable_entries(
+        &mut lines,
+        &view.query_params,
+        session,
+        view,
+        EditableField::QueryParamValue,
+    );
+
     lines.push(section("Paramètres de chemin"));
-    entries(&mut lines, &view.path_params);
+    editable_entries(
+        &mut lines,
+        &view.path_params,
+        session,
+        view,
+        EditableField::PathParamValue,
+    );
 
     lines.push(Line::default());
     match &view.body {
@@ -168,7 +240,16 @@ fn request_text(request: &RequestNode) -> Text<'static> {
             lines.push(field("Corps", body_label(&body.kind).to_owned()));
             match &body.content {
                 BodyContent::Text(text) => {
-                    lines.extend(text.split('\n').map(|l| Line::raw(format!("  {l}"))));
+                    let field = EditableField::BodyText;
+                    let is_cursor = session.is_some_and(|s| s.fields.get(s.cursor) == Some(&field));
+                    let val = session.map_or(text.as_str(), |s| field_value(s, view, &field));
+                    for l in val.split('\n') {
+                        let mut line = Line::raw(format!("  {l}"));
+                        if is_cursor {
+                            line = tint_line(line, FIELD_CURSOR_STYLE);
+                        }
+                        lines.push(line);
+                    }
                 }
                 BodyContent::Entries(values) => entries(&mut lines, values),
                 BodyContent::Missing => lines.push(Line::raw("  bloc absent")),
@@ -191,6 +272,104 @@ fn request_text(request: &RequestNode) -> Text<'static> {
         entries(&mut lines, &view.assertions);
     }
     Text::from(lines)
+}
+
+/// Position du curseur de texte (ligne, colonne) dans le texte du détail pour une session d'édition en mode Insert (D8).
+pub fn cursor_position_in_detail(
+    request: &RequestNode,
+    session: &EditSession,
+) -> Option<(usize, usize)> {
+    let (text_cursor, buffer) = match &session.mode {
+        EditMode::Insert {
+            text_cursor,
+            buffer,
+        } => (*text_cursor, buffer),
+        _ => return None,
+    };
+
+    let current_field = session.fields.get(session.cursor)?;
+    let view = &request.view;
+
+    let chars_before: Vec<char> = buffer.chars().take(text_cursor).collect();
+
+    match current_field {
+        EditableField::Url => {
+            let line_index = 3;
+            let method_len = format!("{} ", view.method).chars().count();
+            let col_index = method_len + chars_before.len();
+            Some((line_index, col_index))
+        }
+        EditableField::HeaderValue(idx) => {
+            let entry = view.headers.get(*idx)?;
+            let line_index = 7 + idx;
+            let prefix_len = format!("  {}: ", entry.key).chars().count();
+            let col_index = prefix_len + chars_before.len();
+            Some((line_index, col_index))
+        }
+        EditableField::QueryParamValue(idx) => {
+            let entry = view.query_params.get(*idx)?;
+            let headers_count = if view.headers.is_empty() {
+                1
+            } else {
+                view.headers.len()
+            };
+            let q_section_line = 7 + headers_count;
+            let line_index = q_section_line + 1 + idx;
+            let prefix_len = format!("  {}: ", entry.key).chars().count();
+            let col_index = prefix_len + chars_before.len();
+            Some((line_index, col_index))
+        }
+        EditableField::PathParamValue(idx) => {
+            let entry = view.path_params.get(*idx)?;
+            let headers_count = if view.headers.is_empty() {
+                1
+            } else {
+                view.headers.len()
+            };
+            let q_section_line = 7 + headers_count;
+            let q_count = if view.query_params.is_empty() {
+                1
+            } else {
+                view.query_params.len()
+            };
+            let p_section_line = q_section_line + 1 + q_count;
+            let line_index = p_section_line + 1 + idx;
+            let prefix_len = format!("  {}: ", entry.key).chars().count();
+            let col_index = prefix_len + chars_before.len();
+            Some((line_index, col_index))
+        }
+        EditableField::BodyText => {
+            let headers_count = if view.headers.is_empty() {
+                1
+            } else {
+                view.headers.len()
+            };
+            let q_section_line = 7 + headers_count;
+            let q_count = if view.query_params.is_empty() {
+                1
+            } else {
+                view.query_params.len()
+            };
+            let p_section_line = q_section_line + 1 + q_count;
+            let p_count = if view.path_params.is_empty() {
+                1
+            } else {
+                view.path_params.len()
+            };
+            let body_content_start = p_section_line + 1 + p_count + 2;
+
+            let newlines_count = chars_before.iter().filter(|&&c| c == '\n').count();
+            let last_newline_pos = chars_before.iter().rposition(|&c| c == '\n');
+            let chars_on_line = match last_newline_pos {
+                Some(pos) => chars_before.len().saturating_sub(pos + 1),
+                None => chars_before.len(),
+            };
+
+            let line_index = body_content_start + newlines_count;
+            let col_index = 2 + chars_on_line;
+            Some((line_index, col_index))
+        }
+    }
 }
 
 /// Représentation d'une valeur JSON pour l'affichage : sans guillemets pour
