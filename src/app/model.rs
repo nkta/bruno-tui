@@ -4,11 +4,12 @@
 //! lignes visibles de l'arbre y sont précalculées pour que le rendu n'ait
 //! qu'à les parcourir.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 
 use crate::collection::{Collection, LoadError, TreeNode};
+use crate::runner;
 
 /// État du chargement de la collection.
 #[derive(Debug)]
@@ -55,6 +56,54 @@ pub struct TreeState {
     pub offset: usize,
 }
 
+/// État des exécutions : au plus une active, un résultat par requête.
+#[derive(Debug, Default)]
+pub struct RunState {
+    /// Exécution en cours, s'il y en a une.
+    pub active: Option<ActiveRun>,
+    /// Dernier résultat connu par requête. Clé : chemin relatif à la racine
+    /// de la collection, identique à `RequestNode::path` et à
+    /// `RequestResult::test.filename` (avec l'extension `.bru`) — aucune
+    /// conversion n'est nécessaire pour indexer ou pour retrouver un nœud de
+    /// l'arbre à partir d'une clé.
+    pub outcomes: HashMap<PathBuf, RequestOutcome>,
+    /// Dernière exécution n'ayant produit aucun résultat exploitable. Effacé
+    /// au lancement réussi d'une nouvelle exécution.
+    pub last_failure: Option<RunFailure>,
+}
+
+#[derive(Debug)]
+pub struct ActiveRun {
+    pub id: runner::RunId,
+    /// Chemin lancé : la requête, ou le dossier en mode récursif.
+    pub target: PathBuf,
+    pub recursive: bool,
+    /// `None` juste après une annulation déjà demandée : un second appui sur
+    /// la touche d'annulation reste sans effet (idempotent).
+    pub handle: Option<runner::RunHandle>,
+}
+
+/// Résultat conservé pour une requête, issu d'un rapport valide — que le
+/// verdict de la requête soit un succès ou un échec.
+#[derive(Debug)]
+pub struct RequestOutcome {
+    pub result: runner::report::RequestResult,
+    pub exit_code: Option<i32>,
+}
+
+/// Exécution n'ayant pas produit de résultat exploitable.
+#[derive(Debug)]
+pub enum RunFailure {
+    /// `bru` n'a pas pu s'exécuter ou son rapport est inexploitable.
+    Error {
+        target: PathBuf,
+        error: runner::RunError,
+    },
+    Cancelled {
+        target: PathBuf,
+    },
+}
+
 #[derive(Debug)]
 pub struct Model {
     /// Chemin demandé au lancement.
@@ -68,6 +117,8 @@ pub struct Model {
     pub size: (u16, u16),
     /// `Some` : la boucle doit s'arrêter.
     pub exit: Option<Exit>,
+    /// État des exécutions de requêtes.
+    pub run: RunState,
 }
 
 impl Model {
@@ -80,6 +131,7 @@ impl Model {
             detail_scroll: 0,
             size,
             exit: None,
+            run: RunState::default(),
         }
     }
 

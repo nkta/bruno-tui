@@ -12,6 +12,12 @@
 #   path-not-found         écrit « Path not found » sur stdout, sort en 5
 #   sleep <fichier-pid>    écrit son PID dans <fichier-pid> puis dort ;
 #                          `exec` garde le PID du processus lancé
+#   ok, green, json, skip, folder/down (avec ou sans extension `.bru`)
+#                          cibles réelles de `tests/fixtures/collections/
+#                          runner-probe/` : sert `tests/fixtures/reports/
+#                          mixed.json`, sort en 1. `tests/app_run.rs` ne
+#                          fournit qu'une seule cible (le nœud sélectionné
+#                          dans l'arbre), sans second argument possible.
 
 [ "$1" = "run" ] && shift
 MODE="$1"
@@ -42,6 +48,10 @@ case "$MODE" in
   sleep)
     echo $$ > "$PARAM"
     exec sleep 60
+    ;;
+  ok|ok.bru|green|green.bru|json|json.bru|skip|skip.bru|folder/down|folder/down.bru)
+    cat "$(dirname "$0")/../reports/mixed.json" >&3
+    exit 1
     ;;
   *)
     echo "mode inconnu : $MODE" >&2
