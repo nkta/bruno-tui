@@ -1,0 +1,17 @@
+meta {
+  name: Hôte injoignable (aucune réponse)
+  type: http
+  seq: 2
+}
+
+get {
+  url: http://127.0.0.1:19999/inexistant
+  body: none
+  auth: none
+}
+
+docs {
+  Port fermé en local : la requête échoue avant de recevoir la moindre
+  réponse (connexion refusée), pour vérifier ce cas distinct de
+  l'échec d'assertion.
+}

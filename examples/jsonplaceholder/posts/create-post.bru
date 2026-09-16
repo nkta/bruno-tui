@@ -1,0 +1,36 @@
+meta {
+  name: Créer un article
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{base_url}}/posts
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "title": "bruno-tui",
+    "body": "Créé depuis la collection de démonstration.",
+    "userId": 1
+  }
+}
+
+assert {
+  res.status: eq 201
+}
+
+script:post-response {
+  bru.setVar("created_post_id", res.getBody().id);
+}
+
+docs {
+  Le serveur simule la création (renvoie 201 avec un id 101) sans rien
+  enregistrer réellement.
+}

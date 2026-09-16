@@ -9,20 +9,37 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
-use super::panel;
+use super::{inner, panel, theme};
 use crate::app::diagnostics::diagnostics;
 use crate::app::model::{Focus, HistoryEntry, HistoryOutcome, Model};
+
+/// Message unique d'un panneau plein corps sans entrée à lister, centré
+/// verticalement dans la zone intérieure plutôt que collé en haut d'une
+/// zone par ailleurs vide (`visual-theme`). Ne convient qu'à un message
+/// tenant sur une seule ligne (voir design.md, Risks/Trade-offs).
+fn empty_state_message(area: Rect, message: &'static str) -> Paragraph<'static> {
+    let padding = inner(area).height.saturating_sub(1) / 2;
+    let mut lines: Vec<Line<'static>> = (0..padding).map(|_| Line::default()).collect();
+    lines.push(Line::styled(message, theme::EMPTY_MESSAGE));
+    Paragraph::new(lines)
+}
 
 /// Dessine le panneau plein corps des diagnostics.
 pub fn render_diagnostics(model: &Model, frame: &mut Frame, area: Rect) {
     let block = panel(" Diagnostics ", model.focus == Focus::Diagnostics);
     let Some(collection) = model.loaded() else {
-        frame.render_widget(Paragraph::new("aucune erreur").block(block), area);
+        frame.render_widget(
+            empty_state_message(area, "aucune erreur").block(block),
+            area,
+        );
         return;
     };
     let entries = diagnostics(collection);
     if entries.is_empty() {
-        frame.render_widget(Paragraph::new("aucune erreur").block(block), area);
+        frame.render_widget(
+            empty_state_message(area, "aucune erreur").block(block),
+            area,
+        );
         return;
     }
     let items: Vec<ListItem> = entries
@@ -34,7 +51,7 @@ pub fn render_diagnostics(model: &Model, frame: &mut Frame, area: Rect) {
                     Style::new().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
-                Span::styled(entry.reason.clone(), Style::new().fg(Color::Red)),
+                Span::styled(entry.reason.clone(), theme::LOAD_ERROR),
             ]);
             ListItem::new(line)
         })
@@ -58,7 +75,10 @@ pub fn render_diagnostics(model: &Model, frame: &mut Frame, area: Rect) {
 pub fn render_history(model: &Model, frame: &mut Frame, area: Rect) {
     let block = panel(" Historique ", model.focus == Focus::History);
     if model.history.is_empty() {
-        frame.render_widget(Paragraph::new("aucune exécution").block(block), area);
+        frame.render_widget(
+            empty_state_message(area, "aucune exécution").block(block),
+            area,
+        );
         return;
     }
     let items: Vec<ListItem> = model
@@ -122,7 +142,7 @@ fn environment_item_line(
         Some(Ok(env)) => Span::raw(env.name.clone()),
         Some(Err(err)) => Span::styled(
             format!("{} (invalide)", err.path.display()),
-            Style::new().fg(Color::Red),
+            theme::LOAD_ERROR,
         ),
     };
     Line::from(vec![Span::raw(marker), label])
@@ -142,13 +162,13 @@ fn history_row_line(entry: &HistoryEntry) -> Line<'static> {
             failed,
             duration_secs,
         } => {
-            let (text, color) = if *failed == 0 {
-                ("succès".to_owned(), Color::Green)
+            let (text, style) = if *failed == 0 {
+                ("succès".to_owned(), theme::SUCCESS)
             } else {
-                (format!("échec ({failed}/{total})"), Color::Red)
+                (format!("échec ({failed}/{total})"), theme::FAILURE)
             };
             (
-                Span::styled(text, Style::new().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(text, style.add_modifier(Modifier::BOLD)),
                 Span::raw(format!("{duration_secs:.2}s")),
             )
         }
@@ -162,7 +182,7 @@ fn history_row_line(entry: &HistoryEntry) -> Line<'static> {
         HistoryOutcome::Failed(error) => (
             Span::styled(
                 format!("échec ({error})"),
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                theme::FAILURE.add_modifier(Modifier::BOLD),
             ),
             Span::raw("-"),
         ),

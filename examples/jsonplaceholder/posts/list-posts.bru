@@ -1,0 +1,27 @@
+meta {
+  name: Lister les articles
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/posts
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("rend un tableau de 100 articles", function () {
+    expect(res.getBody()).to.be.an("array");
+    expect(res.getBody().length).to.equal(100);
+  });
+}
+
+docs {
+  Liste complète des articles. Sert aussi à vérifier l'affichage d'un
+  corps de réponse volumineux (100 entrées) dans le panneau de détail.
+}

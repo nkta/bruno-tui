@@ -1,0 +1,23 @@
+meta {
+  name: Lire un article
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{base_url}}/posts/1
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+  res.body.id: eq 1
+}
+
+tests {
+  test("le titre est une chaîne non vide", function () {
+    expect(res.getBody().title).to.be.a("string");
+    expect(res.getBody().title.length).to.be.above(0);
+  });
+}

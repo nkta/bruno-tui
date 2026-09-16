@@ -1,0 +1,24 @@
+meta {
+  name: Albums d'un utilisateur
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{base_url}}/users/:id/albums
+  body: none
+  auth: inherit
+}
+
+params:path {
+  id: 1
+}
+
+assert {
+  res.status: eq 200
+}
+
+docs {
+  Utilise un paramètre de chemin (`:id`) plutôt qu'une valeur écrite en
+  dur dans l'URL, pour vérifier l'affichage des paramètres de chemin.
+}

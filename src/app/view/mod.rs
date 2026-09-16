@@ -6,6 +6,7 @@
 
 pub mod detail;
 pub mod panels;
+pub mod theme;
 pub mod tree;
 
 use ratatui::Frame;
@@ -340,11 +341,7 @@ fn status_line(model: &Model) -> String {
 }
 
 pub(crate) fn panel(title: &'static str, focused: bool) -> Block<'static> {
-    let style = if focused {
-        Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-    } else {
-        Style::new()
-    };
+    let style = if focused { theme::FOCUS } else { Style::new() };
     Block::bordered().title(title).border_style(style)
 }
 
@@ -823,6 +820,40 @@ mod tests {
         assert!(screen.contains("ping.bru"), "{screen}");
         assert!(screen.contains("succès"), "{screen}");
         assert!(screen.contains("0.25s"), "{screen}");
+    }
+
+    /// Le message unique d'un panneau vide n'est plus collé à la première
+    /// ligne intérieure : il est présenté de façon délibérée
+    /// (`visual-theme`), sans changer son texte.
+    #[test]
+    fn empty_diagnostics_and_history_messages_are_not_on_the_first_inner_row() {
+        let mut clean_model = Model::new(fixture(), (100, 30));
+        update(
+            &mut clean_model,
+            Message::CollectionLoaded(Ok(Collection {
+                root: "/clean".into(),
+                name: "clean".into(),
+                settings: None,
+                tree: Vec::new(),
+                environments: Vec::new(),
+            })),
+        );
+        clean_model.focus = Focus::Diagnostics;
+        let lines = render(&clean_model, 100, 30);
+        let row = lines
+            .iter()
+            .position(|l| l.contains("aucune erreur"))
+            .expect("message « aucune erreur » présent");
+        assert_eq!(row, 14, "message pas centré :\n{}", lines.join("\n"));
+
+        let mut hist_model = loaded_model((100, 30));
+        hist_model.focus = Focus::History;
+        let lines = render(&hist_model, 100, 30);
+        let row = lines
+            .iter()
+            .position(|l| l.contains("aucune exécution"))
+            .expect("message « aucune exécution » présent");
+        assert_eq!(row, 14, "message pas centré :\n{}", lines.join("\n"));
     }
 
     #[test]

@@ -1,0 +1,28 @@
+meta {
+  name: Modifier un article
+  type: http
+  seq: 5
+}
+
+put {
+  url: {{base_url}}/posts/1
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "id": 1,
+    "title": "Titre mis à jour par bruno-tui",
+    "body": "Corps mis à jour.",
+    "userId": 1
+  }
+}
+
+assert {
+  res.status: eq 200
+}

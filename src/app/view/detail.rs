@@ -10,6 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use serde_json::Value;
 
+use super::theme;
 use super::tree::file_name;
 use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
@@ -57,25 +58,16 @@ pub fn detail_text(model: &Model) -> Text<'static> {
 }
 
 fn title(text: String) -> Line<'static> {
-    Line::from(Span::styled(
-        text,
-        Style::new().add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text, theme::TITLE))
 }
 
 fn section(text: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        text.to_owned(),
-        Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-    ))
+    Line::from(Span::styled(text.to_owned(), theme::SECTION))
 }
 
 fn field(label: &str, value: impl Into<String>) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{label} : "),
-            Style::new().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(format!("{label} : "), theme::LABEL),
         Span::raw(value.into()),
     ])
 }
@@ -445,7 +437,7 @@ fn body_lines(data: &Value) -> Vec<Line<'static>> {
 /// Ligne affichant le filtre en cours d'édition ou appliqué.
 fn filter_line(draft: &str, editing: bool) -> Line<'static> {
     let mut spans = vec![
-        Span::styled("Filtre : ", Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled("Filtre : ", theme::LABEL),
         Span::raw(draft.to_owned()),
     ];
     if editing {
@@ -688,6 +680,54 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, path);
         plain(&detail_text(&model))
+    }
+
+    /// Les trois niveaux de hiérarchie du détail (titre, section, libellé)
+    /// portent des styles distincts (`visual-theme`).
+    #[test]
+    fn title_section_and_label_styles_are_all_distinct() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+        let text = detail_text(&model);
+
+        let title_style = text.lines[0].spans[0].style;
+
+        let section_style = text
+            .lines
+            .iter()
+            .find_map(|line| {
+                line.spans
+                    .iter()
+                    .find(|s| s.content.as_ref() == "En-têtes")
+                    .map(|s| s.style)
+            })
+            .expect("section En-têtes");
+
+        let label_style = text
+            .lines
+            .iter()
+            .find_map(|line| {
+                line.spans
+                    .iter()
+                    .find(|s| s.content.as_ref() == "Chemin : ")
+                    .map(|s| s.style)
+            })
+            .expect("libellé Chemin");
+
+        assert_ne!(title_style, section_style, "titre vs section");
+        assert_ne!(title_style, label_style, "titre vs libellé");
+        assert_ne!(section_style, label_style, "section vs libellé");
+    }
+
+    /// Garde-fou direct sur la contrainte de design.md : le nombre de
+    /// lignes produit par `request_text_with_session` ne doit pas changer,
+    /// sous peine de casser `cursor_position_in_detail`
+    /// (`insert_cursor_positioning_and_bounds`).
+    #[test]
+    fn request_detail_line_count_is_unchanged() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+        assert_eq!(detail_text(&model).lines.len(), 27);
     }
 
     #[test]

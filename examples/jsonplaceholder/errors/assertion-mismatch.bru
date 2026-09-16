@@ -1,0 +1,21 @@
+meta {
+  name: Article inexistant (échec d'assertion)
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/posts/99999
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+}
+
+docs {
+  Le serveur répond réellement 404, pas 200 : l'assertion échoue sur
+  une réponse HTTP obtenue avec succès. Comportement volontaire, pas un
+  bug de la collection.
+}

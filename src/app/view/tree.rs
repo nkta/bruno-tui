@@ -2,9 +2,10 @@
 
 use std::path::Path;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use super::theme;
 use crate::collection::TreeNode;
 
 /// Marqueur des nœuds en erreur de chargement (`.bru` invalide).
@@ -50,7 +51,6 @@ pub fn file_name(path: &Path) -> String {
 /// d'une requête.
 pub fn row_line(node: &TreeNode, depth: usize, expanded: bool, status: RunStatus) -> Line<'static> {
     let indent = Span::raw("  ".repeat(depth));
-    let error = Style::new().fg(Color::Red);
     match node {
         TreeNode::Folder(folder) => {
             let mut spans = vec![
@@ -62,42 +62,36 @@ pub fn row_line(node: &TreeNode, depth: usize, expanded: bool, status: RunStatus
                 ),
             ];
             if matches!(folder.meta, Some(Err(_))) {
-                spans.push(Span::styled(format!(" {ERROR_MARK}"), error));
+                spans.push(Span::styled(format!(" {ERROR_MARK}"), theme::LOAD_ERROR));
             }
             Line::from(spans)
         }
         TreeNode::Request(request) => {
             let mut spans = vec![
                 indent,
-                Span::styled(
-                    format!("{:<6} ", request.view.method),
-                    Style::new().fg(Color::Cyan),
-                ),
+                Span::styled(format!("{:<6} ", request.view.method), theme::METHOD),
                 Span::raw(display_name(node)),
             ];
             match status {
                 RunStatus::None => {}
                 RunStatus::Running => {
-                    spans.push(Span::styled(
-                        format!(" {RUNNING_MARK}"),
-                        Style::new().fg(Color::Yellow),
-                    ));
+                    spans.push(Span::styled(format!(" {RUNNING_MARK}"), theme::RUNNING));
                 }
                 RunStatus::Success => {
-                    spans.push(Span::styled(
-                        format!(" {SUCCESS_MARK}"),
-                        Style::new().fg(Color::Green),
-                    ));
+                    spans.push(Span::styled(format!(" {SUCCESS_MARK}"), theme::SUCCESS));
                 }
                 RunStatus::Failure => {
-                    spans.push(Span::styled(format!(" {FAILURE_MARK}"), error));
+                    spans.push(Span::styled(format!(" {FAILURE_MARK}"), theme::FAILURE));
                 }
             }
             Line::from(spans)
         }
         TreeNode::Error(_) => Line::from(vec![
             indent,
-            Span::styled(format!("{ERROR_MARK} {}", display_name(node)), error),
+            Span::styled(
+                format!("{ERROR_MARK} {}", display_name(node)),
+                theme::LOAD_ERROR,
+            ),
         ]),
     }
 }
@@ -161,5 +155,37 @@ mod tests {
         assert!(!success.contains(ERROR_MARK));
         assert!(!failure.contains(ERROR_MARK));
         assert!(!running.contains(ERROR_MARK));
+    }
+
+    /// Un échec d'exécution (`FAILURE_MARK`) et une erreur de chargement
+    /// (`ERROR_MARK`) portent des couleurs distinctes, même quand les deux
+    /// apparaissent (arbre avec un nœud en erreur et une requête en échec).
+    #[test]
+    fn failure_mark_and_load_error_mark_have_distinct_colors() {
+        let node = request_node();
+        let failure_line = row_line(&node, 0, false, RunStatus::Failure);
+        let failure_style = failure_line
+            .spans
+            .iter()
+            .find(|s| s.content.contains(FAILURE_MARK))
+            .expect("marqueur d'échec")
+            .style;
+
+        let error_node = TreeNode::Error(crate::collection::ErrorNode {
+            path: "broken.bru".into(),
+            error: crate::collection::ParseError::UnclosedBlock {
+                name: "headers".into(),
+                line: 1,
+            },
+        });
+        let error_line = row_line(&error_node, 0, false, RunStatus::None);
+        let error_style = error_line
+            .spans
+            .iter()
+            .find(|s| s.content.contains(ERROR_MARK))
+            .expect("marqueur d'erreur")
+            .style;
+
+        assert_ne!(failure_style.fg, error_style.fg);
     }
 }

@@ -1,0 +1,15 @@
+meta {
+  name: Supprimer un article
+  type: http
+  seq: 6
+}
+
+delete {
+  url: {{base_url}}/posts/1
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+}

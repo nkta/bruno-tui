@@ -1,0 +1,21 @@
+meta {
+  name: Lister les utilisateurs
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/users
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+}
+
+tests {
+  test("rend 10 utilisateurs", function () {
+    expect(res.getBody().length).to.equal(10);
+  });
+}

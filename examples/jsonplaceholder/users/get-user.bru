@@ -1,0 +1,22 @@
+meta {
+  name: Lire un utilisateur
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{base_url}}/users/1
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+  res.body.address.city: isDefined
+  res.body.company.name: isDefined
+}
+
+docs {
+  Vérifie des champs imbriqués (adresse, entreprise) avec des chemins
+  d'assertion à plusieurs niveaux.
+}
