@@ -60,6 +60,10 @@ impl MouseCapture for FakeCapture {
     }
 }
 
+/// Délai laissé au chargement de la collection : 50 ms ne suffisent pas
+/// sur un système de fichiers lent (ex. `/mnt/c` sous WSL).
+const LOAD_WAIT: Duration = Duration::from_millis(300);
+
 type RunResult = (Terminal<TestBackend>, Exit);
 
 fn spawn_run(
@@ -122,7 +126,7 @@ async fn m_toggles_capture_through_the_injected_control() {
     let capture = Arc::new(FakeCapture::default());
     let (sender, events) = mpsc::channel(EVENT_BUFFER);
     let handle = spawn_run(Arc::clone(&capture), true, sender.clone(), events);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(LOAD_WAIT).await;
 
     sender.send(key(KeyCode::Char('M'))).await.expect("M");
     sender.send(key(KeyCode::Char('M'))).await.expect("M");
@@ -140,7 +144,7 @@ async fn capture_failure_keeps_state_and_reports_it() {
     });
     let (sender, events) = mpsc::channel(EVENT_BUFFER);
     let handle = spawn_run(Arc::clone(&capture), true, sender.clone(), events);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(LOAD_WAIT).await;
 
     sender.send(key(KeyCode::Char('M'))).await.expect("M");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -164,7 +168,7 @@ async fn click_selects_a_tree_node_and_disabled_capture_ignores_it() {
     let capture = Arc::new(FakeCapture::default());
     let (sender, events) = mpsc::channel(EVENT_BUFFER);
     let handle = spawn_run(Arc::clone(&capture), true, sender.clone(), events);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(LOAD_WAIT).await;
 
     // Ligne 4 : troisième nœud du premier niveau, `post-json`.
     sender
@@ -180,7 +184,7 @@ async fn click_selects_a_tree_node_and_disabled_capture_ignores_it() {
 
     let (sender, events) = mpsc::channel(EVENT_BUFFER);
     let handle = spawn_run(Arc::clone(&capture), false, sender.clone(), events);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(LOAD_WAIT).await;
     sender
         .send(mouse(MouseEventKind::Down(MouseButton::Left), 3, 4))
         .await

@@ -6,8 +6,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use bruno_tui::collection::{BruFile, RequestView};
-use bruno_tui::writer::{BruWriter, EditError, FieldEdit, FileStamp, RequestWriter, WriteError};
+use bruno_tui::collection::{BruFile, BruLoader, CollectionLoader, RequestView, TreeNode};
+use bruno_tui::writer::{
+    BruWriter, EditError, EntryProblem, EntrySection, FieldEdit, FileStamp, RequestWriter,
+    WriteError, preview,
+};
 
 fn cases() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/writer-cases")
@@ -188,7 +191,7 @@ fn multiline_target_edit_reloads_with_expected_value() {
             &path,
             &ast,
             &stamp,
-            &[FieldEdit::QueryParamValue {
+            &[FieldEdit::HeaderValue {
                 index: 0,
                 value: value.into(),
             }],
@@ -201,7 +204,7 @@ fn multiline_target_edit_reloads_with_expected_value() {
 
     let reloaded = BruFile::parse(fs::read_to_string(&path).expect("relecture")).expect("AST");
     let view = RequestView::from_ast(&reloaded).expect("vue");
-    assert_eq!(view.query_params[0].value, value);
+    assert_eq!(view.headers[0].value, value);
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -432,6 +435,196 @@ fn callers_are_independent_of_the_writer() {
     assert_ne!(real_stamp, stamp);
     let expected = fs::read(cases().join("simple.after.bru")).expect("fixture after");
     assert_eq!(fs::read(&path).expect("relecture"), expected);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// --- Ajout, suppression, renommage (add-entry-management) ----------------
+
+fn add(section: EntrySection, key: &str, value: &str) -> FieldEdit {
+    FieldEdit::AddEntry {
+        section,
+        key: key.into(),
+        value: value.into(),
+        enabled: true,
+    }
+}
+
+fn remove(section: EntrySection, index: usize) -> FieldEdit {
+    FieldEdit::RemoveEntry { section, index }
+}
+
+/// Modifications attendues pour chaque fixture d'ajout, de suppression ou
+/// de renommage, dont le résultat est versionné dans `<nom>.after.bru`.
+fn entry_cases() -> Vec<(&'static str, Vec<FieldEdit>)> {
+    use EntrySection::{Headers, PathParams, QueryParams};
+    vec![
+        (
+            "add-header",
+            vec![add(Headers, "X-Request-Id", "{{requestId}}")],
+        ),
+        ("add-block", vec![add(Headers, "Accept", "text/plain")]),
+        ("add-path-between", vec![add(PathParams, "id", "42")]),
+        (
+            "remove-entry",
+            vec![remove(Headers, 1), remove(PathParams, 0)],
+        ),
+        (
+            "rename-disabled",
+            vec![FieldEdit::RenameKey {
+                section: Headers,
+                index: 1,
+                key: "X-Verbose".into(),
+            }],
+        ),
+        (
+            "duplicates",
+            vec![
+                add(Headers, "Accept", "application/json"),
+                add(QueryParams, "tag", "b"),
+            ],
+        ),
+        (
+            "query-sync",
+            vec![
+                add(QueryParams, "sort", "asc"),
+                FieldEdit::QueryParamEnabled {
+                    index: 1,
+                    enabled: false,
+                },
+                remove(QueryParams, 0),
+            ],
+        ),
+        (
+            "url-sync",
+            vec![FieldEdit::Url(
+                "https://{{host}}/items?page=3&limit=5&flag".into(),
+            )],
+        ),
+        (
+            "crlf-add",
+            vec![
+                add(Headers, "C", "3"),
+                remove(Headers, 0),
+                add(PathParams, "id", "1"),
+            ],
+        ),
+    ]
+}
+
+#[test]
+fn entry_cases_match_after_fixtures_and_preview() {
+    for (name, edits) in entry_cases() {
+        let dir = workdir(&format!("entry-{name}"));
+        let file_name = format!("{name}.bru");
+        let path = copy_case(&file_name, &dir);
+        let (ast, stamp) = load(&path);
+
+        let previewed = preview(&ast, &edits).unwrap_or_else(|e| panic!("{name} : {e}"));
+        BruWriter
+            .write_request(&path, &ast, &stamp, &edits)
+            .unwrap_or_else(|e| panic!("{name} : {e}"));
+
+        let expected = fs::read(cases().join(format!("{name}.after.bru"))).expect("fixture after");
+        let written = fs::read(&path).expect("relecture");
+        assert_eq!(
+            String::from_utf8_lossy(&written),
+            String::from_utf8_lossy(&expected),
+            "{name}"
+        );
+        assert_eq!(
+            dir_entries(&dir),
+            std::slice::from_ref(&file_name),
+            "{name}"
+        );
+
+        let reloaded = BruFile::parse(String::from_utf8(written).expect("utf-8")).expect("AST");
+        assert_eq!(
+            previewed,
+            RequestView::from_ast(&reloaded).expect("vue"),
+            "{name}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn writer_cases_load_without_errors() {
+    fn errors(nodes: &[TreeNode]) -> Vec<String> {
+        nodes
+            .iter()
+            .flat_map(|node| match node {
+                TreeNode::Error(error) => vec![error.path.display().to_string()],
+                TreeNode::Folder(folder) => errors(&folder.children),
+                TreeNode::Request(_) => Vec::new(),
+            })
+            .collect()
+    }
+    let collection = BruLoader.load(&cases()).expect("collection chargée");
+    assert!(
+        errors(&collection.tree).is_empty(),
+        "{:?}",
+        errors(&collection.tree)
+    );
+}
+
+#[test]
+fn add_is_refused_on_a_file_changed_since_the_stamp() {
+    let dir = workdir("entry-stale");
+    let path = copy_case("add-header.bru", &dir);
+    let (ast, stamp) = load(&path);
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let third_party = "get {\n  url: http://third-party\n}\n";
+    fs::write(&path, third_party).expect("tiers");
+
+    let error = BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[add(EntrySection::Headers, "X-Trace", "abc")],
+        )
+        .expect_err("refus attendu");
+    assert!(matches!(error, WriteError::Stale { .. }));
+    assert_eq!(fs::read_to_string(&path).expect("relecture"), third_party);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn one_refused_edit_cancels_the_whole_list() {
+    let dir = workdir("entry-atomic");
+    let path = copy_case("duplicates.bru", &dir);
+    let original = fs::read(&path).expect("lecture");
+    let (ast, stamp) = load(&path);
+
+    let error = BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[
+                add(EntrySection::Headers, "X-Trace", "abc"),
+                FieldEdit::RenameKey {
+                    section: EntrySection::QueryParams,
+                    index: 0,
+                    key: "bad key".into(),
+                },
+            ],
+        )
+        .expect_err("refus attendu");
+    assert!(matches!(
+        error,
+        WriteError::Edit(EditError::InvalidEntry {
+            block: "params:query",
+            index: Some(0),
+            problem: EntryProblem::KeyWhitespace,
+        })
+    ));
+    assert_eq!(fs::read(&path).expect("relecture"), original);
+    assert_eq!(dir_entries(&dir), ["duplicates.bru"]);
 
     let _ = fs::remove_dir_all(&dir);
 }

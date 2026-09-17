@@ -1,0 +1,26 @@
+{
+  "url": "https://{{host}}/items",
+  "headers": [
+    {
+      "name": "Accept",
+      "value": "application/json",
+      "enabled": true
+    },
+    {
+      "name": "X-Debug",
+      "value": "1",
+      "enabled": false
+    },
+    {
+      "name": "X-Trace",
+      "value": "abc123",
+      "enabled": true
+    },
+    {
+      "name": "X-Request-Id",
+      "value": "{{requestId}}",
+      "enabled": true
+    }
+  ],
+  "params": []
+}

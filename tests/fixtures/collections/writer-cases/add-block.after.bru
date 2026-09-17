@@ -1,0 +1,19 @@
+meta {
+  name: add-block
+  type: http
+  seq: 11
+}
+
+get {
+  url: https://{{host}}/ping
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: text/plain
+}
+
+tests {
+  test("ok", function() {});
+}

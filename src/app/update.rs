@@ -9,9 +9,9 @@ use super::filter::{FilterState, evaluate};
 use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
     CollectionState, DetailSelection, Drag, DragPanel, EditSession, EditState, EditableField, Exit,
-    Focus, HistoryEntry, HistoryOutcome, Model, ResponseTab, SecretError, SecretInput,
-    StatusMessage, environment_name_at, field_enabled, field_value, secret_env_vars,
-    secret_lookups, secret_rows, tree_node_at, visible_rows,
+    Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, ResponseTab, SecretError, SecretInput,
+    StatusMessage, environment_name_at, field_enabled, field_value, field_value_committed,
+    secret_env_vars, secret_lookups, secret_rows, section_entries, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::text_input::TextInput;
@@ -27,7 +27,7 @@ use crate::collection::TreeNode;
 use crate::runner::report::ResponseStatus;
 use crate::runner::{RunRequest, SecretString};
 use crate::secrets::{SecretLookup, is_valid_name};
-use crate::writer::{FieldEdit, FileStamp};
+use crate::writer::{EntrySection, FieldEdit, FileStamp};
 use ratatui::text::Line;
 
 /// Effet demandé par `update`, à exécuter par la boucle `run`, qui seule
@@ -180,16 +180,26 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             }
             Command::None
         }
-        Message::AddSecret => {
+        Message::Add => {
             if model.focus == Focus::Secrets {
                 model.secrets.error = None;
                 model.secrets.input = Some(SecretInput::Name(String::new()));
+            } else if model.focus == Focus::Detail {
+                add_entry(model);
             }
             Command::None
         }
-        Message::ForgetSecret => {
+        Message::Delete => {
             if model.focus == Focus::Secrets {
                 forget_secret(model);
+            } else if model.focus == Focus::Detail {
+                delete_entry(model);
+            }
+            Command::None
+        }
+        Message::Rename => {
+            if model.focus == Focus::Detail {
+                start_rename(model);
             }
             Command::None
         }
@@ -409,17 +419,17 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::ValidateInput => {
-            validate_input(model);
+            validate_input(model, false);
             Command::None
         }
         Message::CancelInput => {
             cancel_input(model);
             Command::None
         }
-        Message::SaveEdit => {
-            validate_input(model);
-            save_edit(model)
-        }
+        Message::SaveEdit => match validate_input(model, true) {
+            Validation::Done => save_edit(model),
+            Validation::Continued | Validation::Refused => Command::None,
+        },
         Message::EditSaved { path, result } => {
             edit_saved(model, path, result);
             Command::None
@@ -856,17 +866,11 @@ fn start_edit(model: &mut Model) {
     let Ok(stamp) = FileStamp::capture(&full_path) else {
         return;
     };
-    let fields = EditableField::list_for(&request.view);
-    model.editing = Some(EditSession {
-        path: request.path.clone(),
+    model.editing = Some(EditSession::new(
+        request.path.clone(),
         stamp,
-        fields,
-        cursor: 0,
-        state: EditState::FieldSelect,
-        pending: Vec::new(),
-        dirty: false,
-        hscroll: 0,
-    });
+        request.view.clone(),
+    ));
     model.last_status = None;
     scroll_edit_into_view(model);
 }
@@ -913,36 +917,18 @@ fn toggle_field(model: &mut Model) {
     let Some(field) = session.current_field() else {
         return;
     };
-    let Some(TreeNode::Request(request)) = model.selected_node() else {
-        return;
-    };
-    let current = field_enabled(session, &request.view, &field);
+    let enabled = !field_enabled(session, &field);
     let edit = match field {
-        EditableField::HeaderValue(index) => Some(FieldEdit::HeaderEnabled {
-            index,
-            enabled: !current,
-        }),
-        EditableField::QueryParamValue(index) => Some(FieldEdit::QueryParamEnabled {
-            index,
-            enabled: !current,
-        }),
-        EditableField::PathParamValue(index) => Some(FieldEdit::PathParamEnabled {
-            index,
-            enabled: !current,
-        }),
-        EditableField::Url | EditableField::BodyText => None,
+        EditableField::HeaderValue(index) => FieldEdit::HeaderEnabled { index, enabled },
+        EditableField::QueryParamValue(index) => FieldEdit::QueryParamEnabled { index, enabled },
+        EditableField::PathParamValue(index) => FieldEdit::PathParamEnabled { index, enabled },
+        EditableField::Url | EditableField::AddRow(_) | EditableField::BodyText => return,
     };
-    if let Some(edit) = edit
-        && let Some(session) = &mut model.editing
-    {
-        session.pending.push(edit);
-        session.dirty = true;
-        model.last_status = None;
-    }
+    try_commit(model, edit);
 }
 
-/// Commence la saisie du champ sous le curseur, curseur de texte en fin de
-/// valeur (validée la plus récente, sinon chargée).
+/// `Entrée` en sélection de champ : saisie de la valeur du champ sous le
+/// curseur, ou ajout d'une entrée sur une ligne « + Ajouter ».
 fn begin_input(model: &mut Model) {
     let Some(session) = &model.editing else {
         return;
@@ -953,51 +939,259 @@ fn begin_input(model: &mut Model) {
     let Some(field) = session.current_field() else {
         return;
     };
-    let Some(TreeNode::Request(request)) = model.selected_node() else {
+    if let EditableField::AddRow(section) = field {
+        start_add(model, section);
         return;
-    };
+    }
     let input = TextInput::new(
-        field_value(session, &request.view, &field),
+        field_value(session, &field),
         field == EditableField::BodyText,
     );
+    open_input(model, input, InputTarget::Field);
+}
+
+/// Passe la session en saisie avec `target`.
+fn open_input(model: &mut Model, input: TextInput, target: InputTarget) {
     if let Some(session) = &mut model.editing {
         session.state = EditState::Input(input);
+        session.target = target;
         session.hscroll = 0;
     }
     model.last_status = None;
     scroll_edit_into_view(model);
 }
 
-/// Valide la saisie en cours : le texte devient la valeur du champ en
-/// mémoire, sans écriture. Sans effet hors saisie.
-fn validate_input(model: &mut Model) {
-    let Some(session) = &model.editing else {
-        return;
-    };
-    let EditState::Input(input) = &session.state else {
-        return;
-    };
-    let Some(TreeNode::Request(request)) = model.selected_node() else {
-        return;
-    };
-    let new_value = session.current_field().and_then(|field| {
-        let committed = super::model::field_value_committed(session, &request.view, &field);
-        (input.text() != committed).then(|| (field, input.text().to_owned()))
-    });
+/// Revient à la sélection de champ, sans rien valider.
+fn close_input(model: &mut Model) {
     if let Some(session) = &mut model.editing {
-        if let Some((field, value)) = new_value {
-            update_or_push_pending(session, field, value);
-            session.dirty = true;
-        }
         session.state = EditState::FieldSelect;
+        session.target = InputTarget::Field;
         session.hscroll = 0;
     }
-    model.last_status = None;
     scroll_edit_into_view(model);
+}
+
+/// `a` en sélection de champ, ou `Entrée` sur une ligne d'ajout : commence
+/// la saisie de la clé d'une nouvelle entrée de `section`. Le curseur de
+/// champ se place sur la ligne d'ajout, où s'affiche l'entrée provisoire.
+fn start_add(model: &mut Model, section: EntrySection) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    if session.state != EditState::FieldSelect {
+        return;
+    }
+    let return_cursor = session.cursor;
+    if let Some(position) = session
+        .fields
+        .iter()
+        .position(|f| *f == EditableField::AddRow(section))
+    {
+        session.cursor = position;
+    }
+    open_input(
+        model,
+        TextInput::new("", false),
+        InputTarget::NewKey {
+            section,
+            return_cursor,
+        },
+    );
+}
+
+/// `a` : ajout dans la section de l'entrée ou de la ligne d'ajout sous le
+/// curseur ; sans effet sur l'URL et le corps.
+fn add_entry(model: &mut Model) {
+    let Some(section) = model
+        .editing
+        .as_ref()
+        .filter(|s| s.state == EditState::FieldSelect)
+        .and_then(EditSession::current_field)
+        .and_then(|field| field.section())
+    else {
+        return;
+    };
+    start_add(model, section);
+}
+
+/// `d` : supprime l'entrée sous le curseur, sans confirmation ; le curseur
+/// garde son indice, borné à la dernière position.
+fn delete_entry(model: &mut Model) {
+    let Some((section, index)) = model
+        .editing
+        .as_ref()
+        .filter(|s| s.state == EditState::FieldSelect)
+        .and_then(EditSession::current_field)
+        .and_then(|field| field.entry())
+    else {
+        return;
+    };
+    try_commit(model, FieldEdit::RemoveEntry { section, index });
+    scroll_edit_into_view(model);
+}
+
+/// `c` : commence la saisie de la clé de l'entrée sous le curseur,
+/// pré-remplie avec la clé actuelle.
+fn start_rename(model: &mut Model) {
+    let Some(session) = model
+        .editing
+        .as_ref()
+        .filter(|s| s.state == EditState::FieldSelect)
+    else {
+        return;
+    };
+    let Some((section, index)) = session.current_field().and_then(|field| field.entry()) else {
+        return;
+    };
+    let Some(key) = section_entries(&session.preview, section)
+        .get(index)
+        .map(|kv| kv.key.clone())
+    else {
+        return;
+    };
+    open_input(
+        model,
+        TextInput::new(&key, false),
+        InputTarget::RenameKey { section, index },
+    );
+}
+
+/// Issue d'une validation de saisie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Validation {
+    /// Aucune saisie en cours, ou saisie validée : retour en sélection.
+    Done,
+    /// Clé d'ajout validée : la saisie continue sur la valeur.
+    Continued,
+    /// Modification refusée : la saisie reste ouverte.
+    Refused,
+}
+
+/// Valide la saisie en cours (`Tab`, `Entrée` sur une ligne, `Ctrl+S`),
+/// selon sa cible. `key_only` : à l'étape de la clé d'un ajout, ajoute
+/// l'entrée avec une valeur vide au lieu de passer à la valeur.
+fn validate_input(model: &mut Model, key_only: bool) -> Validation {
+    let Some(session) = &model.editing else {
+        return Validation::Done;
+    };
+    let EditState::Input(input) = &session.state else {
+        return Validation::Done;
+    };
+    let text = input.text().to_owned();
+    match session.target.clone() {
+        InputTarget::Field => {
+            let Some(field) = session.current_field() else {
+                close_input(model);
+                return Validation::Done;
+            };
+            if text != field_value_committed(session, &field)
+                && let Some(edit) = value_edit(field, text)
+                && !try_commit(model, edit)
+            {
+                return Validation::Refused;
+            }
+            close_input(model);
+            Validation::Done
+        }
+        InputTarget::NewKey {
+            section,
+            return_cursor,
+        } => {
+            let add = FieldEdit::AddEntry {
+                section,
+                key: text.clone(),
+                value: String::new(),
+                enabled: true,
+            };
+            if key_only {
+                if !try_commit(model, add) {
+                    return Validation::Refused;
+                }
+                finish_add(model, section);
+                return Validation::Done;
+            }
+            if let Err(error) = check_edit(model, add) {
+                refuse(model, &error);
+                return Validation::Refused;
+            }
+            open_input(
+                model,
+                TextInput::new("", false),
+                InputTarget::NewValue {
+                    section,
+                    key: text,
+                    return_cursor,
+                },
+            );
+            Validation::Continued
+        }
+        InputTarget::NewValue { section, key, .. } => {
+            let add = FieldEdit::AddEntry {
+                section,
+                key,
+                value: text,
+                enabled: true,
+            };
+            if !try_commit(model, add) {
+                return Validation::Refused;
+            }
+            finish_add(model, section);
+            Validation::Done
+        }
+        InputTarget::RenameKey { section, index } => {
+            let unchanged = section_entries(&session.preview, section)
+                .get(index)
+                .is_some_and(|kv| kv.key == text);
+            if !unchanged
+                && !try_commit(
+                    model,
+                    FieldEdit::RenameKey {
+                        section,
+                        index,
+                        key: text,
+                    },
+                )
+            {
+                return Validation::Refused;
+            }
+            close_input(model);
+            Validation::Done
+        }
+    }
+}
+
+/// Termine un ajout réussi : sélection de champ, curseur sur la nouvelle
+/// entrée (la dernière de sa section).
+fn finish_add(model: &mut Model, section: EntrySection) {
+    if let Some(session) = &mut model.editing {
+        let count = section_entries(&session.preview, section).len();
+        let field = match section {
+            EntrySection::Headers => EditableField::HeaderValue(count.saturating_sub(1)),
+            EntrySection::QueryParams => EditableField::QueryParamValue(count.saturating_sub(1)),
+            EntrySection::PathParams => EditableField::PathParamValue(count.saturating_sub(1)),
+        };
+        if let Some(position) = session.fields.iter().position(|f| *f == field) {
+            session.cursor = position;
+        }
+    }
+    close_input(model);
+}
+
+/// Modification de la valeur d'un champ.
+fn value_edit(field: EditableField, value: String) -> Option<FieldEdit> {
+    Some(match field {
+        EditableField::Url => FieldEdit::Url(value),
+        EditableField::HeaderValue(index) => FieldEdit::HeaderValue { index, value },
+        EditableField::QueryParamValue(index) => FieldEdit::QueryParamValue { index, value },
+        EditableField::PathParamValue(index) => FieldEdit::PathParamValue { index, value },
+        EditableField::BodyText => FieldEdit::BodyText(value),
+        EditableField::AddRow(_) => return None,
+    })
 }
 
 /// Annule la saisie en cours : `pending` n'est pas touché, le champ
-/// reprend la valeur qu'il avait au début de la saisie.
+/// reprend la valeur qu'il avait au début de la saisie ; un ajout est
+/// abandonné en entier et le curseur revient d'où il était parti.
 fn cancel_input(model: &mut Model) {
     let Some(session) = &mut model.editing else {
         return;
@@ -1005,10 +1199,13 @@ fn cancel_input(model: &mut Model) {
     if !matches!(session.state, EditState::Input(_)) {
         return;
     }
-    session.state = EditState::FieldSelect;
-    session.hscroll = 0;
+    if let InputTarget::NewKey { return_cursor, .. } | InputTarget::NewValue { return_cursor, .. } =
+        session.target
+    {
+        session.cursor = return_cursor.min(session.fields.len().saturating_sub(1));
+    }
     model.last_status = None;
-    scroll_edit_into_view(model);
+    close_input(model);
 }
 
 /// Touche d'édition du tampon pendant une saisie.
@@ -1030,69 +1227,84 @@ fn input_key(model: &mut Model, key: InputKey) {
         InputKey::Home => input.home(),
         InputKey::End => input.end(),
         InputKey::Enter if input.is_multiline() => input.newline(),
-        InputKey::Enter => return validate_input(model),
+        InputKey::Enter => {
+            validate_input(model, false);
+            return;
+        }
     }
     model.last_status = None;
     scroll_edit_into_view(model);
 }
 
-fn update_or_push_pending(session: &mut EditSession, field: EditableField, value: String) {
-    match field {
-        EditableField::Url => {
-            if let Some(existing) = session.pending.iter_mut().rev().find_map(|e| match e {
-                FieldEdit::Url(v) => Some(v),
-                _ => None,
-            }) {
-                *existing = value;
-            } else {
-                session.pending.push(FieldEdit::Url(value));
+/// Journal de la session augmenté de `edit`, avec une seule coalescence :
+/// deux modifications de valeur consécutives du même champ.
+fn with_edit(pending: &[FieldEdit], edit: FieldEdit) -> Vec<FieldEdit> {
+    let mut edits = pending.to_vec();
+    let same_value_target = match (edits.last(), &edit) {
+        (Some(FieldEdit::Url(_)), FieldEdit::Url(_))
+        | (Some(FieldEdit::BodyText(_)), FieldEdit::BodyText(_)) => true,
+        (
+            Some(FieldEdit::HeaderValue { index: a, .. }),
+            FieldEdit::HeaderValue { index: b, .. },
+        )
+        | (
+            Some(FieldEdit::QueryParamValue { index: a, .. }),
+            FieldEdit::QueryParamValue { index: b, .. },
+        )
+        | (
+            Some(FieldEdit::PathParamValue { index: a, .. }),
+            FieldEdit::PathParamValue { index: b, .. },
+        ) => a == b,
+        _ => false,
+    };
+    if same_value_target {
+        edits.pop();
+    }
+    edits.push(edit);
+    edits
+}
+
+/// Aperçu de la requête éditée avec `edit` ajouté au journal.
+fn check_edit(
+    model: &Model,
+    edit: FieldEdit,
+) -> Result<(Vec<FieldEdit>, crate::collection::RequestView), crate::writer::EditError> {
+    let session = model
+        .editing
+        .as_ref()
+        .ok_or(crate::writer::EditError::Unreadable)?;
+    let ast = match model.selected_node() {
+        Some(TreeNode::Request(request)) if request.path == session.path => request.ast.as_ref(),
+        _ => None,
+    }
+    .ok_or(crate::writer::EditError::Unreadable)?;
+    let edits = with_edit(&session.pending, edit);
+    let view = crate::writer::preview(ast, &edits)?;
+    Ok((edits, view))
+}
+
+/// Affiche le refus d'une modification, sans jamais citer le texte saisi.
+fn refuse(model: &mut Model, error: &crate::writer::EditError) {
+    model.last_status = Some(super::model::StatusMessage::EditRefused(error.to_string()));
+}
+
+/// Ajoute `edit` au journal s'il est accepté par `bru-writer` : aperçu et
+/// positions recalculés, session marquée modifiée. Sinon, message de refus
+/// et journal inchangé.
+fn try_commit(model: &mut Model, edit: FieldEdit) -> bool {
+    match check_edit(model, edit) {
+        Ok((edits, view)) => {
+            if let Some(session) = &mut model.editing {
+                session.pending = edits;
+                session.set_preview(view);
+                session.dirty = true;
             }
+            model.last_status = None;
+            true
         }
-        EditableField::HeaderValue(index) => {
-            if let Some(existing) = session.pending.iter_mut().rev().find_map(|e| match e {
-                FieldEdit::HeaderValue { index: i, value: v } if *i == index => Some(v),
-                _ => None,
-            }) {
-                *existing = value;
-            } else {
-                session
-                    .pending
-                    .push(FieldEdit::HeaderValue { index, value });
-            }
-        }
-        EditableField::QueryParamValue(index) => {
-            if let Some(existing) = session.pending.iter_mut().rev().find_map(|e| match e {
-                FieldEdit::QueryParamValue { index: i, value: v } if *i == index => Some(v),
-                _ => None,
-            }) {
-                *existing = value;
-            } else {
-                session
-                    .pending
-                    .push(FieldEdit::QueryParamValue { index, value });
-            }
-        }
-        EditableField::PathParamValue(index) => {
-            if let Some(existing) = session.pending.iter_mut().rev().find_map(|e| match e {
-                FieldEdit::PathParamValue { index: i, value: v } if *i == index => Some(v),
-                _ => None,
-            }) {
-                *existing = value;
-            } else {
-                session
-                    .pending
-                    .push(FieldEdit::PathParamValue { index, value });
-            }
-        }
-        EditableField::BodyText => {
-            if let Some(existing) = session.pending.iter_mut().rev().find_map(|e| match e {
-                FieldEdit::BodyText(v) => Some(v),
-                _ => None,
-            }) {
-                *existing = value;
-            } else {
-                session.pending.push(FieldEdit::BodyText(value));
-            }
+        Err(error) => {
+            refuse(model, &error);
+            false
         }
     }
 }
@@ -1203,10 +1415,7 @@ fn edit_saved(
             session.stamp = saved.stamp;
             session.pending.clear();
             session.dirty = false;
-            session.fields = EditableField::list_for(&saved.view);
-            if !session.fields.is_empty() {
-                session.cursor = session.cursor.min(session.fields.len() - 1);
-            }
+            session.set_preview(saved.view.clone());
             model.replace_request_node(&path, saved.ast, saved.view);
         }
         Err(error) => {
@@ -1854,7 +2063,11 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
         {
             return;
         }
-        validate_input(model);
+        // Comme Tab : si la saisie reste ouverte (refus, ou clé d'ajout
+        // validée et saisie de la valeur), le clic s'arrête là.
+        if !matches!(validate_input(model, false), Validation::Done) {
+            return;
+        }
     }
     model.mouse.drag = None;
     match hit {
@@ -3564,7 +3777,13 @@ mod tests {
             fields: vec![EditableField::Url],
             cursor: 0,
             state: EditState::FieldSelect,
+            target: super::super::model::InputTarget::Field,
             pending: vec![],
+            preview: crate::collection::RequestView::from_ast(
+                &crate::collection::BruFile::parse("get {\n  url: http://a\n}\n".to_owned())
+                    .expect("AST"),
+            )
+            .expect("vue"),
             dirty: true,
             hscroll: 0,
         });
@@ -3613,7 +3832,13 @@ mod tests {
             fields: vec![EditableField::Url],
             cursor: 0,
             state: EditState::FieldSelect,
+            target: super::super::model::InputTarget::Field,
             pending: vec![],
+            preview: crate::collection::RequestView::from_ast(
+                &crate::collection::BruFile::parse("get {\n  url: http://a\n}\n".to_owned())
+                    .expect("AST"),
+            )
+            .expect("vue"),
             dirty: true,
             hscroll: 0,
         });
@@ -3847,13 +4072,8 @@ mod tests {
             EditableField::HeaderValue(0)
         ));
 
-        let req = match model.selected_node().unwrap() {
-            TreeNode::Request(r) => &r.view,
-            _ => panic!("requête attendue"),
-        };
         assert!(field_enabled(
             model.editing.as_ref().unwrap(),
-            req,
             &EditableField::HeaderValue(0)
         ));
 
@@ -3861,25 +4081,15 @@ mod tests {
         update(&mut model, Message::ToggleField);
         assert!(model.editing.as_ref().unwrap().dirty);
         assert_eq!(model.editing.as_ref().unwrap().pending.len(), 1);
-        let req = match model.selected_node().unwrap() {
-            TreeNode::Request(r) => &r.view,
-            _ => panic!("requête attendue"),
-        };
         assert!(!field_enabled(
             model.editing.as_ref().unwrap(),
-            req,
             &EditableField::HeaderValue(0)
         ));
 
         // Seconde bascule : redevient activé
         update(&mut model, Message::ToggleField);
-        let req = match model.selected_node().unwrap() {
-            TreeNode::Request(r) => &r.view,
-            _ => panic!("requête attendue"),
-        };
         assert!(field_enabled(
             model.editing.as_ref().unwrap(),
-            req,
             &EditableField::HeaderValue(0)
         ));
 
@@ -3899,20 +4109,12 @@ mod tests {
             .expect("query param attendu");
         model2.editing.as_mut().unwrap().cursor = param_cursor;
 
-        let req2 = match model2.selected_node().unwrap() {
-            TreeNode::Request(r) => &r.view,
-            _ => panic!("requête attendue"),
-        };
         let param_field = model2.editing.as_ref().unwrap().fields[param_cursor];
-        let init_enabled = field_enabled(model2.editing.as_ref().unwrap(), req2, &param_field);
+        let init_enabled = field_enabled(model2.editing.as_ref().unwrap(), &param_field);
         update(&mut model2, Message::ToggleField);
         assert!(model2.editing.as_ref().unwrap().dirty);
-        let req2 = match model2.selected_node().unwrap() {
-            TreeNode::Request(r) => &r.view,
-            _ => panic!("requête attendue"),
-        };
         assert_eq!(
-            field_enabled(model2.editing.as_ref().unwrap(), req2, &param_field),
+            field_enabled(model2.editing.as_ref().unwrap(), &param_field),
             !init_enabled
         );
 
@@ -3944,13 +4146,8 @@ mod tests {
 
         // Curseur sur URL
         assert_eq!(model.editing.as_ref().unwrap().cursor, 0);
-        let initial_url = {
-            let req = match model.selected_node().unwrap() {
-                TreeNode::Request(r) => &r.view,
-                _ => panic!("requête attendue"),
-            };
-            field_value(model.editing.as_ref().unwrap(), req, &EditableField::Url).to_string()
-        };
+        let initial_url =
+            { field_value(model.editing.as_ref().unwrap(), &EditableField::Url).to_string() };
         let expected_len = initial_url.chars().count();
 
         // Début de la saisie (Entrée)
@@ -3972,12 +4169,8 @@ mod tests {
         assert!(!model.editing.as_ref().unwrap().dirty);
         assert!(model.editing.as_ref().unwrap().pending.is_empty());
 
-        let req = match model.selected_node().unwrap() {
-            TreeNode::Request(r) => &r.view,
-            _ => panic!("requête attendue"),
-        };
         assert_eq!(
-            field_value(model.editing.as_ref().unwrap(), req, &EditableField::Url,),
+            field_value(model.editing.as_ref().unwrap(), &EditableField::Url,),
             initial_url.as_str()
         );
 
@@ -4027,12 +4220,8 @@ mod tests {
         assert!(model.editing.as_ref().unwrap().dirty);
         assert_eq!(model.editing.as_ref().unwrap().pending.len(), 1);
 
-        let req = match model.selected_node().unwrap() {
-            TreeNode::Request(r) => &r.view,
-            _ => panic!("requête attendue"),
-        };
         assert_eq!(
-            field_value(model.editing.as_ref().unwrap(), req, &EditableField::Url,),
+            field_value(model.editing.as_ref().unwrap(), &EditableField::Url,),
             "https://{{host}}/pings"
         );
     }
@@ -4387,15 +4576,7 @@ mod tests {
     }
 
     fn shown_value(model: &Model, field: EditableField) -> String {
-        let Some(TreeNode::Request(request)) = model.selected_node() else {
-            panic!("requête attendue");
-        };
-        field_value(
-            model.editing.as_ref().expect("session"),
-            &request.view,
-            &field,
-        )
-        .to_owned()
+        field_value(model.editing.as_ref().expect("session"), &field).to_owned()
     }
 
     fn session(model: &Model) -> &EditSession {
@@ -5128,7 +5309,7 @@ mod tests {
         assert!(!format!("{model:?}").contains("s3cr3t"));
 
         // `d` oublie la saisie : la valeur `.env` revient.
-        update(&mut model, Message::ForgetSecret);
+        update(&mut model, Message::Delete);
         assert_eq!(
             rows(&model)[0].source,
             SecretSource::DotEnv {
@@ -5165,7 +5346,7 @@ mod tests {
     fn adding_a_name_then_its_value() {
         let mut model = local_model();
         update(&mut model, Message::ToggleSecrets);
-        update(&mut model, Message::AddSecret);
+        update(&mut model, Message::Add);
         assert_eq!(model.text_capture(), Some(TextCapture::SecretName));
 
         // Nom invalide puis doublon : refusés, la saisie reste ouverte.
@@ -5190,7 +5371,7 @@ mod tests {
         update(&mut model, Message::CancelSecretInput);
         assert_eq!(rows(&model).len(), 1);
 
-        update(&mut model, Message::AddSecret);
+        update(&mut model, Message::Add);
         type_text(&mut model, "oktaClientSecret");
         update(&mut model, Message::ConfirmSecretInput);
         type_text(&mut model, "abc");
@@ -5202,7 +5383,7 @@ mod tests {
         assert_eq!(model.secrets.selected, 1);
 
         // `d` sur un nom ajouté le retire de la liste.
-        update(&mut model, Message::ForgetSecret);
+        update(&mut model, Message::Delete);
         assert_eq!(rows(&model).len(), 1);
         assert_eq!(model.secrets.selected, 0);
     }
@@ -5371,6 +5552,366 @@ mod tests {
         assert!(model.secrets.acknowledged.is_empty());
         assert!(model.secrets.pending_run.is_none());
         assert_eq!(model.secrets.typed.len(), 1);
+    }
+    // --- Ajout, suppression, renommage (`add-entry-management`) ---------
+
+    /// Déplace le curseur de champ sur `field`, vers le haut ou le bas.
+    fn go_to(model: &mut Model, field: EditableField) {
+        let index = session(model)
+            .fields
+            .iter()
+            .position(|f| *f == field)
+            .expect("champ présent");
+        while session(model).cursor > index {
+            update(model, Message::Up);
+        }
+        while session(model).cursor < index {
+            update(model, Message::Down);
+        }
+    }
+
+    fn target_of(model: &Model) -> &InputTarget {
+        &session(model).target
+    }
+
+    /// Ajoute `key: value` à `section` depuis sa ligne d'ajout.
+    fn add_via_row(model: &mut Model, section: EntrySection, key: &str, value: &str) {
+        go_to(model, EditableField::AddRow(section));
+        update(model, Message::Enter);
+        type_input(model, key);
+        update(model, Message::ValidateInput);
+        type_input(model, value);
+        update(model, Message::InputKey(InputKey::Enter));
+        assert_eq!(session(model).state, EditState::FieldSelect, "ajout validé");
+    }
+
+    #[test]
+    fn a_on_an_existing_header_adds_at_the_end_of_the_section() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        go_to(&mut model, EditableField::HeaderValue(0));
+        update(&mut model, Message::Add);
+        assert!(matches!(
+            target_of(&model),
+            InputTarget::NewKey {
+                section: EntrySection::Headers,
+                ..
+            }
+        ));
+        type_input(&mut model, "X-Trace");
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        assert!(matches!(target_of(&model), InputTarget::NewValue { .. }));
+        assert!(session(&model).has_unsaved());
+        type_input(&mut model, "abc");
+        update(&mut model, Message::InputKey(InputKey::Enter));
+
+        let session = session(&model);
+        assert_eq!(session.state, EditState::FieldSelect);
+        let last = session.preview.headers.last().expect("en-tête");
+        assert_eq!((last.key.as_str(), last.value.as_str()), ("X-Trace", "abc"));
+        assert!(last.enabled);
+        assert_eq!(session.current_field(), Some(EditableField::HeaderValue(2)));
+        assert!(session.dirty);
+    }
+
+    #[test]
+    fn adding_a_query_param_from_its_row_updates_the_url() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        add_via_row(&mut model, EntrySection::QueryParams, "page", "2");
+        let session = session(&model);
+        assert_eq!(session.preview.url, "https://{{host}}/ping?page=2");
+        assert_eq!(session.preview.query_params[0].key, "page");
+        assert_eq!(
+            session.current_field(),
+            Some(EditableField::QueryParamValue(0))
+        );
+    }
+
+    #[test]
+    fn adding_into_an_empty_path_section() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        add_via_row(&mut model, EntrySection::PathParams, "id", "42");
+        let session = session(&model);
+        assert_eq!(session.preview.path_params[0].key, "id");
+        assert_eq!(
+            session.current_field(),
+            Some(EditableField::PathParamValue(0))
+        );
+        assert_eq!(session.preview.url, "https://{{host}}/ping");
+    }
+
+    #[test]
+    fn escape_abandons_the_whole_add_and_restores_the_cursor() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        go_to(&mut model, EditableField::HeaderValue(1));
+        let cursor = session(&model).cursor;
+        update(&mut model, Message::Add);
+        type_input(&mut model, "X-Trace");
+        update(&mut model, Message::ValidateInput);
+
+        // Une clé validée verrouille la sélection de requête.
+        assert!(selection_locked(&model));
+
+        type_input(&mut model, "abc");
+        update(&mut model, Message::CancelInput);
+        let session = session(&model);
+        assert_eq!(session.state, EditState::FieldSelect);
+        assert_eq!(session.cursor, cursor);
+        assert_eq!(session.preview.headers.len(), 2);
+        assert!(session.pending.is_empty());
+        assert!(!session.dirty);
+        assert!(!session.has_unsaved());
+    }
+
+    #[test]
+    fn a_d_c_and_space_have_no_effect_where_not_applicable() {
+        let mut model = edit_session("post-json.bru", (100, 30));
+        // URL
+        update(&mut model, Message::Add);
+        update(&mut model, Message::Rename);
+        update(&mut model, Message::Delete);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(session(&model).pending.is_empty());
+        // Corps
+        go_to(&mut model, EditableField::BodyText);
+        update(&mut model, Message::Add);
+        update(&mut model, Message::Delete);
+        update(&mut model, Message::Rename);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(session(&model).pending.is_empty());
+        // Ligne d'ajout : `a` ajoute, mais `d`, `c` et Espace sont sans effet.
+        go_to(&mut model, EditableField::AddRow(EntrySection::Headers));
+        update(&mut model, Message::Delete);
+        update(&mut model, Message::Rename);
+        update(&mut model, Message::ToggleField);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(session(&model).pending.is_empty());
+        update(&mut model, Message::Add);
+        assert!(matches!(target_of(&model), InputTarget::NewKey { .. }));
+    }
+
+    #[test]
+    fn d_deletes_immediately_and_keeps_the_cursor_index() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        add_via_row(&mut model, EntrySection::Headers, "A", "1");
+        add_via_row(&mut model, EntrySection::Headers, "B", "2");
+        add_via_row(&mut model, EntrySection::Headers, "C", "3");
+        go_to(&mut model, EditableField::HeaderValue(1));
+        let cursor = session(&model).cursor;
+        update(&mut model, Message::Delete);
+
+        let session = session(&model);
+        let keys: Vec<&str> = session
+            .preview
+            .headers
+            .iter()
+            .map(|h| h.key.as_str())
+            .collect();
+        assert_eq!(keys, ["A", "C"]);
+        assert_eq!(session.cursor, cursor);
+        assert_eq!(session.current_field(), Some(EditableField::HeaderValue(1)));
+        assert!(session.dirty);
+    }
+
+    #[test]
+    fn deleting_a_query_param_updates_the_url_and_locks_the_selection() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        add_via_row(&mut model, EntrySection::QueryParams, "page", "2");
+        add_via_row(&mut model, EntrySection::QueryParams, "size", "10");
+        assert_eq!(
+            session(&model).preview.url,
+            "https://{{host}}/ping?page=2&size=10"
+        );
+        go_to(&mut model, EditableField::QueryParamValue(1));
+        update(&mut model, Message::Delete);
+        assert_eq!(session(&model).preview.url, "https://{{host}}/ping?page=2");
+
+        let selected = model.tree.selected;
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Down);
+        assert_eq!(model.tree.selected, selected);
+        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
+    }
+
+    #[test]
+    fn c_renames_a_query_param_and_updates_the_url() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        add_via_row(&mut model, EntrySection::QueryParams, "p", "2");
+        update(&mut model, Message::Rename);
+        assert_eq!(input_of(&model).text(), "p");
+        assert_eq!(input_of(&model).cursor(), 1);
+        press(&mut model, InputKey::Backspace, 1);
+        type_input(&mut model, "page");
+        update(&mut model, Message::InputKey(InputKey::Enter));
+
+        let session = session(&model);
+        assert_eq!(session.state, EditState::FieldSelect);
+        let param = &session.preview.query_params[0];
+        assert_eq!((param.key.as_str(), param.value.as_str()), ("page", "2"));
+        assert_eq!(session.preview.url, "https://{{host}}/ping?page=2");
+    }
+
+    #[test]
+    fn cancelled_rename_keeps_the_key_and_the_session_clean() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        go_to(&mut model, EditableField::HeaderValue(1));
+        update(&mut model, Message::Rename);
+        type_input(&mut model, "zz");
+        assert!(session(&model).has_unsaved());
+        update(&mut model, Message::CancelInput);
+        let session = session(&model);
+        assert_eq!(session.preview.headers[1].key, "X-Debug");
+        assert!(!session.preview.headers[1].enabled);
+        assert!(!session.dirty);
+        assert!(!session.has_unsaved());
+    }
+
+    #[test]
+    fn rename_keeps_value_and_disabled_state() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        go_to(&mut model, EditableField::HeaderValue(1));
+        update(&mut model, Message::Rename);
+        press(&mut model, InputKey::Backspace, 5);
+        type_input(&mut model, "Verbose");
+        update(&mut model, Message::ValidateInput);
+        let header = &session(&model).preview.headers[1];
+        assert_eq!(header.key, "X-Verbose");
+        assert_eq!(header.value, "1");
+        assert!(!header.enabled);
+    }
+
+    #[test]
+    fn ctrl_s_during_the_key_step_adds_an_empty_value_and_saves() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        go_to(&mut model, EditableField::AddRow(EntrySection::Headers));
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "X-Trace");
+        let command = update(&mut model, Message::SaveEdit);
+        let Command::SaveEdit { edits, .. } = command else {
+            panic!("sauvegarde attendue");
+        };
+        assert_eq!(
+            edits,
+            [FieldEdit::AddEntry {
+                section: EntrySection::Headers,
+                key: "X-Trace".into(),
+                value: String::new(),
+                enabled: true,
+            }]
+        );
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+    }
+
+    #[test]
+    fn ctrl_s_on_an_invalid_key_refuses_without_saving() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        go_to(&mut model, EditableField::AddRow(EntrySection::Headers));
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "X:Trace");
+        let command = update(&mut model, Message::SaveEdit);
+        assert!(matches!(command, Command::None));
+        assert_eq!(input_of(&model).text(), "X:Trace");
+        assert!(matches!(target_of(&model), InputTarget::NewKey { .. }));
+        let Some(StatusMessage::EditRefused(reason)) = &model.last_status else {
+            panic!("refus attendu");
+        };
+        assert!(!reason.contains("X:Trace"), "{reason}");
+        assert!(session(&model).pending.is_empty());
+        assert!(!session(&model).dirty);
+    }
+
+    #[test]
+    fn invalid_key_on_enter_keeps_the_input_open() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        go_to(&mut model, EditableField::HeaderValue(0));
+        update(&mut model, Message::Add);
+        type_input(&mut model, "X Trace");
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        assert!(matches!(target_of(&model), InputTarget::NewKey { .. }));
+        assert_eq!(input_of(&model).text(), "X Trace");
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::EditRefused(_))
+        ));
+        assert_eq!(session(&model).preview.headers.len(), 2);
+    }
+
+    #[test]
+    fn refused_query_value_stays_in_input_then_escape_restores() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        add_via_row(&mut model, EntrySection::QueryParams, "q", "2");
+        let pending = session(&model).pending.clone();
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "#b");
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        assert_eq!(input_of(&model).text(), "2#b");
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::EditRefused(_))
+        ));
+        assert_eq!(session(&model).pending, pending);
+
+        update(&mut model, Message::CancelInput);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(shown_value(&model, EditableField::QueryParamValue(0)), "2");
+    }
+
+    #[test]
+    fn duplicate_header_key_is_accepted() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        add_via_row(&mut model, EntrySection::Headers, "Accept", "text/plain");
+        let accepts = session(&model)
+            .preview
+            .headers
+            .iter()
+            .filter(|h| h.key == "Accept")
+            .count();
+        assert_eq!(accepts, 2);
+    }
+
+    #[test]
+    fn validating_the_url_resynchronises_query_params() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        add_via_row(&mut model, EntrySection::QueryParams, "page", "2");
+        go_to(&mut model, EditableField::Url);
+        update(&mut model, Message::Enter);
+        press(&mut model, InputKey::Backspace, 1);
+        type_input(&mut model, "3");
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        assert_eq!(session(&model).preview.query_params[0].value, "3");
+    }
+
+    #[test]
+    fn edit_saved_after_an_add_replaces_the_preview() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        add_via_row(&mut model, EntrySection::Headers, "A", "1");
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        let ast = request.ast.clone().expect("ast");
+        let pending = session(&model).pending.clone();
+        let bytes = crate::writer::preview(&ast, &pending).expect("aperçu");
+        let source = "meta {\n  name: ping\n  type: http\n  seq: 7\n}\n\nget {\n  url: https://{{host}}/ping\n  body: none\n  auth: none\n}\n\nheaders {\n  A: 1\n}\n";
+        let saved_ast = crate::collection::BruFile::parse(source.to_owned()).expect("AST");
+        let saved_view = RequestView::from_ast(&saved_ast).expect("vue");
+        assert_eq!(bytes, saved_view);
+        let stamp = session(&model).stamp;
+        update(
+            &mut model,
+            Message::EditSaved {
+                path: "simple-get.bru".into(),
+                result: Ok(SavedEdit {
+                    stamp,
+                    ast: saved_ast,
+                    view: saved_view.clone(),
+                }),
+            },
+        );
+        let session = session(&model);
+        assert!(session.pending.is_empty());
+        assert!(!session.dirty);
+        assert_eq!(session.preview, saved_view);
+        assert!(session.fields.contains(&EditableField::HeaderValue(0)));
     }
 }
 

@@ -1,0 +1,16 @@
+meta {
+  name: query-sync
+  type: http
+  seq: 16
+}
+
+get {
+  url: https://{{host}}/items?page=2&size=10#top
+  body: none
+  auth: none
+}
+
+params:query {
+  page: 2
+  size: 10
+}

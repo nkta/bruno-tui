@@ -1,13 +1,4 @@
-# bru-writer Specification
-
-## Purpose
-
-Sérialiser une modification de champ vers le fichier `.bru` d'une requête,
-en ne réécrivant que les tranches de source correspondant aux champs
-édités, avec une écriture atomique et un refus explicite si le fichier a
-changé sur disque depuis son chargement.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Champs éditables
 Le système SHALL accepter des modifications sur les champs suivants d'une
@@ -162,30 +153,7 @@ du tout : si l'une d'elles est refusée, aucune écriture n'a lieu.
 - **THEN** une erreur est retournée, le fichier cible est inchangé et ne
   contient pas l'en-tête ajouté
 
-### Requirement: Aucun secret journalisé
-Le système MUST NOT écrire dans un message d'erreur, un log ou toute sortie
-de diagnostic la valeur d'un champ édité ou d'un champ existant du fichier.
-Les erreurs MUST se limiter à nommer le fichier, le bloc et, le cas
-échéant, l'indice ou le type de champ concerné.
-
-#### Scenario: Erreur sur un en-tête sensible
-- **WHEN** l'appelant tente une modification invalide sur un en-tête dont
-  la valeur actuelle est un jeton secret
-- **THEN** ni le message d'erreur ni sa représentation de déboguage ne
-  contiennent la valeur de ce jeton
-
-### Requirement: Écriture derrière une abstraction interchangeable
-Le système SHALL exposer l'écriture derrière une interface unique qui
-accepte un chemin de fichier, l'AST chargé, l'instantané de fraîcheur et
-une liste de modifications, et retourne le nouvel instantané ou une erreur,
-de sorte qu'une implémentation de substitution puisse être utilisée dans
-les tests sans écrire réellement sur disque.
-
-#### Scenario: Implémentation de substitution
-- **WHEN** une implémentation de test enregistre les modifications reçues
-  sans toucher au disque
-- **THEN** le code appelant fonctionne à l'identique avec cette
-  implémentation
+## ADDED Requirements
 
 ### Requirement: Application ordonnée des modifications
 Le système SHALL appliquer une liste de modifications dans l'ordre fourni.

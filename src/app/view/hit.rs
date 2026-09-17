@@ -229,19 +229,12 @@ mod tests {
             panic!("requête attendue");
         };
         let path = request.path.clone();
-        let fields = crate::app::model::EditableField::list_for(&request.view);
+        let view = request.view.clone();
         let stamp = FileStamp::capture(&model.loaded().expect("chargée").root.join(&path))
             .expect("instantané");
-        model.editing = Some(EditSession {
-            path,
-            stamp,
-            fields,
-            cursor: 0,
-            state: EditState::Input(TextInput::new("https://{{host}}/items", false)),
-            pending: Vec::new(),
-            dirty: false,
-            hscroll: 0,
-        });
+        let mut session = EditSession::new(path, stamp, view);
+        session.state = EditState::Input(TextInput::new("https://{{host}}/items", false));
+        model.editing = Some(session);
         model.focus = Focus::Detail;
         assert!(!detail_wraps(&model));
         let areas = layout_for(model.size).expect("taille");

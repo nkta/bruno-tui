@@ -1,0 +1,29 @@
+{
+  "url": "https://{{host}}/items?tag=a&tag=b",
+  "headers": [
+    {
+      "name": "Accept",
+      "value": "text/plain",
+      "enabled": true
+    },
+    {
+      "name": "Accept",
+      "value": "application/json",
+      "enabled": true
+    }
+  ],
+  "params": [
+    {
+      "name": "tag",
+      "value": "a",
+      "enabled": true,
+      "type": "query"
+    },
+    {
+      "name": "tag",
+      "value": "b",
+      "enabled": true,
+      "type": "query"
+    }
+  ]
+}

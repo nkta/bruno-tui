@@ -1,0 +1,23 @@
+meta {
+  name: add-path-between
+  type: http
+  seq: 12
+}
+
+get {
+  url: https://{{host}}/users/:id?expand=true
+  body: none
+  auth: none
+}
+
+params:query {
+  expand: true
+}
+
+params:path {
+  id: 42
+}
+
+headers {
+  Accept: application/json
+}

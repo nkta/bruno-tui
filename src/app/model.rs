@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use crate::collection::{BodyContent, BodyKind, Collection, LoadError, RequestView, TreeNode};
 use crate::runner::{self, SecretString};
 use crate::secrets::{Resolved, SecretLookup, SecretMapping, SecretSource, is_valid_name};
-use crate::writer::{FieldEdit, FileStamp};
+use crate::writer::{EntrySection, FieldEdit, FileStamp};
 
 use super::filter::FilterState;
 use super::message::TextCapture;
@@ -213,15 +213,22 @@ pub struct EditSession {
     /// qu'elle ne porte aucune modification non enregistrée.
     pub path: PathBuf,
     pub stamp: FileStamp,
-    /// Champs éditables, dans l'ordre d'affichage (D2).
+    /// Positions du curseur de champ, dans l'ordre d'affichage, calculées
+    /// depuis `preview`.
     pub fields: Vec<EditableField>,
     /// Indice du champ sous le curseur, dans `fields`.
     pub cursor: usize,
     pub state: EditState,
-    /// Modifications validées, une par cible touchée (fusionnées par
-    /// écrasement, dans l'ordre de `FieldEdit` attendu par bru-writer :
-    /// pas besoin de dédupliquer davantage, le writer le fait déjà).
+    /// Cible de la saisie en cours ; significative seulement en `Input`
+    /// (`add-entry-management`, D7).
+    pub target: InputTarget,
+    /// Journal ordonné des modifications validées, appliqué tel quel par
+    /// `bru-writer` : un indice y désigne la position courante après les
+    /// modifications précédentes.
     pub pending: Vec<FieldEdit>,
+    /// Vue de la requête après application de `pending`, telle que
+    /// `bru-writer` l'écrirait (`writer::preview`).
+    pub preview: RequestView,
     /// Au moins une modification validée depuis la dernière sauvegarde.
     pub dirty: bool,
     /// Décalage horizontal, en colonnes d'affichage, de la valeur du champ
@@ -230,15 +237,47 @@ pub struct EditSession {
 }
 
 impl EditSession {
+    /// Ouvre une session propre sur une requête chargée.
+    pub fn new(path: PathBuf, stamp: FileStamp, view: RequestView) -> Self {
+        Self {
+            path,
+            stamp,
+            fields: EditableField::list_for(&view),
+            cursor: 0,
+            state: EditState::FieldSelect,
+            target: InputTarget::Field,
+            pending: Vec::new(),
+            preview: view,
+            dirty: false,
+            hscroll: 0,
+        }
+    }
+
     /// Modifications non enregistrées : validées, ou saisie en cours dont
-    /// le texte diffère de la valeur au début de la saisie.
+    /// le texte diffère de la valeur au début de la saisie. La saisie de la
+    /// valeur d'une nouvelle entrée compte toujours : sa clé est déjà
+    /// validée.
     pub fn has_unsaved(&self) -> bool {
-        self.dirty || matches!(&self.state, EditState::Input(input) if input.is_modified())
+        self.dirty
+            || match &self.state {
+                EditState::FieldSelect => false,
+                EditState::Input(input) => {
+                    input.is_modified() || matches!(self.target, InputTarget::NewValue { .. })
+                }
+            }
     }
 
     /// Champ sous le curseur.
     pub fn current_field(&self) -> Option<EditableField> {
         self.fields.get(self.cursor).copied()
+    }
+
+    /// Remplace l'aperçu et recalcule les positions du curseur, bornant le
+    /// curseur à la dernière.
+    pub fn set_preview(&mut self, view: RequestView) {
+        self.fields = EditableField::list_for(&view);
+        self.preview = view;
+        self.cursor = self.cursor.min(self.fields.len().saturating_sub(1));
     }
 }
 
@@ -249,28 +288,55 @@ pub enum EditState {
     Input(TextInput),
 }
 
+/// Ce que produit la validation de la saisie en cours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputTarget {
+    /// Valeur du champ sous le curseur (URL, entrée, corps).
+    Field,
+    /// Clé d'une nouvelle entrée ; `return_cursor` est la position d'où
+    /// l'ajout a commencé.
+    NewKey {
+        section: EntrySection,
+        return_cursor: usize,
+    },
+    /// Valeur d'une nouvelle entrée dont la clé est validée.
+    NewValue {
+        section: EntrySection,
+        key: String,
+        return_cursor: usize,
+    },
+    /// Clé de l'entrée d'indice `index` de la section.
+    RenameKey { section: EntrySection, index: usize },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditableField {
     Url,
     HeaderValue(usize),
     QueryParamValue(usize),
     PathParamValue(usize),
+    /// Ligne « + Ajouter » d'une section.
+    AddRow(EntrySection),
     BodyText,
 }
 
 impl EditableField {
-    /// Construit la liste des champs éditables pour une vue de requête (D2).
+    /// Positions du curseur pour une vue de requête : URL, chaque section
+    /// suivie de sa ligne d'ajout, puis le corps s'il est éditable.
     pub fn list_for(view: &RequestView) -> Vec<Self> {
         let mut fields = vec![Self::Url];
         for index in 0..view.headers.len() {
             fields.push(Self::HeaderValue(index));
         }
+        fields.push(Self::AddRow(EntrySection::Headers));
         for index in 0..view.query_params.len() {
             fields.push(Self::QueryParamValue(index));
         }
+        fields.push(Self::AddRow(EntrySection::QueryParams));
         for index in 0..view.path_params.len() {
             fields.push(Self::PathParamValue(index));
         }
+        fields.push(Self::AddRow(EntrySection::PathParams));
         if let Some(body) = &view.body
             && matches!(
                 body.kind,
@@ -286,7 +352,25 @@ impl EditableField {
         fields
     }
 
-    /// Nom du champ pour l'affichage (D8).
+    /// Entrée existante désignée : section et indice.
+    pub fn entry(&self) -> Option<(EntrySection, usize)> {
+        match self {
+            Self::HeaderValue(index) => Some((EntrySection::Headers, *index)),
+            Self::QueryParamValue(index) => Some((EntrySection::QueryParams, *index)),
+            Self::PathParamValue(index) => Some((EntrySection::PathParams, *index)),
+            Self::Url | Self::AddRow(_) | Self::BodyText => None,
+        }
+    }
+
+    /// Section d'une entrée ou d'une ligne d'ajout.
+    pub fn section(&self) -> Option<EntrySection> {
+        match self {
+            Self::AddRow(section) => Some(*section),
+            other => other.entry().map(|(section, _)| section),
+        }
+    }
+
+    /// Nom du champ pour l'affichage.
     pub fn display_name(&self, view: &RequestView) -> String {
         match self {
             Self::Url => "Url".to_owned(),
@@ -302,8 +386,39 @@ impl EditableField {
                 "Paramètre de chemin {}",
                 view.path_params.get(*index).map_or("", |p| &p.key)
             ),
+            Self::AddRow(section) => add_row_label(*section).to_owned(),
             Self::BodyText => "Corps".to_owned(),
         }
+    }
+}
+
+/// Libellé de la ligne d'ajout d'une section.
+pub fn add_row_label(section: EntrySection) -> &'static str {
+    match section {
+        EntrySection::Headers => "+ Ajouter un en-tête",
+        EntrySection::QueryParams => "+ Ajouter un paramètre de requête",
+        EntrySection::PathParams => "+ Ajouter un paramètre de chemin",
+    }
+}
+
+/// Nom d'une section pour la barre d'aide.
+pub fn section_label(section: EntrySection) -> &'static str {
+    match section {
+        EntrySection::Headers => "En-têtes",
+        EntrySection::QueryParams => "Paramètres de requête",
+        EntrySection::PathParams => "Paramètres de chemin",
+    }
+}
+
+/// Entrées d'une section d'une vue.
+pub fn section_entries(
+    view: &RequestView,
+    section: EntrySection,
+) -> &[crate::collection::KeyValue] {
+    match section {
+        EntrySection::Headers => &view.headers,
+        EntrySection::QueryParams => &view.query_params,
+        EntrySection::PathParams => &view.path_params,
     }
 }
 
@@ -329,55 +444,25 @@ pub struct SavedEdit {
     pub view: RequestView,
 }
 
-/// Valeur affichée d'un champ : tampon de saisie si en saisie sur ce
-/// champ, sinon vue + éditions en attente (D3).
-pub fn field_value<'a>(
-    session: &'a EditSession,
-    view: &'a RequestView,
-    field: &EditableField,
-) -> &'a str {
+/// Valeur affichée d'un champ : tampon de saisie si la valeur de ce champ
+/// est en saisie, sinon valeur de l'aperçu.
+pub fn field_value<'a>(session: &'a EditSession, field: &EditableField) -> &'a str {
     if let EditState::Input(input) = &session.state
+        && session.target == InputTarget::Field
         && session.fields.get(session.cursor) == Some(field)
     {
         return input.text();
     }
-    field_value_committed(session, view, field)
+    field_value_committed(session, field)
 }
 
-/// Valeur engagée d'un champ (hors tampon de saisie en cours) :
-/// vue + éditions en attente dans `pending` (D3).
-pub fn field_value_committed<'a>(
-    session: &'a EditSession,
-    view: &'a RequestView,
-    field: &EditableField,
-) -> &'a str {
-    for edit in session.pending.iter().rev() {
-        match (field, edit) {
-            (EditableField::Url, FieldEdit::Url(v)) => return v.as_str(),
-            (EditableField::HeaderValue(i), FieldEdit::HeaderValue { index, value })
-                if i == index =>
-            {
-                return value.as_str();
-            }
-            (EditableField::QueryParamValue(i), FieldEdit::QueryParamValue { index, value })
-                if i == index =>
-            {
-                return value.as_str();
-            }
-            (EditableField::PathParamValue(i), FieldEdit::PathParamValue { index, value })
-                if i == index =>
-            {
-                return value.as_str();
-            }
-            (EditableField::BodyText, FieldEdit::BodyText(v)) => return v.as_str(),
-            _ => {}
-        }
-    }
+/// Valeur validée d'un champ (hors tampon de saisie en cours), lue dans
+/// l'aperçu des modifications validées.
+pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField) -> &'a str {
+    let view = &session.preview;
     match field {
         EditableField::Url => &view.url,
-        EditableField::HeaderValue(i) => view.headers.get(*i).map_or("", |h| &h.value),
-        EditableField::QueryParamValue(i) => view.query_params.get(*i).map_or("", |p| &p.value),
-        EditableField::PathParamValue(i) => view.path_params.get(*i).map_or("", |p| &p.value),
+        EditableField::AddRow(_) => "",
         EditableField::BodyText => match &view.body {
             Some(body) => match &body.content {
                 BodyContent::Text(text) => text.as_str(),
@@ -385,38 +470,19 @@ pub fn field_value_committed<'a>(
             },
             None => "",
         },
+        entry => entry
+            .entry()
+            .and_then(|(section, index)| section_entries(view, section).get(index))
+            .map_or("", |kv| kv.value.as_str()),
     }
 }
 
-/// État d'activation d'un champ (en-tête ou paramètre) : vue + éditions en attente (D3).
-pub fn field_enabled(session: &EditSession, view: &RequestView, field: &EditableField) -> bool {
-    for edit in session.pending.iter().rev() {
-        match (field, edit) {
-            (EditableField::HeaderValue(i), FieldEdit::HeaderEnabled { index, enabled })
-                if i == index =>
-            {
-                return *enabled;
-            }
-            (
-                EditableField::QueryParamValue(i),
-                FieldEdit::QueryParamEnabled { index, enabled },
-            ) if i == index => {
-                return *enabled;
-            }
-            (EditableField::PathParamValue(i), FieldEdit::PathParamEnabled { index, enabled })
-                if i == index =>
-            {
-                return *enabled;
-            }
-            _ => {}
-        }
-    }
-    match field {
-        EditableField::HeaderValue(i) => view.headers.get(*i).is_none_or(|h| h.enabled),
-        EditableField::QueryParamValue(i) => view.query_params.get(*i).is_none_or(|p| p.enabled),
-        EditableField::PathParamValue(i) => view.path_params.get(*i).is_none_or(|p| p.enabled),
-        EditableField::Url | EditableField::BodyText => true,
-    }
+/// État d'activation d'un champ (en-tête ou paramètre), lu dans l'aperçu.
+pub fn field_enabled(session: &EditSession, field: &EditableField) -> bool {
+    field
+        .entry()
+        .and_then(|(section, index)| section_entries(&session.preview, section).get(index))
+        .is_none_or(|kv| kv.enabled)
 }
 
 #[derive(Debug)]
@@ -562,6 +628,9 @@ pub enum StatusMessage {
     MouseCapture(bool),
     /// Échec d'activation ou de désactivation de la capture souris.
     MouseCaptureError(String),
+    /// Modification refusée par `bru-writer` ; le texte décrit la nature
+    /// du refus sans jamais citer la saisie.
+    EditRefused(String),
 }
 
 impl Model {
@@ -957,11 +1026,9 @@ mod tests {
         assert_eq!(rows.len(), 11 + 4 + 1);
     }
 
-    #[test]
-    fn editable_field_list_for_request_view() {
-        use crate::collection::{BodyContent, BodyKind, BodyView, KeyValue, RequestView};
-
-        let make_view = |body_kind: Option<BodyKind>, headers_count: usize| RequestView {
+    fn make_view(body_kind: Option<BodyKind>, headers_count: usize) -> RequestView {
+        use crate::collection::{BodyView, KeyValue};
+        RequestView {
             name: Some("test".into()),
             kind: Some("http".into()),
             seq: Some(1),
@@ -971,7 +1038,7 @@ mod tests {
                 .map(|i| KeyValue {
                     key: format!("H{i}"),
                     value: format!("V{i}"),
-                    enabled: true,
+                    enabled: i % 2 == 0,
                 })
                 .collect(),
             query_params: vec![],
@@ -986,183 +1053,120 @@ mod tests {
             has_tests: false,
             has_assert: false,
             assertions: vec![],
-        };
+        }
+    }
 
-        // URL + 2 en-têtes + corps json -> 4 champs dans l'ordre
-        let view_json = make_view(Some(BodyKind::Json), 2);
-        let fields = EditableField::list_for(&view_json);
+    #[test]
+    fn editable_field_list_for_request_view() {
+        use crate::writer::EntrySection::{Headers, PathParams, QueryParams};
+
+        // URL + 2 en-têtes + corps json -> 7 positions dans l'ordre
+        let fields = EditableField::list_for(&make_view(Some(BodyKind::Json), 2));
         assert_eq!(
             fields,
             vec![
                 EditableField::Url,
                 EditableField::HeaderValue(0),
                 EditableField::HeaderValue(1),
+                EditableField::AddRow(Headers),
+                EditableField::AddRow(QueryParams),
+                EditableField::AddRow(PathParams),
                 EditableField::BodyText,
             ]
         );
 
         // corps formUrlEncoded -> corps exclu
-        let view_form = make_view(Some(BodyKind::FormUrlEncoded), 2);
-        let fields_form = EditableField::list_for(&view_form);
+        let fields_form = EditableField::list_for(&make_view(Some(BodyKind::FormUrlEncoded), 0));
         assert_eq!(
             fields_form,
             vec![
                 EditableField::Url,
-                EditableField::HeaderValue(0),
-                EditableField::HeaderValue(1),
+                EditableField::AddRow(Headers),
+                EditableField::AddRow(QueryParams),
+                EditableField::AddRow(PathParams),
             ]
         );
 
-        // aucun en-tête/paramètre -> liste réduite à URL (+ corps si éditable)
-        let view_no_headers = make_view(None, 0);
-        let fields_no_headers = EditableField::list_for(&view_no_headers);
-        assert_eq!(fields_no_headers, vec![EditableField::Url]);
-
-        let view_only_body = make_view(Some(BodyKind::Text), 0);
-        let fields_only_body = EditableField::list_for(&view_only_body);
+        assert_eq!(EditableField::HeaderValue(1).entry(), Some((Headers, 1)));
+        assert_eq!(EditableField::AddRow(PathParams).entry(), None);
         assert_eq!(
-            fields_only_body,
-            vec![EditableField::Url, EditableField::BodyText]
+            EditableField::AddRow(PathParams).section(),
+            Some(PathParams)
         );
+        assert_eq!(EditableField::Url.section(), None);
     }
 
     #[test]
-    fn field_value_and_field_enabled_read_pending_or_fallback() {
-        use crate::collection::{BodyContent, BodyKind, BodyView, KeyValue, RequestView};
+    fn field_value_and_enabled_read_the_preview_and_the_input_buffer() {
+        use crate::collection::KeyValue;
         use std::path::PathBuf;
 
-        let view = RequestView {
-            name: Some("test".into()),
-            kind: Some("http".into()),
-            seq: Some(1),
-            method: "GET".into(),
-            url: "https://initial.com".into(),
-            headers: vec![
-                KeyValue {
-                    key: "H0".into(),
-                    value: "V0".into(),
-                    enabled: true,
-                },
-                KeyValue {
-                    key: "H1".into(),
-                    value: "V1".into(),
-                    enabled: false,
-                },
-            ],
-            query_params: vec![KeyValue {
-                key: "Q0".into(),
-                value: "QV0".into(),
-                enabled: true,
-            }],
-            path_params: vec![],
-            body: Some(BodyView {
-                kind: BodyKind::Json,
-                content: BodyContent::Text("{\"init\": true}".into()),
-            }),
-            auth: None,
-            has_pre_request_script: false,
-            has_post_response_script: false,
-            has_tests: false,
-            has_assert: false,
-            assertions: vec![],
-        };
-
+        let view = make_view(Some(BodyKind::Json), 2);
         let stamp = crate::writer::FileStamp::capture(
             &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/collections/writer-cases/simple.bru"),
         )
         .expect("stamp");
+        let mut session = EditSession::new(PathBuf::from("req.bru"), stamp, view.clone());
 
-        let mut session = EditSession {
-            path: PathBuf::from("req.bru"),
-            stamp,
-            fields: EditableField::list_for(&view),
-            cursor: 0,
-            state: EditState::FieldSelect,
-            pending: vec![],
-            dirty: false,
-            hscroll: 0,
+        assert_eq!(
+            field_value(&session, &EditableField::Url),
+            "https://example.com"
+        );
+        assert_eq!(field_value(&session, &EditableField::HeaderValue(1)), "V1");
+        assert!(field_enabled(&session, &EditableField::HeaderValue(0)));
+        assert!(!field_enabled(&session, &EditableField::HeaderValue(1)));
+        assert_eq!(field_value(&session, &EditableField::BodyText), "{}");
+
+        // Aperçu : second en-tête supprimé, en-tête ajouté.
+        let mut preview = view;
+        preview.headers.remove(1);
+        preview.headers.push(KeyValue {
+            key: "X-Added".into(),
+            value: "added".into(),
+            enabled: true,
+        });
+        session.cursor = 99;
+        session.set_preview(preview);
+        assert_eq!(session.cursor, session.fields.len() - 1);
+        assert!(session.fields.contains(&EditableField::HeaderValue(1)));
+        assert!(!session.fields.contains(&EditableField::HeaderValue(2)));
+        assert_eq!(
+            field_value(&session, &EditableField::HeaderValue(1)),
+            "added"
+        );
+        assert_eq!(
+            session
+                .current_field()
+                .map(|f| f.display_name(&session.preview)),
+            Some("Corps".to_owned())
+        );
+
+        // En saisie sur un champ : le tampon est affiché pour ce champ seul.
+        session.cursor = 0;
+        session.state = EditState::Input(TextInput::new("https://typed", false));
+        assert_eq!(field_value(&session, &EditableField::Url), "https://typed");
+        assert_eq!(
+            field_value_committed(&session, &EditableField::Url),
+            "https://example.com"
+        );
+        // Saisie d'une clé : aucun champ existant n'affiche le tampon.
+        session.target = InputTarget::NewKey {
+            section: crate::writer::EntrySection::Headers,
+            return_cursor: 0,
         };
-
-        // Aucune édition en attente -> valeur et activation d'origine
         assert_eq!(
-            field_value(&session, &view, &EditableField::Url),
-            "https://initial.com"
+            field_value(&session, &EditableField::Url),
+            "https://example.com"
         );
-        assert_eq!(
-            field_value(&session, &view, &EditableField::HeaderValue(0)),
-            "V0"
-        );
-        assert!(field_enabled(
-            &session,
-            &view,
-            &EditableField::HeaderValue(0)
-        ));
-        assert_eq!(
-            field_value(&session, &view, &EditableField::HeaderValue(1)),
-            "V1"
-        );
-        assert!(!field_enabled(
-            &session,
-            &view,
-            &EditableField::HeaderValue(1)
-        ));
-        assert_eq!(
-            field_value(&session, &view, &EditableField::BodyText),
-            "{\"init\": true}"
-        );
-
-        // Une édition en attente sur HeaderValue(0)
-        session.pending.push(FieldEdit::HeaderValue {
-            index: 0,
-            value: "V0-edited".into(),
-        });
-        session.pending.push(FieldEdit::HeaderEnabled {
-            index: 0,
-            enabled: false,
-        });
-
-        // L'indice courant 0 est édité
-        assert_eq!(
-            field_value(&session, &view, &EditableField::HeaderValue(0)),
-            "V0-edited"
-        );
-        assert!(!field_enabled(
-            &session,
-            &view,
-            &EditableField::HeaderValue(0)
-        ));
-
-        // Édition sur un autre indice (HeaderValue(0)) -> sans effet sur HeaderValue(1) ni Url
-        assert_eq!(
-            field_value(&session, &view, &EditableField::HeaderValue(1)),
-            "V1"
-        );
-        assert!(!field_enabled(
-            &session,
-            &view,
-            &EditableField::HeaderValue(1)
-        ));
-        assert_eq!(
-            field_value(&session, &view, &EditableField::Url),
-            "https://initial.com"
-        );
-
-        // Édition sur Url et BodyText
-        session
-            .pending
-            .push(FieldEdit::Url("https://edited.com".into()));
-        session
-            .pending
-            .push(FieldEdit::BodyText("{\"edited\": true}".into()));
-        assert_eq!(
-            field_value(&session, &view, &EditableField::Url),
-            "https://edited.com"
-        );
-        assert_eq!(
-            field_value(&session, &view, &EditableField::BodyText),
-            "{\"edited\": true}"
-        );
+        assert!(!session.has_unsaved());
+        session.target = InputTarget::NewValue {
+            section: crate::writer::EntrySection::Headers,
+            key: "K".into(),
+            return_cursor: 0,
+        };
+        session.state = EditState::Input(TextInput::new("", false));
+        assert!(session.has_unsaved(), "clé validée d'un ajout en cours");
     }
 
     #[test]

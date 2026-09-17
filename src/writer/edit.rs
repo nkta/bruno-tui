@@ -6,244 +6,113 @@
 
 use std::ops::Range;
 
+use super::draft::Draft;
 use super::error::EditError;
-use super::format;
-use crate::collection::ast::METHODS;
-use crate::collection::{BlockBody, BruFile};
+use crate::collection::BruFile;
 
-/// Modification d'un champ déjà présent dans une requête chargée.
-///
-/// `index` désigne la position dans `RequestView.headers` / `.query_params`
-/// / `.path_params`, qui correspond 1:1 à l'entrée de même indice dans le
-/// bloc AST correspondant. `Url` et `BodyText` sont singletons : une seule
-/// URL, un seul corps texte par requête.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FieldEdit {
-    Url(String),
-    HeaderValue { index: usize, value: String },
-    HeaderEnabled { index: usize, enabled: bool },
-    QueryParamValue { index: usize, value: String },
-    QueryParamEnabled { index: usize, enabled: bool },
-    PathParamValue { index: usize, value: String },
-    PathParamEnabled { index: usize, enabled: bool },
-    BodyText(String),
+/// Section d'entrées où ajouter, supprimer ou renommer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntrySection {
+    Headers,
+    QueryParams,
+    PathParams,
 }
 
-impl FieldEdit {
-    fn target(&self) -> TargetKey {
+impl EntrySection {
+    /// Ordre d'écriture de Bruno après le bloc de méthode.
+    pub const ALL: [Self; 3] = [Self::QueryParams, Self::PathParams, Self::Headers];
+
+    /// Nom du bloc `.bru` de la section.
+    pub fn block_name(self) -> &'static str {
         match self {
-            Self::Url(_) => TargetKey::Url,
-            Self::HeaderValue { index, .. } | Self::HeaderEnabled { index, .. } => {
-                TargetKey::Header(*index)
-            }
-            Self::QueryParamValue { index, .. } | Self::QueryParamEnabled { index, .. } => {
-                TargetKey::QueryParam(*index)
-            }
-            Self::PathParamValue { index, .. } | Self::PathParamEnabled { index, .. } => {
-                TargetKey::PathParam(*index)
-            }
-            Self::BodyText(_) => TargetKey::Body,
+            Self::Headers => "headers",
+            Self::QueryParams => "params:query",
+            Self::PathParams => "params:path",
+        }
+    }
+
+    /// Position de la section dans `ALL`.
+    pub(crate) fn position(self) -> usize {
+        match self {
+            Self::QueryParams => 0,
+            Self::PathParams => 1,
+            Self::Headers => 2,
         }
     }
 }
 
-/// Identité d'une cible dans l'AST, pour regrouper les éditions qui portent
-/// sur la même entrée avant de produire un seul remplacement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetKey {
-    Url,
-    Header(usize),
-    QueryParam(usize),
-    PathParam(usize),
-    Body,
+/// Modification d'une requête chargée.
+///
+/// Les modifications d'une liste s'appliquent dans l'ordre : `index`
+/// désigne la position dans `RequestView.headers` / `.query_params` /
+/// `.path_params` telle qu'elle résulte des modifications précédentes de la
+/// même liste. Sans ajout ni suppression, il coïncide avec l'indice exposé
+/// par `bru-parser`. `Url` et `BodyText` sont singletons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldEdit {
+    Url(String),
+    HeaderValue {
+        index: usize,
+        value: String,
+    },
+    HeaderEnabled {
+        index: usize,
+        enabled: bool,
+    },
+    QueryParamValue {
+        index: usize,
+        value: String,
+    },
+    QueryParamEnabled {
+        index: usize,
+        enabled: bool,
+    },
+    PathParamValue {
+        index: usize,
+        value: String,
+    },
+    PathParamEnabled {
+        index: usize,
+        enabled: bool,
+    },
+    BodyText(String),
+    /// Ajout d'une entrée en fin de section.
+    AddEntry {
+        section: EntrySection,
+        key: String,
+        value: String,
+        enabled: bool,
+    },
+    RemoveEntry {
+        section: EntrySection,
+        index: usize,
+    },
+    /// Renommage de la clé, valeur et état conservés.
+    RenameKey {
+        section: EntrySection,
+        index: usize,
+        key: String,
+    },
 }
 
 /// Remplacement résolu : une tranche du source et son texte de
-/// substitution.
+/// substitution. Une tranche vide est une insertion, un texte vide une
+/// suppression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Replacement {
     pub span: Range<usize>,
     pub bytes: String,
 }
 
-/// État courant d'une entrée dictionnaire ciblée (URL, en-tête, paramètre),
-/// mis à jour au fil des éditions qui la concernent.
-struct EntryState {
-    span: Range<usize>,
-    key: String,
-    value: String,
-    disabled: bool,
-}
-
-/// État courant d'un bloc de corps texte ciblé.
-struct BodyState {
-    span: Range<usize>,
-    text: String,
-}
-
-enum Snapshot {
-    Entry(EntryState),
-    Body(BodyState),
-}
-
-const TEXT_BODY_BLOCKS: [(&str, &str); 5] = [
-    ("json", "body:json"),
-    ("text", "body:text"),
-    ("xml", "body:xml"),
-    ("sparql", "body:sparql"),
-    ("graphql", "body:graphql"),
-];
-const FORM_BODY_KINDS: [&str; 3] = ["formUrlEncoded", "multipartForm", "file"];
-
-/// Résout une liste d'éditions vers les remplacements à appliquer, fusionnant
-/// celles qui ciblent la même entrée et triant le résultat par position dans
-/// le fichier. Sans effet de bord : une cible introuvable retourne une
-/// erreur sans avoir modifié quoi que ce soit.
+/// Applique `edits` dans l'ordre sur un brouillon de la requête, puis
+/// produit les remplacements triés par position. Sans effet de bord : une
+/// modification refusée retourne une erreur sans rien produire.
 pub(crate) fn resolve(ast: &BruFile, edits: &[FieldEdit]) -> Result<Vec<Replacement>, EditError> {
-    let mut order: Vec<TargetKey> = Vec::new();
-    let mut entries: Vec<(TargetKey, EntryState)> = Vec::new();
-    let mut bodies: Vec<(TargetKey, BodyState)> = Vec::new();
-
+    let mut draft = Draft::from_ast(ast);
     for edit in edits {
-        let key = edit.target();
-        if !order.contains(&key) {
-            order.push(key);
-            match snapshot_for(ast, key)? {
-                Snapshot::Entry(state) => entries.push((key, state)),
-                Snapshot::Body(state) => bodies.push((key, state)),
-            }
-        }
-        if let Some((_, state)) = entries.iter_mut().find(|(found, _)| *found == key) {
-            apply_entry(state, edit);
-        } else if let Some((_, state)) = bodies.iter_mut().find(|(found, _)| *found == key) {
-            apply_body(state, edit);
-        }
+        draft.apply(edit)?;
     }
-
-    let eol = format::detect_eol(ast.raw());
-    let mut replacements: Vec<Replacement> = Vec::new();
-    for (_, state) in &entries {
-        replacements.push(Replacement {
-            span: state.span.clone(),
-            bytes: format::format_entry(&state.key, &state.value, state.disabled, eol),
-        });
-    }
-    for (_, state) in &bodies {
-        replacements.push(Replacement {
-            span: state.span.clone(),
-            bytes: format::format_body_content(&state.text, eol),
-        });
-    }
-
-    replacements.sort_by_key(|replacement| replacement.span.start);
-    for pair in replacements.windows(2) {
-        if pair[0].span.end > pair[1].span.start {
-            return Err(EditError::Overlap);
-        }
-    }
-    Ok(replacements)
-}
-
-fn apply_entry(entry: &mut EntryState, edit: &FieldEdit) {
-    match edit {
-        FieldEdit::Url(value) => entry.value = value.clone(),
-        FieldEdit::HeaderValue { value, .. }
-        | FieldEdit::QueryParamValue { value, .. }
-        | FieldEdit::PathParamValue { value, .. } => entry.value = value.clone(),
-        FieldEdit::HeaderEnabled { enabled, .. }
-        | FieldEdit::QueryParamEnabled { enabled, .. }
-        | FieldEdit::PathParamEnabled { enabled, .. } => entry.disabled = !enabled,
-        FieldEdit::BodyText(_) => unreachable!("BodyText ne cible jamais une entrée"),
-    }
-}
-
-fn apply_body(body: &mut BodyState, edit: &FieldEdit) {
-    match edit {
-        FieldEdit::BodyText(text) => body.text = text.clone(),
-        _ => unreachable!("seul BodyText cible un corps"),
-    }
-}
-
-fn snapshot_for(ast: &BruFile, key: TargetKey) -> Result<Snapshot, EditError> {
-    match key {
-        TargetKey::Url => url_snapshot(ast),
-        TargetKey::Header(index) => entry_snapshot(ast, "headers", index),
-        TargetKey::QueryParam(index) => entry_snapshot(ast, "params:query", index),
-        TargetKey::PathParam(index) => entry_snapshot(ast, "params:path", index),
-        TargetKey::Body => body_snapshot(ast),
-    }
-}
-
-fn method_block(ast: &BruFile) -> Result<&crate::collection::Block, EditError> {
-    ast.blocks()
-        .find(|block| METHODS.contains(&block.name.as_str()))
-        .ok_or(EditError::MissingField { field: "method" })
-}
-
-fn url_snapshot(ast: &BruFile) -> Result<Snapshot, EditError> {
-    let method = method_block(ast)?;
-    let BlockBody::Dictionary(entries) = &method.body else {
-        return Err(EditError::MissingField { field: "url" });
-    };
-    let entry = entries
-        .iter()
-        .find(|entry| entry.key == "url")
-        .ok_or(EditError::MissingField { field: "url" })?;
-    Ok(Snapshot::Entry(EntryState {
-        span: entry.span.clone(),
-        key: entry.key.clone(),
-        value: entry.value.clone(),
-        disabled: entry.disabled,
-    }))
-}
-
-fn entry_snapshot(ast: &BruFile, block: &'static str, index: usize) -> Result<Snapshot, EditError> {
-    let entries = ast
-        .dictionary(block)
-        .ok_or(EditError::NoSuchBlock { block })?;
-    let entry = entries
-        .get(index)
-        .ok_or(EditError::IndexOutOfRange { block, index })?;
-    Ok(Snapshot::Entry(EntryState {
-        span: entry.span.clone(),
-        key: entry.key.clone(),
-        value: entry.value.clone(),
-        disabled: entry.disabled,
-    }))
-}
-
-fn body_snapshot(ast: &BruFile) -> Result<Snapshot, EditError> {
-    let method = method_block(ast)?;
-    let BlockBody::Dictionary(entries) = &method.body else {
-        return Err(EditError::MissingField { field: "body" });
-    };
-    let declared = entries
-        .iter()
-        .find(|entry| entry.key == "body")
-        .map(|entry| entry.value.as_str())
-        .unwrap_or_default();
-
-    if FORM_BODY_KINDS.contains(&declared) {
-        return Err(EditError::WrongBodyForm {
-            expected: "body:text",
-        });
-    }
-    let block_name = TEXT_BODY_BLOCKS
-        .iter()
-        .find(|(kind, _)| *kind == declared)
-        .map(|(_, block)| *block)
-        .ok_or(EditError::NoSuchBlock { block: "body" })?;
-
-    let block = ast
-        .block(block_name)
-        .ok_or(EditError::NoSuchBlock { block: block_name })?;
-    let BlockBody::Text { content } = &block.body else {
-        return Err(EditError::NoSuchBlock { block: block_name });
-    };
-    Ok(Snapshot::Body(BodyState {
-        span: content.clone(),
-        text: String::new(),
-    }))
+    draft.replacements()
 }
 
 #[cfg(test)]
@@ -301,7 +170,10 @@ mod tests {
             }],
         )
         .expect("résolu");
-        assert_eq!(replacements[0].bytes, "  q: y\n");
+        // L'URL est reconstruite depuis les paramètres activés (sync Bruno).
+        assert_eq!(replacements.len(), 2);
+        assert_eq!(replacements[0].bytes, "  url: http://a?q=y\n");
+        assert_eq!(replacements[1].bytes, "  q: y\n");
 
         let replacements = resolve(
             &file,

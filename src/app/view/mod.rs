@@ -345,6 +345,7 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::ClipboardError(reason) => format!("Échec de la copie : {reason}"),
         StatusMessage::NoMatch => "Aucune correspondance".to_owned(),
         StatusMessage::SaveError(reason) => format!("Échec de sauvegarde : {reason}"),
+        StatusMessage::EditRefused(reason) => format!("Modification refusée : {reason}"),
         StatusMessage::EditLocked => {
             "Modifications non enregistrées : Ctrl+S pour enregistrer, Échap pour abandonner"
                 .to_owned()
@@ -362,31 +363,48 @@ fn status_message_text(message: &StatusMessage) -> String {
 
 /// Barre d'aide d'une session d'édition : état, champ, indicateur de
 /// modification non enregistrée et touches utiles à l'état.
-fn session_help_line(model: &Model, session: &crate::app::model::EditSession) -> String {
-    let field_name = match (session.current_field(), model.selected_node()) {
-        (Some(field), Some(TreeNode::Request(req))) => field.display_name(&req.view),
-        _ => String::new(),
-    };
+fn session_help_line(session: &crate::app::model::EditSession) -> String {
+    use crate::app::model::{EditableField, InputTarget, section_label};
+
+    let field = session.current_field();
+    let field_name = field.map_or_else(String::new, |f| f.display_name(&session.preview));
     let unsaved = if session.has_unsaved() {
         " ● non enregistré"
     } else {
         ""
     };
-    let (state, keys) = match &session.state {
-        EditState::FieldSelect => (
-            "Sélection",
-            "↑↓ champ  Entrée modifier  Espace activer  Ctrl+S enregistrer  Échap fermer",
-        ),
-        EditState::Input(input) if input.is_multiline() => (
-            "Saisie",
-            "Entrée nouvelle ligne  Tab valider  Échap annuler  Ctrl+S enregistrer",
-        ),
-        EditState::Input(_) => (
-            "Saisie",
-            "Entrée valider  Tab valider  Échap annuler  Ctrl+S enregistrer",
-        ),
-    };
-    format!("{state} · {field_name}{unsaved} — {keys}")
+    match &session.state {
+        EditState::FieldSelect => {
+            let keys = match field {
+                Some(EditableField::AddRow(_)) => {
+                    "↑↓ champ  Entrée ajouter  Ctrl+S enregistrer  Échap fermer"
+                }
+                Some(f) if f.entry().is_some() => {
+                    "↑↓ champ  Entrée modifier  Espace activer  a ajouter  d supprimer  c renommer  Ctrl+S enregistrer  Échap fermer"
+                }
+                _ => "↑↓ champ  Entrée modifier  Ctrl+S enregistrer  Échap fermer",
+            };
+            format!("Sélection · {field_name}{unsaved} — {keys}")
+        }
+        EditState::Input(input) => {
+            let label = match &session.target {
+                InputTarget::Field => field_name,
+                InputTarget::NewKey { section, .. } => {
+                    format!("Ajout · {} · clé", section_label(*section))
+                }
+                InputTarget::NewValue { section, key, .. } => {
+                    format!("Ajout · {} · valeur de {key}", section_label(*section))
+                }
+                InputTarget::RenameKey { .. } => format!("Renommage · {field_name}"),
+            };
+            let keys = if input.is_multiline() {
+                "Entrée nouvelle ligne  Tab valider  Échap annuler  Ctrl+S enregistrer"
+            } else {
+                "Entrée valider  Tab valider  Échap annuler  Ctrl+S enregistrer"
+            };
+            format!("Saisie · {label}{unsaved} — {keys}")
+        }
+    }
 }
 
 fn status_line(model: &Model) -> String {
@@ -414,7 +432,7 @@ fn status_line(model: &Model) -> String {
         return status_message_text(message);
     }
     if let Some(session) = &model.editing {
-        return session_help_line(model, session);
+        return session_help_line(session);
     }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
@@ -1501,7 +1519,7 @@ mod tests {
             "{screen}"
         );
 
-        update(&mut model, Message::AddSecret);
+        update(&mut model, Message::Add);
         update(
             &mut model,
             Message::SecretInput(crate::app::message::MaskedChar('=')),
@@ -1686,5 +1704,156 @@ mod tests {
         let after = status_of(&model);
         assert!(after.contains('—'), "{after}");
         assert!(!after.contains("en cours"), "{after}");
+    }
+
+    // --- Ajout, suppression, renommage (`add-entry-management`) ---------
+
+    fn key(model: &mut crate::app::model::Model, c: char) {
+        update(
+            model,
+            Message::InputKey(crate::app::message::InputKey::Char(c)),
+        );
+    }
+
+    fn go_to_field(model: &mut crate::app::model::Model, field: crate::app::model::EditableField) {
+        let index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == field))
+            .expect("champ présent");
+        let cursor =
+            |model: &crate::app::model::Model| model.editing.as_ref().map_or(0, |s| s.cursor);
+        while cursor(model) > index {
+            update(model, Message::Up);
+        }
+        while cursor(model) < index {
+            update(model, Message::Down);
+        }
+    }
+
+    #[test]
+    fn add_rows_are_shown_only_during_a_session() {
+        let mut model = loaded_model((240, 40));
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::NextFocus);
+        let screen = render(&model, 240, 40).join("\n");
+        assert!(!screen.contains("+ Ajouter"), "{screen}");
+
+        update(&mut model, Message::Enter);
+        let screen = render(&model, 240, 40).join("\n");
+        assert!(screen.contains("+ Ajouter un en-tête"), "{screen}");
+        assert!(
+            screen.contains("+ Ajouter un paramètre de requête"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("+ Ajouter un paramètre de chemin"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn synchronised_url_is_shown_before_saving() {
+        use crate::app::model::EditableField;
+        use crate::writer::EntrySection;
+
+        let mut model = loaded_model((240, 40));
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        go_to_field(&mut model, EditableField::AddRow(EntrySection::QueryParams));
+        update(&mut model, Message::Enter);
+        for c in "page".chars() {
+            key(&mut model, c);
+        }
+        update(&mut model, Message::ValidateInput);
+        key(&mut model, '2');
+        update(&mut model, Message::ValidateInput);
+
+        let screen = render(&model, 240, 40).join("\n");
+        assert!(
+            screen.contains("GET https://{{host}}/ping?page=2"),
+            "{screen}"
+        );
+        assert!(screen.contains("page: 2"), "{screen}");
+        assert!(model.editing.as_ref().is_some_and(|s| s.dirty));
+    }
+
+    #[test]
+    fn text_cursor_follows_the_key_of_a_new_entry() {
+        use crate::app::model::EditableField;
+        use crate::writer::EntrySection;
+
+        let mut model = loaded_model((100, 40));
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        go_to_field(&mut model, EditableField::AddRow(EntrySection::Headers));
+        update(&mut model, Message::Add);
+        for c in "X-T".chars() {
+            key(&mut model, c);
+        }
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).expect("terminal");
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let cursor = terminal.get_cursor_position().expect("curseur");
+        let inner_area = inner(layout_for((100, 40)).expect("layout").detail);
+        assert_eq!(cursor.x, inner_area.x + 2 + 3);
+        let buffer = terminal.backend().buffer();
+        let row: String = (inner_area.x..inner_area.x + inner_area.width)
+            .map(|x| buffer[(x, cursor.y)].symbol())
+            .collect();
+        assert!(row.starts_with("  X-T"), "{row}");
+
+        // Étape de la valeur : le curseur suit la valeur après `clé: `.
+        update(&mut model, Message::ValidateInput);
+        key(&mut model, 'v');
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let cursor = terminal.get_cursor_position().expect("curseur");
+        assert_eq!(cursor.x, inner_area.x + "  X-T: v".len() as u16);
+    }
+
+    #[test]
+    fn help_line_on_an_entry_and_during_an_add() {
+        use crate::app::model::EditableField;
+        use crate::writer::EntrySection;
+
+        let mut model = loaded_model((100, 40));
+        select(&mut model, "scripted.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        go_to_field(&mut model, EditableField::HeaderValue(0));
+        let line = status_line(&model);
+        assert!(line.contains("a ajouter"), "{line}");
+        assert!(line.contains("d supprimer"), "{line}");
+        assert!(line.contains("c renommer"), "{line}");
+
+        go_to_field(&mut model, EditableField::AddRow(EntrySection::Headers));
+        let line = status_line(&model);
+        assert!(line.contains("Entrée ajouter"), "{line}");
+        assert!(!line.contains("d supprimer"), "{line}");
+
+        update(&mut model, Message::Enter);
+        let line = status_line(&model);
+        assert!(line.contains("Saisie · Ajout · En-têtes · clé"), "{line}");
+        assert!(line.contains("Échap annuler"), "{line}");
+
+        for c in "X Y".chars() {
+            key(&mut model, c);
+        }
+        update(&mut model, Message::ValidateInput);
+        let line = status_line(&model);
+        assert!(line.starts_with("Modification refusée"), "{line}");
+        assert!(!line.contains("X Y"), "{line}");
+
+        update(&mut model, Message::CancelInput);
+        go_to_field(&mut model, EditableField::HeaderValue(0));
+        update(&mut model, Message::Rename);
+        let line = status_line(&model);
+        assert!(
+            line.contains("Saisie · Renommage · En-tête Accept"),
+            "{line}"
+        );
     }
 }

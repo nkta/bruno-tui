@@ -1,0 +1,16 @@
+{
+  "url": "https://{{host}}/users/:id",
+  "headers": [
+    {
+      "name": "Accept",
+      "value": "application/json",
+      "enabled": true
+    },
+    {
+      "name": "X-Debug",
+      "value": "1",
+      "enabled": false
+    }
+  ],
+  "params": []
+}

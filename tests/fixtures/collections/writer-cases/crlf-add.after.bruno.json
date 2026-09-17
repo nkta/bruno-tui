@@ -1,0 +1,23 @@
+{
+  "url": "https://{{host}}/items",
+  "headers": [
+    {
+      "name": "B",
+      "value": "2",
+      "enabled": true
+    },
+    {
+      "name": "C",
+      "value": "3",
+      "enabled": true
+    }
+  ],
+  "params": [
+    {
+      "name": "id",
+      "value": "1",
+      "enabled": true,
+      "type": "path"
+    }
+  ]
+}

@@ -14,15 +14,16 @@ use super::theme;
 use super::tree::file_name;
 use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
-    EditSession, EditState, EditableField, Model, RequestOutcome, ResponseTab, field_enabled,
-    field_value,
+    EditSession, EditState, EditableField, InputTarget, Model, RequestOutcome, ResponseTab,
+    add_row_label, field_enabled, field_value,
 };
 use crate::app::update::{response_selection_range, selection_range};
 use crate::collection::{
     AuthMode, BodyContent, BodyKind, ErrorNode, FileMeta, FolderNode, KeyValue, RequestNode,
-    RequestView, TreeNode,
+    TreeNode,
 };
 use crate::runner::report::{AssertionResult, ResultStatus, TestResult};
+use crate::writer::EntrySection;
 
 /// Style de mise en valeur de la ligne du champ sous le curseur en session d'édition (D8).
 pub const FIELD_CURSOR_STYLE: Style = Style::new().add_modifier(Modifier::REVERSED);
@@ -193,33 +194,61 @@ fn is_field_cursor(session: Option<&EditSession>, field: &EditableField) -> bool
     session.is_some_and(|s| s.fields.get(s.cursor) == Some(field))
 }
 
-fn editable_entries<F>(
+/// Saisie en cours de la session sur la cible `target`, s'il y en a une.
+fn input_for(
+    session: Option<&EditSession>,
+    matches: impl Fn(&InputTarget) -> bool,
+) -> Option<&str> {
+    let session = session?;
+    match &session.state {
+        EditState::Input(input) if matches(&session.target) => Some(input.text()),
+        _ => None,
+    }
+}
+
+/// Entrées d'une section, suivies en session de sa ligne d'ajout (ou de
+/// l'entrée provisoire pendant un ajout).
+fn editable_entries(
     lines: &mut Vec<Line<'static>>,
     field_lines: &mut Vec<FieldLine>,
     values: &[KeyValue],
     session: Option<&EditSession>,
-    view: &RequestView,
-    field_ctor: F,
-) where
-    F: Fn(usize) -> EditableField,
-{
-    if values.is_empty() {
+    section: EntrySection,
+) {
+    if values.is_empty() && session.is_none() {
         lines.push(Line::raw("  aucun"));
         return;
     }
     for (i, entry) in values.iter().enumerate() {
-        let field = field_ctor(i);
-        let val = session.map_or(entry.value.as_str(), |s| field_value(s, view, &field));
-        let (val, _) = skip_columns(val, value_hscroll(session, &field));
-        let enabled = session.map_or(entry.enabled, |s| field_enabled(s, view, &field));
-        let prefix = format!("  {}: ", entry.key);
+        let field = match section {
+            EntrySection::Headers => EditableField::HeaderValue(i),
+            EntrySection::QueryParams => EditableField::QueryParamValue(i),
+            EntrySection::PathParams => EditableField::PathParamValue(i),
+        };
+        let hscroll = value_hscroll(session, &field);
+        let renamed = input_for(session, |target| {
+            *target == InputTarget::RenameKey { section, index: i }
+        });
+        let (text, prefix_width) = match renamed {
+            Some(key) => {
+                let (key, _) = skip_columns(key, hscroll);
+                (format!("  {key}: {}", entry.value), 2)
+            }
+            None => {
+                let val = session.map_or(entry.value.as_str(), |s| field_value(s, &field));
+                let (val, _) = skip_columns(val, hscroll);
+                let prefix = format!("  {}: ", entry.key);
+                let width = Line::raw(prefix.as_str()).width();
+                (format!("{prefix}{val}"), width)
+            }
+        };
         field_lines.push(FieldLine {
             field,
             line: lines.len(),
             count: 1,
-            prefix_width: Line::raw(prefix.as_str()).width(),
+            prefix_width,
         });
-        let text = format!("{prefix}{val}");
+        let enabled = session.map_or(entry.enabled, |s| field_enabled(s, &field));
         let mut line = if enabled {
             Line::raw(text)
         } else {
@@ -233,6 +262,45 @@ fn editable_entries<F>(
         }
         lines.push(line);
     }
+    let Some(session) = session else {
+        return;
+    };
+    let field = EditableField::AddRow(section);
+    let hscroll = value_hscroll(Some(session), &field);
+    let new_key = input_for(
+        Some(session),
+        |target| matches!(target, InputTarget::NewKey { section: s, .. } if *s == section),
+    );
+    let new_value = match &session.target {
+        InputTarget::NewValue {
+            section: s, key, ..
+        } if *s == section => input_for(Some(session), |_| true).map(|value| (key.as_str(), value)),
+        _ => None,
+    };
+    let (text, prefix_width) = match (new_key, new_value) {
+        (Some(key), _) => (format!("  {}", skip_columns(key, hscroll).0), 2),
+        (None, Some((key, value))) => {
+            let prefix = format!("  {key}: ");
+            let width = Line::raw(prefix.as_str()).width();
+            (format!("{prefix}{}", skip_columns(value, hscroll).0), width)
+        }
+        (None, None) => (format!("  {}", add_row_label(section)), 2),
+    };
+    field_lines.push(FieldLine {
+        field,
+        line: lines.len(),
+        count: 1,
+        prefix_width,
+    });
+    let mut line = if new_key.is_some() || new_value.is_some() {
+        Line::raw(text)
+    } else {
+        Line::styled(text, Style::new().add_modifier(Modifier::DIM))
+    };
+    if is_field_cursor(Some(session), &field) {
+        line = tint_line(line, FIELD_CURSOR_STYLE);
+    }
+    lines.push(line);
 }
 
 /// Construit le texte de détail d'une requête en tenant compte de la session d'édition (D8).
@@ -250,6 +318,9 @@ pub fn request_text_and_fields(
     session: Option<&EditSession>,
 ) -> (Text<'static>, Vec<FieldLine>) {
     let view = &request.view;
+    // En session, URL, en-têtes et paramètres viennent de l'aperçu des
+    // modifications validées (`add-entry-management`, D8).
+    let shown = session.map_or(view, |s| &s.preview);
     let mut field_lines = Vec::new();
     let node_name = view.name.clone().unwrap_or_else(|| {
         request
@@ -265,7 +336,7 @@ pub fn request_text_and_fields(
     ];
 
     let url_field = EditableField::Url;
-    let url_val = session.map_or(view.url.as_str(), |s| field_value(s, view, &url_field));
+    let url_val = session.map_or(view.url.as_str(), |s| field_value(s, &url_field));
     let (url_val, _) = skip_columns(url_val, value_hscroll(session, &url_field));
     let method = format!("{} ", view.method);
     field_lines.push(FieldLine {
@@ -296,30 +367,27 @@ pub fn request_text_and_fields(
     editable_entries(
         &mut lines,
         &mut field_lines,
-        &view.headers,
+        &shown.headers,
         session,
-        view,
-        EditableField::HeaderValue,
+        EntrySection::Headers,
     );
 
     lines.push(section("Paramètres de requête"));
     editable_entries(
         &mut lines,
         &mut field_lines,
-        &view.query_params,
+        &shown.query_params,
         session,
-        view,
-        EditableField::QueryParamValue,
+        EntrySection::QueryParams,
     );
 
     lines.push(section("Paramètres de chemin"));
     editable_entries(
         &mut lines,
         &mut field_lines,
-        &view.path_params,
+        &shown.path_params,
         session,
-        view,
-        EditableField::PathParamValue,
+        EntrySection::PathParams,
     );
 
     lines.push(Line::default());
@@ -331,7 +399,7 @@ pub fn request_text_and_fields(
                 BodyContent::Text(text) => {
                     let field = EditableField::BodyText;
                     let is_cursor = is_field_cursor(session, &field);
-                    let val = session.map_or(text.as_str(), |s| field_value(s, view, &field));
+                    let val = session.map_or(text.as_str(), |s| field_value(s, &field));
                     let hscroll = value_hscroll(session, &field);
                     let first = lines.len();
                     for l in val.split('\n') {

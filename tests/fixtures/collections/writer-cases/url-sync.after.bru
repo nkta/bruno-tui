@@ -1,0 +1,18 @@
+meta {
+  name: url-sync
+  type: http
+  seq: 17
+}
+
+get {
+  url: https://{{host}}/items?page=3&limit=5&flag
+  body: none
+  auth: none
+}
+
+params:query {
+  page: 3
+  ~debug: 1
+  limit: 5
+  flag: 
+}

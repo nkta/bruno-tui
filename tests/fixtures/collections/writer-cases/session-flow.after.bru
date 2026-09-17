@@ -1,0 +1,23 @@
+meta {
+  name: session-flow
+  type: http
+  seq: 20
+}
+
+get {
+  url: https://{{host}}/users/:id?page=2
+  body: none
+  auth: none
+}
+
+params:query {
+  page: 2
+}
+
+params:path {
+  userId: 1
+}
+
+headers {
+  Accept: application/json
+}

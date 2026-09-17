@@ -10,12 +10,14 @@
 //! disque depuis son chargement. Ce module ne journalise et ne réimplémente
 //! rien de `bru-parser` : il consomme son AST tel quel et ne le modifie pas.
 
+mod draft;
 mod edit;
 mod error;
 mod format;
+mod query;
 
-pub use edit::FieldEdit;
-pub use error::{EditError, WriteError};
+pub use edit::{EntrySection, FieldEdit};
+pub use error::{EditError, EntryProblem, WriteError};
 
 use std::fs;
 use std::io;
@@ -23,7 +25,18 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use crate::collection::BruFile;
+use crate::collection::{BruFile, RequestView};
+
+/// Vue qu'exposerait la requête après application de `edits`, sans aucun
+/// accès disque : même application ordonnée, mêmes refus et même
+/// synchronisation de l'URL que l'écriture, puisque le fichier est
+/// sérialisé en mémoire puis relu par `bru-parser`.
+pub fn preview(ast: &BruFile, edits: &[FieldEdit]) -> Result<RequestView, EditError> {
+    let bytes = format::serialize(ast, edits)?;
+    let source = String::from_utf8(bytes).map_err(|_| EditError::Unreadable)?;
+    let file = BruFile::parse(source).map_err(|_| EditError::Unreadable)?;
+    RequestView::from_ast(&file).map_err(|_| EditError::Unreadable)
+}
 
 /// Instantané de fraîcheur d'un fichier (taille et date de modification),
 /// capturé au chargement et comparé avant chaque écriture.
@@ -185,6 +198,64 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&path).expect("relecture"),
             "get {\n  url: http://third-party\n}\n"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preview_matches_reloaded_view_and_touches_no_disk() {
+        let source = "get {\n  url: https://h/items\n}\n\nheaders {\n  A: 1\n}\n";
+        let ast = BruFile::parse(source.to_owned()).expect("AST");
+        let edits = [
+            FieldEdit::AddEntry {
+                section: EntrySection::QueryParams,
+                key: "page".into(),
+                value: "2".into(),
+                enabled: true,
+            },
+            FieldEdit::RemoveEntry {
+                section: EntrySection::Headers,
+                index: 0,
+            },
+        ];
+        let view = preview(&ast, &edits).expect("aperçu");
+        assert_eq!(view.url, "https://h/items?page=2");
+        assert!(view.headers.is_empty());
+        assert_eq!(view.query_params[0].key, "page");
+
+        let bytes = format::serialize(&ast, &edits).expect("sérialisation");
+        let reloaded = BruFile::parse(String::from_utf8(bytes).expect("utf-8")).expect("relecture");
+        assert_eq!(view, RequestView::from_ast(&reloaded).expect("vue"));
+    }
+
+    #[test]
+    fn preview_and_write_return_the_same_error() {
+        let dir = workdir("preview-error");
+        let path = dir.join("a.bru");
+        fs::write(&path, "get {\n  url: http://a\n}\n").expect("écriture initiale");
+        let ast = BruFile::parse(fs::read_to_string(&path).expect("lecture")).expect("AST");
+        let stamp = FileStamp::capture(&path).expect("instantané");
+        let edits = [FieldEdit::AddEntry {
+            section: EntrySection::Headers,
+            key: String::new(),
+            value: "s3cr3t".into(),
+            enabled: true,
+        }];
+
+        let preview_error = preview(&ast, &edits).expect_err("refus");
+        let WriteError::Edit(write_error) = BruWriter
+            .write_request(&path, &ast, &stamp, &edits)
+            .expect_err("refus")
+        else {
+            panic!("erreur d'édition attendue");
+        };
+        assert_eq!(preview_error, write_error);
+        assert!(!preview_error.to_string().contains("s3cr3t"));
+        assert!(!format!("{preview_error:?}").contains("s3cr3t"));
+        assert_eq!(
+            fs::read_to_string(&path).expect("relecture"),
+            "get {\n  url: http://a\n}\n"
         );
 
         let _ = fs::remove_dir_all(&dir);
