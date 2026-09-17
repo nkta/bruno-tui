@@ -13,7 +13,9 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use super::clipboard::ClipboardError;
 use super::event::AppEvent;
@@ -65,6 +67,28 @@ impl fmt::Debug for MaskedChar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("MaskedChar(*)")
     }
+}
+
+/// Nature d'un événement souris retenu (`mouse-support`, D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseKind {
+    /// Appui du bouton gauche.
+    Press,
+    /// Déplacement bouton gauche enfoncé.
+    Drag,
+    /// Relâchement du bouton gauche.
+    Release,
+    WheelUp,
+    WheelDown,
+}
+
+/// Événement souris brut, position en cellules du terminal. Sa cible est
+/// résolue par `update` (`view::hit::hit_test`), qui a le modèle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseInput {
+    pub kind: MouseKind,
+    pub column: u16,
+    pub row: u16,
 }
 
 #[derive(Debug)]
@@ -188,6 +212,15 @@ pub enum Message {
     ConfirmSecretInput,
     /// `Échap` pendant une saisie secrète.
     CancelSecretInput,
+    /// Événement souris (`mouse-support`).
+    Mouse(MouseInput),
+    /// `M`, hors saisie : bascule la capture souris.
+    ToggleMouseCapture,
+    /// Renvoyé par la boucle après `Command::SetMouseCapture`.
+    MouseCaptureChanged {
+        enabled: bool,
+        result: Result<(), String>,
+    },
     /// Renvoyé par la boucle après `Command::ResolveSecrets`.
     SecretsResolved {
         root: PathBuf,
@@ -202,6 +235,7 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
     match event {
         AppEvent::Terminal(Event::Key(key)) => key_message(key, capture),
         AppEvent::Terminal(Event::Resize(width, height)) => Some(Message::Resize { width, height }),
+        AppEvent::Terminal(Event::Mouse(mouse)) => mouse_message(mouse),
         AppEvent::Terminal(_) => None,
         AppEvent::TerminalClosed(error) => Some(Message::TerminalClosed(error)),
         AppEvent::CollectionLoaded(result) => Some(Message::CollectionLoaded(result)),
@@ -214,6 +248,26 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
             Some(Message::SecretsResolved { root, resolved })
         }
     }
+}
+
+/// Retient le bouton gauche et la molette verticale. Le survol (`Moved`),
+/// les autres boutons et le défilement horizontal sont écartés ici : le
+/// terminal signale chaque mouvement, et un message ignoré évite un
+/// redessin inutile.
+fn mouse_message(mouse: MouseEvent) -> Option<Message> {
+    let kind = match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => MouseKind::Press,
+        MouseEventKind::Drag(MouseButton::Left) => MouseKind::Drag,
+        MouseEventKind::Up(MouseButton::Left) => MouseKind::Release,
+        MouseEventKind::ScrollUp => MouseKind::WheelUp,
+        MouseEventKind::ScrollDown => MouseKind::WheelDown,
+        _ => return None,
+    };
+    Some(Message::Mouse(MouseInput {
+        kind,
+        column: mouse.column,
+        row: mouse.row,
+    }))
 }
 
 fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
@@ -262,6 +316,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('y') => Message::Yank,
         KeyCode::Char('e') => Message::StartEdit,
         KeyCode::Char(' ') => Message::ToggleField,
+        KeyCode::Char('M') => Message::ToggleMouseCapture,
         _ => return None,
     };
     Some(message)
@@ -413,6 +468,12 @@ mod tests {
             (KeyCode::Char('S'), KeyModifiers::SHIFT, "ToggleSecrets"),
             (KeyCode::Char('a'), none, "AddSecret"),
             (KeyCode::Char('d'), none, "ForgetSecret"),
+            (KeyCode::Char('M'), none, "ToggleMouseCapture"),
+            (
+                KeyCode::Char('M'),
+                KeyModifiers::SHIFT,
+                "ToggleMouseCapture",
+            ),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(
@@ -420,6 +481,52 @@ mod tests {
                 Some(expected),
                 "{code:?}"
             );
+        }
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> AppEvent {
+        AppEvent::Terminal(Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }))
+    }
+
+    #[test]
+    fn mouse_events() {
+        let cases = [
+            (MouseEventKind::Down(MouseButton::Left), MouseKind::Press),
+            (MouseEventKind::Drag(MouseButton::Left), MouseKind::Drag),
+            (MouseEventKind::Up(MouseButton::Left), MouseKind::Release),
+            (MouseEventKind::ScrollUp, MouseKind::WheelUp),
+            (MouseEventKind::ScrollDown, MouseKind::WheelDown),
+        ];
+        for (kind, expected) in cases {
+            for capture in [None, Some(TextCapture::Input), Some(TextCapture::Search)] {
+                match to_message(mouse(kind, 7, 3), capture) {
+                    Some(Message::Mouse(input)) => assert_eq!(
+                        input,
+                        MouseInput {
+                            kind: expected,
+                            column: 7,
+                            row: 3
+                        }
+                    ),
+                    other => panic!("{kind:?} : {other:?}"),
+                }
+            }
+        }
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+            MouseEventKind::Up(MouseButton::Right),
+            MouseEventKind::Drag(MouseButton::Right),
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ] {
+            assert!(to_message(mouse(kind, 0, 0), None).is_none(), "{kind:?}");
         }
     }
 
@@ -532,6 +639,8 @@ mod tests {
             (KeyCode::Char('j'), "SearchInput"),
             (KeyCode::Char('q'), "SearchInput"),
             (KeyCode::Char('r'), "SearchInput"),
+            (KeyCode::Char('M'), "SearchInput"),
+            (KeyCode::Char('y'), "SearchInput"),
             (KeyCode::Backspace, "SearchBackspace"),
             (KeyCode::Enter, "ConfirmSearch"),
             (KeyCode::Esc, "CancelSearch"),
@@ -586,6 +695,8 @@ mod tests {
             (KeyCode::Char('r'), "InputKey(Char('r'))"),
             (KeyCode::Char('/'), "InputKey(Char('/'))"),
             (KeyCode::Char('S'), "InputKey(Char('S'))"),
+            (KeyCode::Char('M'), "InputKey(Char('M'))"),
+            (KeyCode::Char('y'), "InputKey(Char('y'))"),
             (KeyCode::Char(' '), "InputKey(Char(' '))"),
             (KeyCode::Backspace, "InputKey(Backspace)"),
             (KeyCode::Delete, "InputKey(Delete)"),

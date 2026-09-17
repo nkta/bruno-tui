@@ -19,8 +19,12 @@ avec le code 0. Il SHALL accepter l'option répétable `--secret NOM` ou
 (`--secret=NOM=CLÉ`), qui déclare une variable secrète dont la résolution
 est décrite par `secret-env-vars` ; `NOM` et `CLÉ` MUST être non vides et
 MUST NOT contenir `=` ni d'espace blanc. La ligne de commande MUST NOT
-accepter de valeur de secret. Une option inconnue, plus d'un argument
-positionnel, `--secret` sans argument ou avec une forme invalide MUST
+accepter de valeur de secret. Il SHALL accepter l'option sans valeur
+`--no-mouse`, éventuellement répétée, qui ouvre l'interface sans activer
+la capture souris décrite par `mouse-support` ; l'usage MUST la
+mentionner. Une option inconnue, plus d'un argument
+positionnel, `--secret` sans argument ou avec une forme invalide, ou
+`--no-mouse` suivi d'une valeur accolée (`--no-mouse=…`) MUST
 afficher l'usage sur la sortie d'erreur et terminer avec le code 2, sans
 modifier l'état du terminal. Si le terminal ne peut pas passer en mode
 plein écran (sortie non interactive), le binaire MUST afficher la raison
@@ -59,6 +63,15 @@ sur la sortie d'erreur et terminer avec le code 1.
 #### Scenario: Déclaration de secret invalide
 - **WHEN** l'utilisateur lance `bruno-tui --secret` sans argument, ou
   `bruno-tui --secret =X`, ou `bruno-tui --secret a=b=c`
+- **THEN** l'usage est affiché sur la sortie d'erreur et le code de sortie
+  est 2
+
+#### Scenario: Sans souris
+- **WHEN** l'utilisateur lance `bruno-tui --no-mouse ./c`
+- **THEN** l'interface charge `./c` sans activer la capture souris
+
+#### Scenario: Option sans souris avec valeur
+- **WHEN** l'utilisateur lance `bruno-tui --no-mouse=1`
 - **THEN** l'usage est affiché sur la sortie d'erreur et le code de sortie
   est 2
 
@@ -125,8 +138,12 @@ Quand l'arbre a le focus, l'interface SHALL réagir aux touches suivantes :
 - `←` ou `h` sur un dossier déplié : le replie ; sur tout autre nœud :
   sélectionne son dossier parent, sans effet au premier niveau.
 
-Le nœud sélectionné MUST rester visible dans le panneau de l'arbre, quelle
-que soit la hauteur du terminal, y compris après un redimensionnement.
+Le nœud sélectionné MUST être visible dans le panneau de l'arbre après
+chacune de ces touches et après tout changement de sélection, quelle que
+soit la hauteur du terminal, et après un redimensionnement. Seul le
+défilement de l'arbre à la molette (`mouse-support`) peut laisser le
+nœud sélectionné hors de l'écran, jusqu'à la prochaine de ces touches ou
+le prochain redimensionnement, qui le ramène à l'écran.
 Replier un dossier MUST conserver la sélection sur ce dossier.
 
 #### Scenario: Déplier puis entrer dans un dossier
@@ -148,6 +165,11 @@ Replier un dossier MUST conserver la sélection sur ce dossier.
 #### Scenario: Extrémités
 - **WHEN** le premier nœud est sélectionné et l'utilisateur appuie sur `↑`
 - **THEN** la sélection ne change pas
+
+#### Scenario: Retour de la sélection après la molette
+- **WHEN** la molette a fait sortir le nœud sélectionné de l'écran et
+  l'utilisateur appuie sur `↓`
+- **THEN** le nœud suivant est sélectionné et visible à l'écran
 
 ### Requirement: Panneau de détail
 L'interface SHALL afficher, à côté de l'arbre, le détail en lecture seule
@@ -314,11 +336,11 @@ et sur `Ctrl+C` en toutes circonstances, sauf si une session d'édition de
 champ porte des modifications non sauvegardées au moment de l'appui : la
 fermeture est alors précédée d'une demande de confirmation, et une
 confirmation refusée annule la fermeture sans quitter l'application. À la
-fermeture, le terminal MUST retrouver son état antérieur : mode brut
-désactivé, écran alternatif quitté, curseur visible. Cette restauration
-MUST aussi avoir lieu si l'application panique, avant l'affichage du
-message de panique. Le code de sortie MUST être 0 après une fermeture
-volontaire.
+fermeture, le terminal MUST retrouver son état antérieur : capture souris
+désactivée, mode brut désactivé, écran alternatif quitté, curseur
+visible. Cette restauration MUST aussi avoir lieu si l'application
+panique, avant l'affichage du message de panique. Le code de sortie MUST
+être 0 après une fermeture volontaire.
 
 #### Scenario: Sortie par q
 - **WHEN** l'utilisateur appuie sur `q` et qu'aucune session d'édition
@@ -337,6 +359,13 @@ volontaire.
 - **THEN** une confirmation est demandée avant toute fermeture du
   terminal
 - **AND** si l'utilisateur annule, l'application reste ouverte
+
+#### Scenario: Souris rendue au terminal
+- **WHEN** l'application se ferme alors que la capture souris est active,
+  volontairement ou sur panique
+- **THEN** un glisser dans le terminal après la fermeture produit la
+  sélection native du terminal et aucune séquence d'événement souris
+  n'est écrite dans le shell
 
 ### Requirement: Aucun effet de bord
 Pendant que l'interface est ouverte, l'application MUST NOT écrire de

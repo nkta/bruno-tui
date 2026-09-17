@@ -12,6 +12,7 @@ pub mod event;
 pub mod filter;
 pub mod message;
 pub mod model;
+pub mod mouse;
 pub mod search;
 pub mod text_input;
 pub mod update;
@@ -34,6 +35,7 @@ use clipboard::Clipboard;
 use event::{AppEvent, EVENT_BUFFER};
 use message::{Message, to_message};
 use model::{Exit, Model};
+use mouse::MouseSetup;
 use update::{Command, update};
 
 /// Fait tourner l'interface jusqu'à la demande de sortie.
@@ -45,7 +47,9 @@ use update::{Command, update};
 /// de même injectable, pour les mêmes raisons (une fausse implémentation
 /// en test, `SystemClipboard` en usage réel). `writer` est également
 /// injectable (`BruWriter` en usage réel). `secrets` porte les
-/// déclarations `--secret` de la ligne de commande.
+/// déclarations `--secret` de la ligne de commande. `mouse` porte le moyen
+/// de piloter la capture souris et l'état appliqué au démarrage
+/// (`mouse-support`), injectable comme le presse-papiers.
 #[allow(clippy::too_many_arguments)]
 pub async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
@@ -57,10 +61,15 @@ pub async fn run<B: Backend>(
     clipboard: Arc<dyn Clipboard>,
     writer: Arc<dyn RequestWriter>,
     secrets: Vec<SecretMapping>,
+    mouse: MouseSetup,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
     model.secrets.mappings = secrets;
+    model.mouse.capture = mouse.enabled;
+    if let Some(reason) = mouse.startup_error {
+        model.last_status = Some(model::StatusMessage::MouseCaptureError(reason));
+    }
 
     let (run_tx, mut run_rx) = mpsc::channel(EVENT_BUFFER);
     let runner = BruRunner::with_program(bru_program, run_tx);
@@ -92,7 +101,12 @@ pub async fn run<B: Backend>(
                 "flux d'événements fermé",
             )));
         };
-        if let Some(message) = to_message(event, model.text_capture()) {
+        // Un événement écarté (survol souris, focus du terminal) ne change
+        // rien au modèle : pas de redessin.
+        let Some(message) = to_message(event, model.text_capture()) else {
+            continue;
+        };
+        {
             let command = update(&mut model, message);
             match command {
                 Command::None => {}
@@ -170,6 +184,13 @@ pub async fn run<B: Backend>(
                             });
                         let _ = sender.blocking_send(AppEvent::EditSaved { path, result });
                     });
+                }
+                Command::SetMouseCapture(enabled) => {
+                    let result = mouse
+                        .capture
+                        .set(enabled)
+                        .map_err(|error| error.to_string());
+                    update(&mut model, Message::MouseCaptureChanged { enabled, result });
                 }
                 Command::ResolveSecrets { root, lookups } => {
                     let sender = sender.clone();
