@@ -1,6 +1,6 @@
 //! Analyse des arguments de la ligne de commande.
 //!
-//! Analyseur écrit à la main : un argument positionnel et trois options ne
+//! Analyseur écrit à la main : un argument positionnel et quatre options ne
 //! justifient pas une dépendance. Les chemins restent des `OsString` pour
 //! accepter les noms non UTF-8.
 
@@ -32,6 +32,10 @@ Options :
                   panneau S prime. Jamais de valeur sur la ligne de
                   commande : la valeur reste toutefois visible dans les
                   arguments de bru (ps) pendant son exécution.
+  --no-mouse      n'active pas la capture souris : la sélection native du
+                  terminal reste disponible. En cours de session, M bascule
+                  la capture ; la plupart des terminaux gardent aussi la
+                  sélection native avec Maj+glisser.
   -h, --help      affiche cette aide
   -V, --version   affiche la version
 ";
@@ -48,6 +52,8 @@ pub enum Command {
         /// Déclarations `--secret`, dans l'ordre ; un nom répété garde sa
         /// première déclaration.
         secrets: Vec<SecretMapping>,
+        /// Capture souris au démarrage ; `false` avec `--no-mouse`.
+        mouse: bool,
     },
     Help,
     Version,
@@ -70,11 +76,13 @@ pub enum UsageError {
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageError> {
     let mut path: Option<PathBuf> = None;
     let mut secrets: Vec<SecretMapping> = Vec::new();
+    let mut mouse = true;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("-h" | "--help") => return Ok(Command::Help),
             Some("-V" | "--version") => return Ok(Command::Version),
+            Some("--no-mouse") => mouse = false,
             Some("--secret") => {
                 let spec = args.next().ok_or(UsageError::MissingSecretArgument)?;
                 push_secret(&mut secrets, &spec)?;
@@ -96,6 +104,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
     Ok(Command::Run {
         path: path.unwrap_or_else(|| PathBuf::from(".")),
         secrets,
+        mouse,
     })
 }
 
@@ -123,6 +132,7 @@ mod tests {
         Command::Run {
             path: PathBuf::from(path),
             secrets: Vec::new(),
+            mouse: true,
         }
     }
 
@@ -164,6 +174,27 @@ mod tests {
     }
 
     #[test]
+    fn no_mouse_option() {
+        let without_mouse = |path: &str| Command::Run {
+            path: PathBuf::from(path),
+            secrets: Vec::new(),
+            mouse: false,
+        };
+        assert_eq!(parse_strs(&["./c"]), Ok(run("./c")));
+        assert_eq!(parse_strs(&["--no-mouse", "./c"]), Ok(without_mouse("./c")));
+        assert_eq!(parse_strs(&["./c", "--no-mouse"]), Ok(without_mouse("./c")));
+        assert_eq!(
+            parse_strs(&["--no-mouse", "--no-mouse"]),
+            Ok(without_mouse("."))
+        );
+        assert_eq!(
+            parse_strs(&["--no-mouse=1"]),
+            Err(UsageError::UnknownOption("--no-mouse=1".into()))
+        );
+        assert!(USAGE.contains("--no-mouse"));
+    }
+
+    #[test]
     fn secret_declarations() {
         assert_eq!(
             parse_strs(&[
@@ -179,6 +210,7 @@ mod tests {
                     mapping("oktaClientSecret", Some("OKTA_CLIENT_SECRET")),
                     mapping("token", None),
                 ],
+                mouse: true,
             })
         );
         assert_eq!(
@@ -186,6 +218,7 @@ mod tests {
             Ok(Command::Run {
                 path: PathBuf::from("./c"),
                 secrets: vec![mapping("a", None), mapping("b", Some("B"))],
+                mouse: true,
             })
         );
     }
@@ -219,6 +252,7 @@ mod tests {
             Ok(Command::Run {
                 path: PathBuf::from(raw),
                 secrets: Vec::new(),
+                mouse: true,
             })
         );
     }

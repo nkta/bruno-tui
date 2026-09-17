@@ -6,16 +6,19 @@
 use std::ops::RangeInclusive;
 
 use super::filter::{FilterState, evaluate};
-use super::message::{InputKey, Message};
+use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
-    CollectionState, DetailSelection, EditSession, EditState, EditableField, Exit, Focus,
-    HistoryEntry, HistoryOutcome, Model, ResponseTab, SecretError, SecretInput, StatusMessage,
-    environment_name_at, field_enabled, field_value, secret_env_vars, secret_lookups, secret_rows,
-    tree_node_at, visible_rows,
+    CollectionState, DetailSelection, Drag, DragPanel, EditSession, EditState, EditableField, Exit,
+    Focus, HistoryEntry, HistoryOutcome, Model, ResponseTab, SecretError, SecretInput,
+    StatusMessage, environment_name_at, field_enabled, field_value, secret_env_vars,
+    secret_lookups, secret_rows, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::text_input::TextInput;
-use super::view::detail::{plain_lines, request_text_and_fields, response_plain_lines};
+use super::view::detail::{
+    field_at_line, plain_lines, request_text_and_fields, response_plain_lines,
+};
+use super::view::hit::{DragRow, Hit, drag_row, hit_test};
 use super::view::{
     detail::{detail_text, response_text},
     inner, layout_for,
@@ -61,6 +64,10 @@ pub enum Command {
         root: std::path::PathBuf,
         lookups: Vec<SecretLookup>,
     },
+    /// Activer (`true`) ou désactiver la capture souris ; la boucle
+    /// l'exécute de façon synchrone et renvoie le résultat à `update` via
+    /// `Message::MouseCaptureChanged`.
+    SetMouseCapture(bool),
 }
 
 /// Applique un message au modèle.
@@ -417,6 +424,26 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             edit_saved(model, path, result);
             Command::None
         }
+        Message::Mouse(input) => {
+            mouse(model, input);
+            Command::None
+        }
+        Message::ToggleMouseCapture => Command::SetMouseCapture(!model.mouse.capture),
+        Message::MouseCaptureChanged { enabled, result } => {
+            match result {
+                Ok(()) => {
+                    model.mouse.capture = enabled;
+                    if !enabled {
+                        model.mouse.drag = None;
+                    }
+                    model.last_status = Some(StatusMessage::MouseCapture(enabled));
+                }
+                Err(reason) => {
+                    model.last_status = Some(StatusMessage::MouseCaptureError(reason));
+                }
+            }
+            Command::None
+        }
         navigation => {
             match model.focus {
                 Focus::Tree => navigate_tree(model, navigation),
@@ -760,6 +787,30 @@ fn navigate_tree(model: &mut Model, message: Message) {
         Message::Left => collapse_or_parent(model),
         _ => {}
     }
+    finish_tree_selection(model, before, previous_path);
+}
+
+/// Sélectionne la ligne `index` de l'arbre, avec les mêmes effets et
+/// restrictions que la navigation au clavier (clic dans l'arbre,
+/// `mouse-support`).
+fn select_row(model: &mut Model, index: usize) {
+    if index >= model.tree.rows.len() {
+        return;
+    }
+    let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
+    let before = model.tree.selected;
+    model.tree.selected = index;
+    finish_tree_selection(model, before, previous_path);
+}
+
+/// Suite commune à tout déplacement de la sélection de l'arbre : refus si
+/// la session porte des modifications non enregistrées et que le nœud
+/// change, sinon remise à zéro de l'état d'affichage du nœud.
+fn finish_tree_selection(
+    model: &mut Model,
+    before: usize,
+    previous_path: Option<std::path::PathBuf>,
+) {
     if model.tree.selected != before {
         let changed_node =
             model.selected_node().map(|node| node.path().to_path_buf()) != previous_path;
@@ -1319,16 +1370,18 @@ pub(crate) fn response_bottom_of_viewport(model: &Model) -> u16 {
 /// une. Jamais stockée à part : dérivée de l'ancre et du défilement
 /// courant à chaque appel.
 pub(crate) fn selection_range(model: &Model) -> Option<RangeInclusive<u16>> {
-    let anchor = model.detail_selection?.anchor;
-    let bottom = bottom_of_viewport(model);
-    Some(anchor.min(bottom)..=anchor.max(bottom))
+    let selection = model.detail_selection?;
+    let bottom = selection.head.unwrap_or_else(|| bottom_of_viewport(model));
+    Some(selection.anchor.min(bottom)..=selection.anchor.max(bottom))
 }
 
 /// Même principe que [`selection_range`], pour la réponse.
 pub(crate) fn response_selection_range(model: &Model) -> Option<RangeInclusive<u16>> {
-    let anchor = model.response_selection?.anchor;
-    let bottom = response_bottom_of_viewport(model);
-    Some(anchor.min(bottom)..=anchor.max(bottom))
+    let selection = model.response_selection?;
+    let bottom = selection
+        .head
+        .unwrap_or_else(|| response_bottom_of_viewport(model));
+    Some(selection.anchor.min(bottom)..=selection.anchor.max(bottom))
 }
 
 fn scroll_detail(model: &mut Model, message: Message) {
@@ -1739,6 +1792,224 @@ fn reset_filter_if_selection_changed(model: &mut Model, previous_path: Option<&s
     }
 }
 
+// --- Souris (`mouse-support`) ---------------------------------------------
+
+/// Lignes défilées par cran de molette.
+const WHEEL_LINES: u16 = 3;
+
+/// Traite un événement souris déjà traduit par `to_message`.
+fn mouse(model: &mut Model, input: MouseInput) {
+    if !mouse_accepted(model) {
+        model.mouse.drag = None;
+        return;
+    }
+    match input.kind {
+        MouseKind::Press => mouse_press(model, input),
+        MouseKind::Drag => mouse_drag(model, input),
+        MouseKind::Release => mouse_release(model),
+        MouseKind::WheelUp => mouse_wheel(model, input, true),
+        MouseKind::WheelDown => mouse_wheel(model, input, false),
+    }
+}
+
+/// États où la souris est sans effet : capture inactive, confirmation en
+/// attente, saisie autre que celle d'un champ, panneau superposé,
+/// collection non chargée, terminal trop petit (design D9).
+fn mouse_accepted(model: &Model) -> bool {
+    model.mouse.capture
+        && model.confirm.is_none()
+        && matches!(model.text_capture(), None | Some(TextCapture::Input))
+        && matches!(model.focus, Focus::Tree | Focus::Detail | Focus::Response)
+        && model.loaded().is_some()
+        && layout_for(model.size).is_some()
+}
+
+/// Lignes logiques du champ en cours de saisie, s'il y en a un.
+fn input_field_lines(model: &Model) -> Option<std::ops::Range<usize>> {
+    let session = model.editing.as_ref()?;
+    if !matches!(session.state, EditState::Input(_)) {
+        return None;
+    }
+    let Some(TreeNode::Request(request)) = model.selected_node() else {
+        return None;
+    };
+    if request.path != session.path {
+        return None;
+    }
+    let field = session.current_field()?;
+    let (_, fields) = request_text_and_fields(request, Some(session));
+    let location = fields.into_iter().find(|l| l.field == field)?;
+    Some(location.line..location.line + location.count)
+}
+
+fn mouse_press(model: &mut Model, input: MouseInput) {
+    // Cible calculée avant toute validation : elle correspond à l'écran
+    // que l'utilisateur voyait (sans retour à la ligne pendant la saisie).
+    let Some(hit) = hit_test(model, input.column, input.row) else {
+        return;
+    };
+    if let Some(range) = input_field_lines(model) {
+        if let Hit::Detail { line: Some(line) } = hit
+            && range.contains(&usize::from(line))
+        {
+            return;
+        }
+        validate_input(model);
+    }
+    model.mouse.drag = None;
+    match hit {
+        Hit::Tree { row } => {
+            model.focus = Focus::Tree;
+            if let Some(index) = row {
+                click_tree_row(model, index);
+            }
+        }
+        Hit::Detail { line } => {
+            model.focus = Focus::Detail;
+            model.mouse.drag = line.map(|anchor| Drag {
+                panel: DragPanel::Detail,
+                anchor,
+                moved: false,
+            });
+        }
+        Hit::Response { line } => {
+            model.focus = Focus::Response;
+            model.mouse.drag = line.map(|anchor| Drag {
+                panel: DragPanel::Response,
+                anchor,
+                moved: false,
+            });
+        }
+    }
+}
+
+/// Clic sur une ligne de l'arbre : sélection, ou dépliage/repli du dossier
+/// déjà sélectionné.
+fn click_tree_row(model: &mut Model, index: usize) {
+    if index != model.tree.selected {
+        select_row(model, index);
+        return;
+    }
+    if let Some((path, expanded, _)) = selected_folder(model) {
+        if expanded {
+            model.tree.expanded.remove(&path);
+        } else {
+            model.tree.expanded.insert(path);
+        }
+        refresh_rows(model);
+        scroll_tree_into_view(model);
+    }
+}
+
+fn mouse_drag(model: &mut Model, input: MouseInput) {
+    let Some(drag) = model.mouse.drag else {
+        return;
+    };
+    let Some(position) = drag_row(model, drag.panel, input.row) else {
+        return;
+    };
+    let line = match (position, drag.panel) {
+        (DragRow::Line(line), _) => line,
+        (DragRow::Above, DragPanel::Detail) => {
+            scroll_detail(model, Message::Up);
+            model.detail_scroll
+        }
+        (DragRow::Above, DragPanel::Response) => {
+            scroll_response(model, Message::Up);
+            model.response_scroll
+        }
+        (DragRow::Below, DragPanel::Detail) => {
+            scroll_detail(model, Message::Down);
+            bottom_of_viewport(model)
+        }
+        (DragRow::Below, DragPanel::Response) => {
+            scroll_response(model, Message::Down);
+            response_bottom_of_viewport(model)
+        }
+    };
+    if line == drag.anchor && !drag.moved {
+        return;
+    }
+    let selection = Some(DetailSelection {
+        anchor: drag.anchor,
+        head: Some(line),
+    });
+    match drag.panel {
+        DragPanel::Detail => model.detail_selection = selection,
+        DragPanel::Response => model.response_selection = selection,
+    }
+    model.mouse.drag = Some(Drag {
+        moved: true,
+        ..drag
+    });
+}
+
+fn mouse_release(model: &mut Model) {
+    let Some(drag) = model.mouse.drag.take() else {
+        return;
+    };
+    if drag.moved {
+        return;
+    }
+    match drag.panel {
+        DragPanel::Response => model.response_selection = None,
+        DragPanel::Detail => {
+            model.detail_selection = None;
+            if let Some(field) = field_at_line(model, drag.anchor) {
+                begin_input_at(model, field);
+            }
+        }
+    }
+}
+
+/// Clic sur un champ éditable : ouvre la session si besoin, place le
+/// curseur de champ et commence la saisie, comme `Entrée`.
+fn begin_input_at(model: &mut Model, field: EditableField) {
+    model.focus = Focus::Detail;
+    if model.editing.is_none() {
+        start_edit(model);
+    }
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    if session.state != EditState::FieldSelect {
+        return;
+    }
+    let Some(index) = session.fields.iter().position(|f| *f == field) else {
+        return;
+    };
+    session.cursor = index;
+    begin_input(model);
+}
+
+fn mouse_wheel(model: &mut Model, input: MouseInput, up: bool) {
+    let Some(hit) = hit_test(model, input.column, input.row) else {
+        return;
+    };
+    let step = || if up { Message::Up } else { Message::Down };
+    match hit {
+        Hit::Tree { .. } => {
+            let max = model.tree.rows.len().saturating_sub(tree_height(model));
+            let lines = usize::from(WHEEL_LINES);
+            model.tree.offset = if up {
+                model.tree.offset.saturating_sub(lines)
+            } else {
+                (model.tree.offset + lines).min(max)
+            };
+        }
+        Hit::Detail { .. } => {
+            for _ in 0..WHEEL_LINES {
+                scroll_detail(model, step());
+            }
+        }
+        Hit::Response { .. } => {
+            for _ in 0..WHEEL_LINES {
+                scroll_response(model, step());
+            }
+        }
+    }
+}
+
 // --- Sélection visuelle et copie -----------------------------------------
 
 /// `v`, hors saisie, en focus Détail ou Réponse seulement (produit
@@ -1753,6 +2024,7 @@ fn toggle_visual(model: &mut Model) {
             }
             model.detail_selection = Some(DetailSelection {
                 anchor: model.detail_scroll,
+                head: None,
             });
         }
         Focus::Response => {
@@ -1761,6 +2033,7 @@ fn toggle_visual(model: &mut Model) {
             }
             model.response_selection = Some(DetailSelection {
                 anchor: model.response_scroll,
+                head: None,
             });
         }
         _ => {}
@@ -1768,7 +2041,8 @@ fn toggle_visual(model: &mut Model) {
 }
 
 /// `y` : copie la sélection visuelle si elle est active, sinon la seule
-/// ligne au sommet du panneau. Sans effet hors focus Détail ou Réponse
+/// ligne au sommet du panneau. La sélection copiée n'est levée qu'à la
+/// réception d'une copie réussie : un échec la laisse intacte. Sans effet hors focus Détail ou Réponse
 /// (l'arbre et la saisie de recherche n'ont pas de notion de ligne à
 /// copier), à partir du panneau qui a le focus.
 fn yank(model: &mut Model) -> Command {
@@ -1785,6 +2059,7 @@ fn yank(model: &mut Model) -> Command {
         ),
         _ => return Command::None,
     };
+    let selection = range.is_some().then_some(model.focus);
     let text = match range {
         Some(range) => {
             let selected: Vec<&str> = lines
@@ -1793,11 +2068,6 @@ fn yank(model: &mut Model) -> Command {
                 .filter(|(index, _)| range.contains(&(*index as u16)))
                 .map(|(_, line)| line.as_str())
                 .collect();
-            match model.focus {
-                Focus::Detail => model.detail_selection = None,
-                Focus::Response => model.response_selection = None,
-                _ => {}
-            }
             selected.join("\n")
         }
         None => lines.get(usize::from(scroll)).cloned().unwrap_or_default(),
@@ -1805,6 +2075,7 @@ fn yank(model: &mut Model) -> Command {
     let token = model.next_clipboard_token;
     model.next_clipboard_token += 1;
     model.pending_clipboard_token = Some(token);
+    model.pending_clipboard_selection = selection;
     Command::CopyToClipboard { token, text }
 }
 
@@ -1820,6 +2091,14 @@ fn apply_clipboard_result(
         return;
     }
     model.pending_clipboard_token = None;
+    let selection = model.pending_clipboard_selection.take();
+    if result.is_ok() {
+        match selection {
+            Some(Focus::Detail) => model.detail_selection = None,
+            Some(Focus::Response) => model.response_selection = None,
+            _ => {}
+        }
+    }
     model.last_status = Some(match result {
         Ok(()) => StatusMessage::Copied,
         Err(error) => StatusMessage::ClipboardError(error.to_string()),
@@ -3116,10 +3395,22 @@ mod tests {
         update(&mut model, Message::ToggleVisual);
         update(&mut model, Message::End);
         let expected = plain_lines(&model).join("\n");
-        match update(&mut model, Message::Yank) {
-            Command::CopyToClipboard { text, .. } => assert_eq!(text, expected),
+        let token = match update(&mut model, Message::Yank) {
+            Command::CopyToClipboard { text, token } => {
+                assert_eq!(text, expected);
+                token
+            }
             other => panic!("CopyToClipboard attendu, obtenu {other:?}"),
-        }
+        };
+        // Levée seulement une fois la copie réussie.
+        assert!(model.detail_selection.is_some());
+        update(
+            &mut model,
+            Message::ClipboardResult {
+                token,
+                result: Ok(()),
+            },
+        );
         assert!(model.detail_selection.is_none());
     }
 
@@ -3151,8 +3442,18 @@ mod tests {
         assert!(model.detail_selection.is_some());
         assert!(model.response_selection.is_some());
 
-        // Copier depuis la réponse ne lève que la sélection de la réponse.
-        update(&mut model, Message::Yank);
+        // Copier depuis la réponse ne lève, une fois la copie réussie, que
+        // la sélection de la réponse.
+        let Command::CopyToClipboard { token, .. } = update(&mut model, Message::Yank) else {
+            panic!("copie attendue");
+        };
+        update(
+            &mut model,
+            Message::ClipboardResult {
+                token,
+                result: Ok(()),
+            },
+        );
         assert!(model.response_selection.is_none());
         assert!(model.detail_selection.is_some());
     }
@@ -3471,7 +3772,10 @@ mod tests {
         update(&mut model, Message::NextFocus); // Réponse
         model.response_scroll = 2;
         model.response_match = Some((2, 0..1));
-        model.response_selection = Some(DetailSelection { anchor: 2 });
+        model.response_selection = Some(DetailSelection {
+            anchor: 2,
+            head: None,
+        });
 
         update(&mut model, Message::Right);
 
@@ -5067,5 +5371,676 @@ mod tests {
         assert!(model.secrets.acknowledged.is_empty());
         assert!(model.secrets.pending_run.is_none());
         assert_eq!(model.secrets.typed.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    //! Souris (`mouse-support`) : scénarios de la spécification, rejoués
+    //! sur `update` avec des positions calculées par le hit-testing.
+
+    use std::path::Path;
+
+    use super::*;
+    use crate::app::model::{MouseState, PendingConfirm};
+    use crate::app::test_support::{loaded_model, runner_probe_model, select, selected_name};
+    use crate::app::view::hit::{Hit, hit_test};
+
+    fn model_on(path: &str, size: (u16, u16)) -> Model {
+        let mut model = loaded_model(size);
+        model.mouse.capture = true;
+        select(&mut model, path);
+        model
+    }
+
+    fn event(model: &mut Model, kind: MouseKind, (column, row): (u16, u16)) -> Command {
+        update(model, Message::Mouse(MouseInput { kind, column, row }))
+    }
+
+    fn click(model: &mut Model, point: (u16, u16)) {
+        event(model, MouseKind::Press, point);
+        event(model, MouseKind::Release, point);
+    }
+
+    fn row_of(model: &Model, path: &str) -> usize {
+        model
+            .tree
+            .rows
+            .iter()
+            .position(|row| {
+                model
+                    .node_at(&row.address)
+                    .is_some_and(|node| node.path() == Path::new(path))
+            })
+            .unwrap_or_else(|| panic!("`{path}` non visible"))
+    }
+
+    fn tree_point(model: &Model, path: &str) -> (u16, u16) {
+        let area = inner(layout_for(model.size).expect("taille").tree);
+        let index = row_of(model, path) - model.tree.offset;
+        (area.x + 2, area.y + u16::try_from(index).expect("petit"))
+    }
+
+    /// Position écran de la ligne logique `line` du détail ou de la réponse.
+    fn line_point(model: &Model, detail: bool, line: u16) -> (u16, u16) {
+        let areas = layout_for(model.size).expect("taille");
+        let area = inner(if detail { areas.detail } else { areas.response });
+        (area.y..area.bottom())
+            .map(|y| (area.x + 1, y))
+            .find(|(x, y)| {
+                matches!(
+                    hit_test(model, *x, *y),
+                    Some(Hit::Detail { line: Some(l) } | Hit::Response { line: Some(l) }) if l == line
+                )
+            })
+            .unwrap_or_else(|| panic!("ligne {line} non visible"))
+    }
+
+    fn field_line(model: &Model, field: EditableField) -> u16 {
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        let session = model.editing.as_ref().filter(|s| s.path == request.path);
+        let (_, fields) = request_text_and_fields(request, session);
+        let location = fields
+            .into_iter()
+            .find(|l| l.field == field)
+            .expect("champ présent");
+        u16::try_from(location.line).expect("petit")
+    }
+
+    fn field_point(model: &Model, field: EditableField) -> (u16, u16) {
+        line_point(model, true, field_line(model, field))
+    }
+
+    fn input_text(model: &Model) -> Option<String> {
+        match &model.editing.as_ref()?.state {
+            EditState::Input(input) => Some(input.text().to_owned()),
+            EditState::FieldSelect => None,
+        }
+    }
+
+    fn current_field(model: &Model) -> Option<EditableField> {
+        model.editing.as_ref()?.current_field()
+    }
+
+    // --- Capture ----------------------------------------------------------
+
+    #[test]
+    fn toggle_emits_the_opposite_state_and_applies_only_on_success() {
+        let mut model = model_on("post-json.bru", (100, 30));
+        assert!(matches!(
+            update(&mut model, Message::ToggleMouseCapture),
+            Command::SetMouseCapture(false)
+        ));
+        model.mouse.drag = Some(Drag {
+            panel: DragPanel::Detail,
+            anchor: 1,
+            moved: false,
+        });
+        update(
+            &mut model,
+            Message::MouseCaptureChanged {
+                enabled: false,
+                result: Ok(()),
+            },
+        );
+        assert!(!model.mouse.capture);
+        assert!(model.mouse.drag.is_none());
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::MouseCapture(false))
+        ));
+        assert!(matches!(
+            update(&mut model, Message::ToggleMouseCapture),
+            Command::SetMouseCapture(true)
+        ));
+        update(
+            &mut model,
+            Message::MouseCaptureChanged {
+                enabled: true,
+                result: Err("refusé".into()),
+            },
+        );
+        assert!(!model.mouse.capture);
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::MouseCaptureError(_))
+        ));
+    }
+
+    #[test]
+    fn new_model_starts_without_capture() {
+        let model = Model::new("x".into(), (100, 30));
+        assert_eq!(model.mouse, MouseState::default());
+        assert!(!model.mouse.capture);
+    }
+
+    // --- Garde --------------------------------------------------------------
+
+    #[test]
+    fn mouse_is_inert_in_guarded_states() {
+        let base = || {
+            let mut model = model_on("simple-get.bru", (100, 30));
+            model.tree.selected = 0;
+            model
+        };
+        let target = |model: &Model| tree_point(model, "post-json.bru");
+        type Setup = Box<dyn Fn(&mut Model)>;
+        let setups: Vec<(&str, Setup)> = vec![
+            ("capture inactive", Box::new(|m| m.mouse.capture = false)),
+            (
+                "confirmation",
+                Box::new(|m| m.confirm = Some(PendingConfirm::QuitWithUnsavedEdit)),
+            ),
+            (
+                "recherche",
+                Box::new(|m| {
+                    update(m, Message::StartSearch);
+                    update(m, Message::SearchInput('x'));
+                }),
+            ),
+            ("diagnostics", Box::new(|m| m.focus = Focus::Diagnostics)),
+        ];
+        for (name, setup) in setups {
+            let mut model = base();
+            let point = target(&model);
+            setup(&mut model);
+            let focus = model.focus;
+            for kind in [
+                MouseKind::Press,
+                MouseKind::Drag,
+                MouseKind::Release,
+                MouseKind::WheelDown,
+            ] {
+                event(&mut model, kind, point);
+            }
+            assert_eq!(model.tree.selected, 0, "{name}");
+            assert_eq!(model.focus, focus, "{name}");
+            assert_eq!(model.tree.offset, 0, "{name}");
+        }
+
+        // Chargement en cours et terminal trop petit.
+        let mut loading = Model::new("x".into(), (100, 30));
+        loading.mouse.capture = true;
+        event(&mut loading, MouseKind::Press, (80, 5));
+        assert_eq!(loading.focus, Focus::Tree);
+        let mut small = base();
+        small.size = (30, 8);
+        event(&mut small, MouseKind::Press, (2, 4));
+        assert_eq!(small.tree.selected, 0);
+    }
+
+    #[test]
+    fn clicks_on_status_panel_title_and_status_bar_do_nothing() {
+        let mut model = runner_probe_model();
+        model.mouse.capture = true;
+        select(&mut model, "green.bru");
+        let areas = layout_for(model.size).expect("taille");
+        let status = areas.response_status;
+        for point in [
+            (status.x + 2, status.y + 1),
+            (1, areas.title.y),
+            (1, areas.status.y),
+        ] {
+            click(&mut model, point);
+            event(&mut model, MouseKind::WheelDown, point);
+            assert_eq!(model.focus, Focus::Tree);
+            assert_eq!(selected_name(&model), "green");
+            assert_eq!(model.response_scroll, 0);
+        }
+    }
+
+    // --- Arbre --------------------------------------------------------------
+
+    #[test]
+    fn click_selects_a_node_and_focuses_panels() {
+        let mut model = model_on("grp", (100, 30));
+        assert_eq!(selected_name(&model), "Groupe");
+        let point = tree_point(&model, "post-json.bru");
+        click(&mut model, point);
+        assert_eq!(selected_name(&model), "post-json");
+        assert!(plain_lines(&model).iter().any(|l| l.contains("POST")));
+
+        let response = inner(layout_for(model.size).expect("taille").response);
+        click(&mut model, (response.x, response.y));
+        assert_eq!(model.focus, Focus::Response);
+        let point = tree_point(&model, "simple-get.bru");
+        click(&mut model, point);
+        assert_eq!(model.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn click_on_the_selected_folder_toggles_it() {
+        let mut model = model_on("grp", (100, 30));
+        let point = tree_point(&model, "grp");
+        click(&mut model, point);
+        assert!(model.tree.expanded.contains(Path::new("grp")));
+        assert_eq!(selected_name(&model), "Groupe");
+        assert!(row_of(&model, "grp/x.bru") > 0);
+        click(&mut model, point);
+        assert!(!model.tree.expanded.contains(Path::new("grp")));
+        assert_eq!(selected_name(&model), "Groupe");
+    }
+
+    #[test]
+    fn click_in_a_scrolled_tree_and_on_borders() {
+        let mut model = model_on("grp", (100, 10));
+        let area = inner(layout_for(model.size).expect("taille").tree);
+        model.tree.offset = 4;
+        click(&mut model, (area.x + 1, area.y));
+        assert_eq!(model.tree.selected, 4);
+
+        let tree = layout_for(model.size).expect("taille").tree;
+        model.focus = Focus::Detail;
+        click(&mut model, (tree.x, area.y + 1));
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.tree.selected, 4);
+    }
+
+    // --- Session d'édition -------------------------------------------------
+
+    fn session_on_post_json() -> Model {
+        let mut model = model_on("post-json.bru", (140, 40));
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        assert!(model.editing.is_some());
+        model
+    }
+
+    #[test]
+    fn clean_session_closes_when_another_node_is_clicked() {
+        let mut model = session_on_post_json();
+        let point = tree_point(&model, "simple-get.bru");
+        click(&mut model, point);
+        assert!(model.editing.is_none());
+        assert_eq!(selected_name(&model), "ping");
+        assert_eq!(model.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn modified_session_refuses_the_clicked_node() {
+        let mut model = session_on_post_json();
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('!')));
+        update(&mut model, Message::ValidateInput);
+        let point = tree_point(&model, "simple-get.bru");
+        click(&mut model, point);
+        assert_eq!(selected_name(&model), "post-json");
+        assert_eq!(model.focus, Focus::Tree);
+        assert!(model.editing.as_ref().is_some_and(|s| s.dirty));
+        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
+    }
+
+    #[test]
+    fn input_is_validated_before_a_click_in_the_tree() {
+        let mut model = session_on_post_json();
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('!')));
+        let point = tree_point(&model, "simple-get.bru");
+        click(&mut model, point);
+        let session = model.editing.as_ref().expect("session");
+        assert!(session.dirty);
+        assert_eq!(session.state, EditState::FieldSelect);
+        assert_eq!(selected_name(&model), "post-json");
+        assert_eq!(model.focus, Focus::Tree);
+        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
+    }
+
+    #[test]
+    fn unchanged_input_ends_on_a_click_in_the_response() {
+        let mut model = session_on_post_json();
+        move_to(&mut model, EditableField::HeaderValue(0));
+        update(&mut model, Message::Enter);
+        let response = inner(layout_for(model.size).expect("taille").response);
+        click(&mut model, (response.x, response.y));
+        let session = model.editing.as_ref().expect("session");
+        assert!(!session.dirty);
+        assert_eq!(session.state, EditState::FieldSelect);
+        assert_eq!(model.focus, Focus::Response);
+    }
+
+    #[test]
+    fn click_on_the_field_being_edited_changes_nothing() {
+        let mut model = session_on_post_json();
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Left));
+        let before = model.editing.clone().map(|s| s.state);
+        let point = field_point(&model, EditableField::Url);
+        click(&mut model, point);
+        event(&mut model, MouseKind::Press, point);
+        event(&mut model, MouseKind::Drag, (point.0, point.1 + 2));
+        event(&mut model, MouseKind::Release, (point.0, point.1 + 2));
+        assert_eq!(model.editing.map(|s| s.state), before);
+        assert!(model.detail_selection.is_none());
+    }
+
+    fn move_to(model: &mut Model, field: EditableField) {
+        let index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == field))
+            .expect("champ");
+        model.editing.as_mut().expect("session").cursor = index;
+    }
+
+    // --- Molette ------------------------------------------------------------
+
+    #[test]
+    fn wheel_scrolls_the_hovered_panel_without_focus_change() {
+        let mut model = runner_probe_model();
+        model.mouse.capture = true;
+        model.size = (100, 10);
+        select(&mut model, "green.bru");
+        assert!(response_max_scroll(&model) >= 3, "réponse assez longue");
+        let response = inner(layout_for(model.size).expect("taille").response);
+        event(&mut model, MouseKind::WheelDown, (response.x, response.y));
+        assert_eq!(model.response_scroll, 3);
+        assert_eq!(model.focus, Focus::Tree);
+        event(&mut model, MouseKind::WheelUp, (response.x, response.y));
+        assert_eq!(model.response_scroll, 0);
+    }
+
+    #[test]
+    fn wheel_stops_at_the_end_of_the_detail() {
+        let mut model = model_on("scripted.bru", (100, 12));
+        let max = detail_max_scroll(&model);
+        model.detail_scroll = max;
+        let detail = inner(layout_for(model.size).expect("taille").detail);
+        event(&mut model, MouseKind::WheelDown, (detail.x, detail.y));
+        assert_eq!(model.detail_scroll, max);
+    }
+
+    #[test]
+    fn wheel_in_the_tree_keeps_the_selection() {
+        let mut model = model_on("grp", (100, 10));
+        model.tree.selected = 0;
+        model.tree.offset = 0;
+        let area = inner(layout_for(model.size).expect("taille").tree);
+        assert!(model.tree.rows.len() > usize::from(area.height) + 3);
+        event(&mut model, MouseKind::WheelDown, (area.x, area.y));
+        assert_eq!(model.tree.offset, 3);
+        assert_eq!(model.tree.selected, 0);
+        // Borne basse.
+        for _ in 0..20 {
+            event(&mut model, MouseKind::WheelDown, (area.x, area.y));
+        }
+        assert_eq!(
+            model.tree.offset,
+            model.tree.rows.len() - usize::from(area.height)
+        );
+        // `↓` ramène la sélection à l'écran.
+        update(&mut model, Message::Down);
+        assert_eq!(model.tree.selected, 1);
+        assert!(model.tree.offset <= 1);
+    }
+
+    #[test]
+    fn wheel_in_a_session_keeps_the_field_cursor() {
+        let mut model = model_on("scripted.bru", (100, 12));
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        let cursor = model.editing.as_ref().map(|s| s.cursor);
+        let detail = inner(layout_for(model.size).expect("taille").detail);
+        event(&mut model, MouseKind::WheelDown, (detail.x, detail.y));
+        assert_eq!(model.detail_scroll, 3);
+        assert_eq!(model.editing.as_ref().map(|s| s.cursor), cursor);
+    }
+
+    // --- Glisser --------------------------------------------------------------
+
+    #[test]
+    fn drag_selects_lines_and_keeps_fixed_bounds() {
+        let mut model = model_on("scripted.bru", (140, 14));
+        let start = line_point(&model, true, 1);
+        let end = line_point(&model, true, 3);
+        event(&mut model, MouseKind::Press, start);
+        event(&mut model, MouseKind::Drag, end);
+        event(&mut model, MouseKind::Release, end);
+        assert_eq!(model.focus, Focus::Detail);
+        assert_eq!(selection_range(&model), Some(1..=3));
+        assert!(model.editing.is_none());
+
+        let detail = inner(layout_for(model.size).expect("taille").detail);
+        event(&mut model, MouseKind::WheelDown, (detail.x, detail.y));
+        assert_eq!(model.detail_scroll, 3);
+        assert_eq!(selection_range(&model), Some(1..=3));
+        assert!(model.response_selection.is_none());
+
+        // Un clic sans glisser lève la sélection.
+        click(&mut model, (detail.x, detail.y));
+        assert!(model.detail_selection.is_none());
+    }
+
+    #[test]
+    fn drag_beyond_the_panel_scrolls_and_extends() {
+        let mut model = runner_probe_model();
+        model.mouse.capture = true;
+        model.size = (100, 14);
+        select(&mut model, "green.bru");
+        let response = inner(layout_for(model.size).expect("taille").response);
+        event(&mut model, MouseKind::Press, (response.x, response.y));
+        event(&mut model, MouseKind::Drag, (response.x, response.bottom()));
+        assert_eq!(model.response_scroll, 1);
+        let bottom = response_bottom_of_viewport(&model);
+        assert_eq!(response_selection_range(&model), Some(0..=bottom));
+        event(
+            &mut model,
+            MouseKind::Drag,
+            (response.x, response.bottom() + 3),
+        );
+        assert_eq!(model.response_scroll, 2);
+        assert_eq!(model.focus, Focus::Response);
+
+        // Au-dessus : remonte.
+        event(&mut model, MouseKind::Drag, (response.x, response.y - 1));
+        assert_eq!(model.response_scroll, 1);
+        assert_eq!(response_selection_range(&model), Some(0..=1));
+    }
+
+    #[test]
+    fn drag_started_on_a_field_opens_no_session() {
+        let mut model = model_on("post-json.bru", (140, 40));
+        let url = field_line(&model, EditableField::Url);
+        let start = line_point(&model, true, url);
+        let end = line_point(&model, true, url + 1);
+        event(&mut model, MouseKind::Press, start);
+        event(&mut model, MouseKind::Drag, end);
+        event(&mut model, MouseKind::Release, end);
+        assert!(model.editing.is_none());
+        assert_eq!(selection_range(&model), Some(url..=url + 1));
+    }
+
+    #[test]
+    fn orphan_release_does_nothing() {
+        let mut model = model_on("post-json.bru", (140, 40));
+        let point = field_point(&model, EditableField::Url);
+        event(&mut model, MouseKind::Release, point);
+        assert!(model.editing.is_none());
+        assert_eq!(model.focus, Focus::Tree);
+    }
+
+    // --- Saisie d'un champ au clic ------------------------------------------
+
+    #[test]
+    fn click_on_the_url_opens_the_session_in_input() {
+        let mut model = model_on("post-json.bru", (140, 40));
+        let point = field_point(&model, EditableField::Url);
+        click(&mut model, point);
+        assert_eq!(model.focus, Focus::Detail);
+        assert_eq!(current_field(&model), Some(EditableField::Url));
+        assert_eq!(
+            input_text(&model).as_deref(),
+            Some("https://{{host}}/items")
+        );
+        let EditState::Input(input) = &model.editing.as_ref().expect("session").state else {
+            panic!("saisie attendue");
+        };
+        assert_eq!(input.cursor(), "https://{{host}}/items".chars().count());
+    }
+
+    #[test]
+    fn click_on_a_field_from_field_select_and_from_another_input() {
+        let mut model = session_on_post_json();
+        let point = field_point(&model, EditableField::HeaderValue(0));
+        click(&mut model, point);
+        assert_eq!(current_field(&model), Some(EditableField::HeaderValue(0)));
+        assert_eq!(input_text(&model).as_deref(), Some("application/json"));
+
+        // Saisie de l'URL modifiée, puis clic sur l'en-tête.
+        let mut model = session_on_post_json();
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('!')));
+        let point = field_point(&model, EditableField::HeaderValue(0));
+        click(&mut model, point);
+        let session = model.editing.as_ref().expect("session");
+        assert!(session.dirty);
+        assert!(
+            session
+                .pending
+                .contains(&FieldEdit::Url("https://{{host}}/items!".into()))
+        );
+        assert_eq!(current_field(&model), Some(EditableField::HeaderValue(0)));
+        assert_eq!(input_text(&model).as_deref(), Some("application/json"));
+    }
+
+    #[test]
+    fn click_on_the_body_and_on_non_field_lines() {
+        let mut model = model_on("post-json.bru", (140, 40));
+        let body = field_line(&model, EditableField::BodyText);
+        let point = line_point(&model, true, body + 2);
+        click(&mut model, point);
+        assert_eq!(current_field(&model), Some(EditableField::BodyText));
+        assert!(input_text(&model).is_some());
+
+        // Titre de section des en-têtes : focus seul.
+        let mut model = model_on("post-json.bru", (140, 40));
+        let header = field_line(&model, EditableField::HeaderValue(0));
+        let point = line_point(&model, true, header - 1);
+        click(&mut model, point);
+        assert_eq!(model.focus, Focus::Detail);
+        assert!(model.editing.is_none());
+
+        // Dossier : focus seul.
+        let mut model = model_on("grp", (140, 40));
+        let point = line_point(&model, true, 0);
+        click(&mut model, point);
+        assert_eq!(model.focus, Focus::Detail);
+        assert!(model.editing.is_none());
+    }
+
+    #[test]
+    fn click_on_a_non_editable_body_starts_no_input() {
+        use crate::collection::{BruLoader, CollectionLoader};
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/writer-cases");
+        let mut model = Model::new(root.clone(), (140, 60));
+        update(&mut model, Message::CollectionLoaded(BruLoader.load(&root)));
+        model.mouse.capture = true;
+        select(&mut model, "form-body.bru");
+        let lines = plain_lines(&model);
+        let body = lines
+            .iter()
+            .position(|l| l.starts_with("Corps"))
+            .expect("corps");
+        assert!(lines[body + 1].trim_start().contains(':'), "{lines:?}");
+        let point = line_point(&model, true, u16::try_from(body + 1).expect("petit"));
+        click(&mut model, point);
+        assert_eq!(model.focus, Focus::Detail);
+        assert!(model.editing.is_none());
+        assert!(input_text(&model).is_none());
+    }
+
+    // --- Copie ----------------------------------------------------------------
+
+    #[test]
+    fn y_copies_the_dragged_lines() {
+        let mut model = runner_probe_model();
+        model.mouse.capture = true;
+        model.size = (100, 30);
+        select(&mut model, "green.bru");
+        let start = line_point(&model, false, 1);
+        let end = line_point(&model, false, 2);
+        event(&mut model, MouseKind::Press, start);
+        event(&mut model, MouseKind::Drag, end);
+        // Relâchement : aucune copie.
+        assert!(matches!(
+            event(&mut model, MouseKind::Release, end),
+            Command::None
+        ));
+        let lines = response_plain_lines(&model);
+        let Command::CopyToClipboard { token, text } = update(&mut model, Message::Yank) else {
+            panic!("copie attendue");
+        };
+        assert_eq!(text, format!("{}\n{}", lines[1], lines[2]));
+
+        // Échec : sélection et défilement inchangés, échec signalé.
+        let scroll = model.response_scroll;
+        update(
+            &mut model,
+            Message::ClipboardResult {
+                token,
+                result: Err(crate::app::clipboard::test_support::error_for_test()),
+            },
+        );
+        assert_eq!(model.response_scroll, scroll);
+        assert_eq!(response_selection_range(&model), Some(1..=2));
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::ClipboardError(_))
+        ));
+
+        // Nouvelle tentative réussie : sélection levée, confirmation.
+        let Command::CopyToClipboard { token, .. } = update(&mut model, Message::Yank) else {
+            panic!("copie attendue");
+        };
+        update(
+            &mut model,
+            Message::ClipboardResult {
+                token,
+                result: Ok(()),
+            },
+        );
+        assert!(model.response_selection.is_none());
+        assert_eq!(model.response_scroll, scroll);
+        assert!(matches!(model.last_status, Some(StatusMessage::Copied)));
+    }
+
+    #[test]
+    fn y_in_field_select_copies_without_starting_input() {
+        let mut model = session_on_post_json();
+        let start = line_point(&model, true, 0);
+        let end = line_point(&model, true, 1);
+        event(&mut model, MouseKind::Press, start);
+        event(&mut model, MouseKind::Drag, end);
+        event(&mut model, MouseKind::Release, end);
+        assert!(matches!(
+            update(&mut model, Message::Yank),
+            Command::CopyToClipboard { .. }
+        ));
+        assert_eq!(
+            model.editing.as_ref().map(|s| s.state.clone()),
+            Some(EditState::FieldSelect)
+        );
+    }
+
+    // --- Non-régression clavier ---------------------------------------------
+
+    #[test]
+    fn keyboard_navigation_is_unchanged_with_capture() {
+        let mut with = loaded_model((100, 30));
+        with.mouse.capture = true;
+        let mut without = loaded_model((100, 30));
+        for message in [
+            || Message::Down,
+            || Message::Right,
+            || Message::Left,
+            || Message::Down,
+        ] {
+            update(&mut with, message());
+            update(&mut without, message());
+            assert_eq!(with.tree.selected, without.tree.selected);
+            assert_eq!(with.tree.expanded, without.tree.expanded);
+        }
     }
 }

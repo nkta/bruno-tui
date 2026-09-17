@@ -169,12 +169,40 @@ pub enum RunFailure {
     },
 }
 
-/// Sélection visuelle de lignes dans le détail, ancrée au sommet du
-/// panneau au moment de son activation ; la borne mobile se déduit du
-/// défilement courant (`update::selection_range`), jamais stockée à part.
+/// Sélection visuelle de lignes dans le détail ou la réponse. Au clavier,
+/// ancrée au sommet du panneau au moment de son activation, la borne
+/// mobile se déduisant du défilement courant (`update::selection_range`).
+/// À la souris, les deux bornes sont fixes (`mouse-support`, D6).
 #[derive(Debug, Clone, Copy)]
 pub struct DetailSelection {
     pub anchor: u16,
+    /// Borne fixe posée par un glisser ; `None` pour une sélection clavier.
+    pub head: Option<u16>,
+}
+
+/// Panneau dans lequel un glisser a commencé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragPanel {
+    Detail,
+    Response,
+}
+
+/// Appui du bouton gauche en cours dans le détail ou la réponse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Drag {
+    pub panel: DragPanel,
+    /// Ligne logique sous l'appui.
+    pub anchor: u16,
+    /// Le pointeur a atteint une autre ligne : ce n'est plus un clic.
+    pub moved: bool,
+}
+
+/// État souris (`mouse-support`, D5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MouseState {
+    /// Capture effectivement appliquée au terminal.
+    pub capture: bool,
+    pub drag: Option<Drag>,
 }
 
 /// Session d'édition d'une requête, superposée au focus Détail.
@@ -434,10 +462,16 @@ pub struct Model {
     /// sans résultat), en plus des rappels habituels. Persiste jusqu'au
     /// prochain statut, aucune minuterie.
     pub last_status: Option<StatusMessage>,
+    /// Capture souris et glisser en cours.
+    pub mouse: MouseState,
     /// Jeton de la copie en cours, s'il y en a une : un `ClipboardResult`
     /// dont le jeton ne correspond plus est ignoré (résultat en retard sur
     /// une copie plus récente).
     pub(crate) pending_clipboard_token: Option<u64>,
+    /// Panneau dont la sélection a été copiée par la copie en cours : elle
+    /// n'est levée qu'une fois la copie réussie (`search-and-yank`,
+    /// `mouse-support`).
+    pub(crate) pending_clipboard_selection: Option<Focus>,
     /// Prochain jeton à distribuer à une copie.
     pub(crate) next_clipboard_token: u64,
     /// Session d'édition active sur la requête du focus Détail.
@@ -524,6 +558,10 @@ pub enum StatusMessage {
     /// Changement de requête refusé : la session d'édition porte des
     /// modifications non enregistrées.
     EditLocked,
+    /// Capture souris activée (`true`) ou désactivée (`false`).
+    MouseCapture(bool),
+    /// Échec d'activation ou de désactivation de la capture souris.
+    MouseCaptureError(String),
 }
 
 impl Model {
@@ -549,7 +587,9 @@ impl Model {
             detail_match: None,
             response_match: None,
             last_status: None,
+            mouse: MouseState::default(),
             pending_clipboard_token: None,
+            pending_clipboard_selection: None,
             next_clipboard_token: 0,
             editing: None,
             confirm: None,

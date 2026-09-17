@@ -374,6 +374,22 @@ pub fn request_text_and_fields(
     (Text::from(lines), field_lines)
 }
 
+/// Champ éditable affiché à la ligne logique `line` du détail de la
+/// requête sélectionnée, en tenant compte de la session d'édition
+/// (`mouse-support`, D4) ; `None` hors champ ou hors requête.
+pub fn field_at_line(model: &Model, line: u16) -> Option<EditableField> {
+    let Some(TreeNode::Request(request)) = model.selected_node() else {
+        return None;
+    };
+    let session = model.editing.as_ref().filter(|s| s.path == request.path);
+    let (_, fields) = request_text_and_fields(request, session);
+    let line = usize::from(line);
+    fields
+        .into_iter()
+        .find(|location| (location.line..location.line + location.count).contains(&line))
+        .map(|location| location.field)
+}
+
 /// Position du curseur de texte pendant une saisie : ligne logique dans le
 /// texte du détail et colonne d'affichage dans la ligne, décalage
 /// horizontal déjà appliqué (`improve-direct-editing`, D7).

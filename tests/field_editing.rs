@@ -107,6 +107,7 @@ fn spawn_run(
             clipboard,
             writer,
             Vec::new(),
+            bruno_tui::app::mouse::MouseSetup::terminal(false),
         )
         .await;
         let Ok(exit) = result;

@@ -70,6 +70,7 @@ fn spawn_run(
             Arc::new(bruno_tui::app::clipboard::SystemClipboard),
             Arc::new(bruno_tui::writer::BruWriter),
             Vec::new(),
+            bruno_tui::app::mouse::MouseSetup::terminal(false),
         )
         .await;
         let Ok(exit) = result;

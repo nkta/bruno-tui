@@ -5,6 +5,7 @@
 //! panneaux pour garder la sélection visible et borner le défilement.
 
 pub mod detail;
+pub mod hit;
 pub mod panels;
 pub mod status;
 pub mod theme;
@@ -172,7 +173,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 let mut detail = Paragraph::new(detail::render_text(model))
                     .scroll((model.detail_scroll, 0))
                     .block(panel(" Détail ", model.focus == Focus::Detail));
-                if !input_in_progress(model) {
+                if detail_wraps(model) {
                     detail = detail.wrap(Wrap { trim: false });
                 }
                 frame.render_widget(detail, areas.detail);
@@ -190,6 +191,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
 }
 
 /// Une saisie de champ est en cours sur la requête affichée.
+/// Le détail est rendu avec retour à la ligne, sauf pendant une saisie.
+/// Partagé avec le hit-testing (`hit`), pour ne jamais diverger du rendu.
+pub(crate) fn detail_wraps(model: &Model) -> bool {
+    !input_in_progress(model)
+}
+
 fn input_in_progress(model: &Model) -> bool {
     match (&model.editing, model.selected_node()) {
         (Some(session), Some(TreeNode::Request(request))) => {
@@ -342,6 +349,14 @@ fn status_message_text(message: &StatusMessage) -> String {
             "Modifications non enregistrées : Ctrl+S pour enregistrer, Échap pour abandonner"
                 .to_owned()
         }
+        StatusMessage::MouseCapture(true) => "Souris activée (M pour la désactiver)".to_owned(),
+        StatusMessage::MouseCapture(false) => {
+            "Souris désactivée : sélection native du terminal disponible (M pour réactiver)"
+                .to_owned()
+        }
+        StatusMessage::MouseCaptureError(reason) => {
+            format!("Échec de la capture souris : {reason}")
+        }
     }
 }
 
@@ -403,7 +418,7 @@ fn status_line(model: &Model) -> String {
     }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
-            "↑↓ naviguer  → déplier  ← replier  r lancer  / chercher  Tab détail  S secrets  q quitter"
+            "↑↓ naviguer  → déplier  ← replier  r lancer  / chercher  Tab détail  S secrets  q quitter  M souris"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
@@ -1502,6 +1517,10 @@ mod tests {
         let model = loaded_model((100, 30));
         let status = &render(&model, 100, 30)[29];
         assert!(status.contains("S secrets"), "{status}");
+        // `M` vient en dernier : visible dès que le terminal est assez large,
+        // sans jamais masquer les touches existantes.
+        let wide = &render(&model, 120, 30)[29];
+        assert!(wide.contains("q quitter  M souris"), "{wide}");
     }
 
     /// Lignes de l'écran restreintes à un rectangle.

@@ -11,6 +11,7 @@ use bruno_tui::app::cli::{self, Command, USAGE, VERSION};
 use bruno_tui::app::clipboard::SystemClipboard;
 use bruno_tui::app::event::{EVENT_BUFFER, spawn_terminal_reader};
 use bruno_tui::app::model::Exit;
+use bruno_tui::app::mouse::{MouseCapture, MouseSetup, TerminalMouseCapture};
 use bruno_tui::app::run;
 use bruno_tui::collection::BruLoader;
 use tokio::sync::mpsc;
@@ -19,8 +20,12 @@ use tokio::sync::mpsc;
 const USAGE_ERROR: u8 = 2;
 
 fn main() -> ExitCode {
-    let (path, secrets) = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(Command::Run { path, secrets }) => (path, secrets),
+    let (path, secrets, mouse) = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(Command::Run {
+            path,
+            secrets,
+            mouse,
+        }) => (path, secrets, mouse),
         Ok(Command::Help) => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -62,6 +67,22 @@ fn main() -> ExitCode {
         }
     };
 
+    // Le hook de ratatui restaure mode brut et écran alternatif, pas la
+    // capture souris : elle est rendue au terminal avant lui.
+    let ratatui_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = TerminalMouseCapture.set(false);
+        ratatui_hook(info);
+    }));
+
+    let mut mouse_setup = MouseSetup::terminal(false);
+    if mouse {
+        match TerminalMouseCapture.set(true) {
+            Ok(()) => mouse_setup.enabled = true,
+            Err(error) => mouse_setup.startup_error = Some(error.to_string()),
+        }
+    }
+
     let (sender, events) = mpsc::channel(EVENT_BUFFER);
     let result = match spawn_terminal_reader(sender.clone()) {
         Ok(()) => runtime.block_on(run(
@@ -74,10 +95,13 @@ fn main() -> ExitCode {
             Arc::new(SystemClipboard),
             Arc::new(bruno_tui::writer::BruWriter),
             secrets,
+            mouse_setup,
         )),
         Err(error) => Ok(Exit::TerminalError(error)),
     };
 
+    // Sans effet si la capture n'était pas active.
+    let _ = TerminalMouseCapture.set(false);
     let restored = ratatui::try_restore();
     // N'attend pas un chargement encore en cours : il est en lecture seule.
     runtime.shutdown_background();
