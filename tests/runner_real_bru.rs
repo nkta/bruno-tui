@@ -154,3 +154,60 @@ async fn real_bru_run_with_request_failed_before_sending() {
     assert_eq!(boom.error.as_deref(), Some("pre-request failure (fixture)"));
     assert!(boom.is_failure());
 }
+
+/// `secret-probe` : l'environnement `CI` déclare `vars:secret
+/// [ oktaClientSecret ]`, le `.env` porte `OKTA_CLIENT_SECRET`, et le script
+/// pré-requête vérifie la valeur lue par `bru.getEnvVar` puis saute la
+/// requête (aucun réseau).
+#[tokio::test]
+#[ignore = "nécessite bru"]
+async fn real_bru_receives_vars_secret_found_automatically() {
+    use bruno_tui::app::message::Message;
+    use bruno_tui::app::model::Model;
+    use bruno_tui::app::update::{Command, update};
+    use bruno_tui::collection::{BruLoader, CollectionLoader};
+    use bruno_tui::secrets;
+
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/secret-probe");
+    let files_before = regular_files(&root, true);
+
+    // Sans `--secret` : la recherche automatique suffit.
+    let mut model = Model::new(root.clone(), (100, 30));
+    let loaded = BruLoader.load(&root);
+    let Command::ResolveSecrets {
+        root: resolve_root,
+        lookups,
+    } = update(&mut model, Message::CollectionLoaded(loaded))
+    else {
+        panic!("résolution des variables secrètes attendue");
+    };
+    let resolved = secrets::resolve(&resolve_root, &lookups, &|key| std::env::var_os(key));
+    update(
+        &mut model,
+        Message::SecretsResolved {
+            root: resolve_root,
+            resolved,
+        },
+    );
+    model.current_environment = Some("CI".into());
+    let Command::StartRun { request, .. } = update(&mut model, Message::RunSelected) else {
+        panic!("exécution attendue sans proposition de saisie");
+    };
+    assert_eq!(request.env_vars.len(), 1);
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let runner = BruRunner::new(tx);
+    let _handle = runner.start(request);
+    let event = timeout(Duration::from_secs(60), rx.recv())
+        .await
+        .expect("bru doit terminer en moins de 60 s")
+        .expect("canal ouvert");
+    let RunOutcome::Completed { report, .. } = event.outcome else {
+        panic!("issue inattendue : {:?}", event.outcome);
+    };
+    let result = &report.iterations()[0].results[0];
+    assert_eq!(result.pre_request_test_results.len(), 1);
+    assert!(!result.is_failure(), "le test pré-requête doit passer");
+    assert_eq!(regular_files(&root, true), files_before);
+}

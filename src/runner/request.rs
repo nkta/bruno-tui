@@ -23,6 +23,31 @@ impl SecretString {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// Ajoute un caractère, pour une saisie qui ne passe jamais en clair.
+    pub fn push(&mut self, c: char) {
+        self.0.push(c);
+    }
+
+    /// Retire le dernier caractère, s'il y en a un.
+    pub fn pop(&mut self) {
+        self.0.pop();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Nombre de caractères, pour un rendu masqué pendant la saisie.
+    pub fn char_count(&self) -> usize {
+        self.0.chars().count()
+    }
+}
+
+impl Default for SecretString {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
 }
 
 impl fmt::Debug for SecretString {
@@ -154,6 +179,21 @@ mod tests {
                 "/dev/fd/3"
             ]
         );
+    }
+
+    #[test]
+    fn secret_buffer_editing() {
+        let mut secret = SecretString::default();
+        assert!(secret.is_empty());
+        secret.push('a');
+        secret.push('é');
+        assert_eq!(secret.char_count(), 2);
+        secret.pop();
+        assert_eq!(secret.expose(), "a");
+        secret.pop();
+        secret.pop();
+        assert!(secret.is_empty());
+        assert!(!format!("{secret:?}").contains('a'));
     }
 
     #[test]

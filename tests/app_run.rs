@@ -74,6 +74,7 @@ fn spawn_run(
             bru_program.into(),
             Arc::new(bruno_tui::app::clipboard::SystemClipboard),
             Arc::new(bruno_tui::writer::BruWriter),
+            Vec::new(),
         )
         .await;
         let Ok(exit) = result;
@@ -389,4 +390,75 @@ async fn missing_bru_program_is_reported_distinctly() {
     )
     .await;
     assert!(screen.contains("introuvable"), "{screen}");
+}
+
+fn secret_probe() -> PathBuf {
+    fixtures().join("collections/secret-probe")
+}
+
+/// Choisit l'environnement `CI`, seul environnement de `secret-probe`.
+async fn choose_ci(sender: &mpsc::Sender<AppEvent>) {
+    for code in [KeyCode::Char('E'), KeyCode::Down, KeyCode::Enter] {
+        sender.send(key(code)).await.expect("envoi");
+    }
+}
+
+#[tokio::test]
+async fn vars_secret_is_resolved_from_dotenv_and_passed_to_bru() {
+    let collection = BruLoader.load(&secret_probe()).expect("collection chargée");
+    let (sender, handle, open) = spawn_app(collection, secret_probe(), fake_bru(), (120, 30)).await;
+    // Laisse la résolution asynchrone du `.env` revenir dans la boucle.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    choose_ci(&sender).await;
+    sender.send(key(KeyCode::Char('r'))).await.expect("envoi");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Panneau ouvert à la fin pour vérifier la source affichée.
+    sender.send(key(KeyCode::Char('S'))).await.expect("envoi");
+    sender.send(key(KeyCode::Char('q'))).await.expect("envoi");
+    let (terminal, exit) = timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("run retourne")
+        .expect("tâche");
+    let _ = open.send(());
+    assert!(matches!(exit, Exit::Normal));
+    let screen = screen(&terminal).join("\n");
+    // Le faux `bru` n'a servi un rapport que s'il a reçu la surcharge.
+    assert!(!screen.contains("sans produire de rapport"), "{screen}");
+    assert!(!screen.contains("en attente"), "{screen}");
+    assert!(
+        screen.contains("oktaClientSecret  .env (OKTA_CLIENT_SECRET)"),
+        "{screen}"
+    );
+    assert!(!screen.contains("fixture-value"), "{screen}");
+}
+
+#[tokio::test]
+async fn missing_vars_secret_opens_the_panel_before_running() {
+    // Même collection, mais racine sans `.env` : rien n'est trouvé.
+    let temp = TempDir::new("secret-missing");
+    let mut collection = BruLoader.load(&secret_probe()).expect("collection chargée");
+    collection.root = temp.0.clone();
+    let (sender, handle, open) = spawn_app(collection, temp.0.clone(), fake_bru(), (120, 30)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    choose_ci(&sender).await;
+    sender.send(key(KeyCode::Char('r'))).await.expect("envoi");
+    // Saisie masquée de la valeur, puis lancement depuis le panneau.
+    sender.send(key(KeyCode::Enter)).await.expect("envoi");
+    for c in "fixture-value".chars() {
+        sender.send(key(KeyCode::Char(c))).await.expect("envoi");
+    }
+    sender.send(key(KeyCode::Enter)).await.expect("envoi");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sender.send(key(KeyCode::Char('r'))).await.expect("envoi");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    sender.send(key(KeyCode::Char('q'))).await.expect("envoi");
+    let (terminal, exit) = timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("run retourne")
+        .expect("tâche");
+    let _ = open.send(());
+    assert!(matches!(exit, Exit::Normal));
+    let screen = screen(&terminal).join("\n");
+    assert!(!screen.contains("sans produire de rapport"), "{screen}");
+    assert!(!screen.contains("fixture-value"), "{screen}");
 }

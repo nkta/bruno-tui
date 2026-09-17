@@ -14,6 +14,7 @@ use super::clipboard::ClipboardError;
 use super::model::SavedEdit;
 use crate::collection::{Collection, LoadError};
 use crate::runner;
+use crate::secrets::Resolved;
 use crate::writer::WriteError;
 
 /// Taille du canal d'événements.
@@ -41,6 +42,12 @@ pub enum AppEvent {
     EditSaved {
         path: PathBuf,
         result: Result<SavedEdit, WriteError>,
+    },
+    /// Issue de la résolution des variables secrètes
+    /// (`Command::ResolveSecrets`) pour la collection de racine `root`.
+    SecretsResolved {
+        root: PathBuf,
+        resolved: Vec<Resolved>,
     },
 }
 

@@ -18,6 +18,11 @@
 #                          mixed.json`, sort en 1. `tests/app_run.rs` ne
 #                          fournit qu'une seule cible (le nœud sélectionné
 #                          dans l'arbre), sans second argument possible.
+#   secret, secret.bru     cible de `tests/fixtures/collections/secret-probe/` :
+#                          sert `mixed.json` et sort en 1 si les arguments
+#                          contiennent `--env-var oktaClientSecret=fixture-value`,
+#                          sinon sort en 5 sans rapport. N'affiche jamais les
+#                          arguments reçus.
 
 [ "$1" = "run" ] && shift
 MODE="$1"
@@ -52,6 +57,18 @@ case "$MODE" in
   ok|ok.bru|green|green.bru|json|json.bru|skip|skip.bru|folder/down|folder/down.bru)
     cat "$(dirname "$0")/../reports/mixed.json" >&3
     exit 1
+    ;;
+  secret|secret.bru)
+    previous=""
+    for arg in "$@"; do
+      if [ "$previous" = "--env-var" ] && [ "$arg" = "oktaClientSecret=fixture-value" ]; then
+        cat "$(dirname "$0")/../reports/mixed.json" >&3
+        exit 1
+      fi
+      previous="$arg"
+    done
+    echo "variable secrète absente"
+    exit 5
     ;;
   *)
     echo "mode inconnu : $MODE" >&2

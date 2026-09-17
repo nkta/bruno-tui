@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::collection::{BodyContent, BodyKind, Collection, LoadError, RequestView, TreeNode};
-use crate::runner;
+use crate::runner::{self, SecretString};
+use crate::secrets::{Resolved, SecretLookup, SecretMapping, SecretSource, is_valid_name};
 use crate::writer::{FieldEdit, FileStamp};
 
 use super::filter::FilterState;
@@ -35,6 +36,7 @@ pub enum Focus {
     Diagnostics,
     History,
     EnvironmentPicker,
+    Secrets,
 }
 
 /// Onglet actif du panneau Réponse (`response-tabs`).
@@ -433,6 +435,66 @@ pub struct Model {
     /// 0 = « Aucun », 1..=N = les entrées de `Collection.environments`.
     /// N'a de sens que pendant que `Focus::EnvironmentPicker` est actif.
     pub environment_selected: usize,
+    /// Variables secrètes transmises à `bru` (`secret-env-vars`).
+    pub secrets: SecretsState,
+}
+
+/// État des variables secrètes. Les valeurs ne sont jamais formatées :
+/// elles vivent dans des `SecretString` dont `Debug` est masqué.
+#[derive(Debug, Default)]
+pub struct SecretsState {
+    /// Déclarations `--secret`, immuables pendant la session.
+    pub mappings: Vec<SecretMapping>,
+    /// Dernière résolution depuis `.env` et le shell.
+    pub resolved: Vec<Resolved>,
+    /// Valeurs saisies dans le panneau, par nom.
+    pub typed: Vec<(String, SecretString)>,
+    /// Noms ajoutés depuis le panneau (`a`), dans l'ordre d'ajout.
+    pub added: Vec<String>,
+    /// Ligne sélectionnée dans le panneau.
+    pub selected: usize,
+    /// Saisie en cours dans le panneau.
+    pub input: Option<SecretInput>,
+    /// Refus à afficher dans le panneau jusqu'à la prochaine action.
+    pub error: Option<SecretError>,
+    /// Exécution retenue par la proposition de saisie au lancement :
+    /// cible et mode récursif.
+    pub pending_run: Option<(PathBuf, bool)>,
+    /// Environnements pour lesquels la proposition a déjà été traitée.
+    pub acknowledged: HashSet<String>,
+}
+
+/// Saisie en cours dans le panneau des variables secrètes.
+#[derive(Debug)]
+pub enum SecretInput {
+    /// Nom d'une variable à ajouter, saisi en clair.
+    Name(String),
+    /// Valeur masquée de `name` ; `adding` si le nom vient d'être saisi et
+    /// n'est ajouté qu'à la validation d'une valeur non vide.
+    Value {
+        name: String,
+        buffer: SecretString,
+        adding: bool,
+    },
+}
+
+/// Refus d'un nom saisi dans le panneau.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretError {
+    InvalidName,
+    DuplicateName,
+}
+
+/// Ligne du panneau des variables secrètes, calculée à la demande.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretRow {
+    pub name: String,
+    pub source: SecretSource,
+    pub value: Option<SecretString>,
+    /// Nom ajouté depuis le panneau.
+    pub added: bool,
+    /// Nom déclaré en `vars:secret` par l'environnement courant.
+    pub declared: bool,
 }
 
 /// Message affiché temporairement dans la barre d'état.
@@ -475,6 +537,7 @@ impl Model {
             confirm: None,
             current_environment: None,
             environment_selected: 0,
+            secrets: SecretsState::default(),
         }
     }
 
@@ -482,6 +545,11 @@ impl Model {
     /// Conçu pour que `add-field-editing`/`add-response-filter` y ajoutent
     /// leur propre branche sans toucher à celle-ci.
     pub fn text_capture(&self) -> Option<TextCapture> {
+        match &self.secrets.input {
+            Some(SecretInput::Name(_)) => return Some(TextCapture::SecretName),
+            Some(SecretInput::Value { .. }) => return Some(TextCapture::SecretValue),
+            None => {}
+        }
         if self
             .editing
             .as_ref()
@@ -587,6 +655,112 @@ pub fn environment_name_at(collection: &Collection, index: usize) -> Option<Opti
         Some(Ok(env)) => Some(Some(env.name.as_str())),
         Some(Err(_)) | None => None,
     }
+}
+
+/// Noms `vars:secret` de l'environnement courant, vide sans environnement
+/// ou si l'environnement courant n'existe plus.
+pub fn current_secret_names(model: &Model) -> &[String] {
+    let (Some(collection), Some(current)) = (model.loaded(), &model.current_environment) else {
+        return &[];
+    };
+    collection
+        .environments
+        .iter()
+        .find_map(|entry| match entry {
+            Ok(env) if &env.name == current => Some(env.secret_names.as_slice()),
+            _ => None,
+        })
+        .unwrap_or(&[])
+}
+
+/// Recherche d'un nom : la clé explicite de son `--secret` s'il en a une,
+/// sinon la recherche automatique (nom exact puis `UPPER_SNAKE_CASE`).
+pub fn secret_lookup(mappings: &[SecretMapping], name: &str) -> SecretLookup {
+    match mappings.iter().find(|mapping| mapping.name == name) {
+        Some(mapping) => mapping.lookup(),
+        None => SecretLookup::automatic(name),
+    }
+}
+
+/// Recherches à lancer pour une collection : mappings `--secret`, puis
+/// `vars:secret` de tous les environnements valides, sans doublon. La
+/// source d'un nom ne dépend pas de l'environnement courant : une seule
+/// résolution par chargement suffit.
+pub fn secret_lookups(mappings: &[SecretMapping], collection: &Collection) -> Vec<SecretLookup> {
+    let mut names: Vec<&str> = mappings.iter().map(|m| m.name.as_str()).collect();
+    for env in collection.environments.iter().flatten() {
+        for name in &env.secret_names {
+            if is_valid_name(name) && !names.contains(&name.as_str()) {
+                names.push(name);
+            }
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| secret_lookup(mappings, name))
+        .collect()
+}
+
+/// Lignes du panneau des variables secrètes : mappings `--secret`, puis
+/// `vars:secret` de l'environnement courant, puis ajouts, sans doublon.
+/// Une valeur saisie prime sur la résolution `.env`/shell.
+pub fn secret_rows(model: &Model) -> Vec<SecretRow> {
+    let state = &model.secrets;
+    let declared = current_secret_names(model);
+    let mut names: Vec<&str> = Vec::new();
+    let candidates = state
+        .mappings
+        .iter()
+        .map(|mapping| mapping.name.as_str())
+        .chain(declared.iter().map(String::as_str))
+        .chain(state.added.iter().map(String::as_str));
+    for name in candidates {
+        // Un nom `vars:secret` inutilisable en `nom=valeur` est écarté.
+        if is_valid_name(name) && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            let is_mapped = state.mappings.iter().any(|m| m.name == name);
+            let is_declared = declared.iter().any(|d| d == name);
+            let added = state.added.iter().any(|a| a == name);
+            let typed = state.typed.iter().find(|(n, _)| n == name);
+            let (source, value) = match typed {
+                Some((_, value)) => (SecretSource::Typed, Some(value.clone())),
+                None => match state.resolved.iter().find(|r| r.name == name) {
+                    Some(resolved) if is_mapped || is_declared => {
+                        (resolved.source.clone(), resolved.value.clone())
+                    }
+                    // Résolution pas encore arrivée, ou nom sans clé.
+                    _ => {
+                        let keys = if is_mapped || is_declared {
+                            secret_lookup(&state.mappings, name).keys
+                        } else {
+                            Vec::new()
+                        };
+                        (SecretSource::Missing { keys }, None)
+                    }
+                },
+            };
+            SecretRow {
+                name: name.to_owned(),
+                source,
+                value,
+                added,
+                declared: is_declared,
+            }
+        })
+        .collect()
+}
+
+/// Surcharges `--env-var` à transmettre : chaque ligne ayant une valeur.
+pub fn secret_env_vars(model: &Model) -> Vec<(String, SecretString)> {
+    secret_rows(model)
+        .into_iter()
+        .filter_map(|row| row.value.map(|value| (row.name, value)))
+        .collect()
 }
 
 /// Nœud désigné par une adresse, dans un arbre donné. Partagé par
@@ -1022,5 +1196,72 @@ mod tests {
         assert_eq!(environment_name_at(collection, 3), Some(Some("staging")));
         // Indice hors limites.
         assert_eq!(environment_name_at(collection, 4), None);
+    }
+
+    #[test]
+    fn secret_rows_union_order_and_environment_changes() {
+        use crate::secrets::SecretMapping;
+        let mut model = loaded_model((100, 30));
+        // Aucun environnement, aucune déclaration : ensemble vide.
+        assert!(secret_rows(&model).is_empty());
+        assert!(secret_env_vars(&model).is_empty());
+
+        model.secrets.mappings = vec![SecretMapping {
+            name: "oktaClientSecret".into(),
+            key: None,
+        }];
+        model.current_environment = Some("local".into());
+        model.secrets.added = vec!["extra".into(), "token".into()];
+        let names: Vec<String> = secret_rows(&model).into_iter().map(|r| r.name).collect();
+        assert_eq!(names, ["oktaClientSecret", "token", "extra"]);
+        let token = &secret_rows(&model)[1];
+        assert!(token.declared);
+        assert_eq!(
+            token.source,
+            SecretSource::Missing {
+                keys: vec!["token".into(), "TOKEN".into()]
+            }
+        );
+
+        // Changer d'environnement retire `token` sans perdre sa saisie.
+        model.secrets.added.clear();
+        model.secrets.typed = vec![("token".into(), SecretString::new("s3cr3t"))];
+        model.current_environment = Some("staging".into());
+        assert!(secret_rows(&model).iter().all(|r| r.name != "token"));
+        model.current_environment = Some("local".into());
+        let token = secret_rows(&model).remove(1);
+        assert_eq!(token.source, SecretSource::Typed);
+        assert_eq!(
+            secret_env_vars(&model)
+                .iter()
+                .map(|(n, v)| (n.as_str(), v.expose()))
+                .collect::<Vec<_>>(),
+            [("token", "s3cr3t")]
+        );
+        assert!(!format!("{model:?}").contains("s3cr3t"));
+    }
+
+    #[test]
+    fn typed_value_overrides_resolution() {
+        use crate::secrets::Resolved;
+        let mut model = loaded_model((100, 30));
+        model.current_environment = Some("local".into());
+        model.secrets.resolved = vec![Resolved {
+            name: "token".into(),
+            source: SecretSource::Shell {
+                key: "TOKEN".into(),
+            },
+            value: Some(SecretString::new("shell")),
+        }];
+        assert_eq!(
+            secret_rows(&model)[0].source,
+            SecretSource::Shell {
+                key: "TOKEN".into()
+            }
+        );
+        model.secrets.typed = vec![("token".into(), SecretString::new("typed"))];
+        let row = secret_rows(&model).remove(0);
+        assert_eq!(row.source, SecretSource::Typed);
+        assert_eq!(row.value.as_ref().map(SecretString::expose), Some("typed"));
     }
 }
