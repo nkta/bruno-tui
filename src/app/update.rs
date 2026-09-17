@@ -6,15 +6,16 @@
 use std::ops::RangeInclusive;
 
 use super::filter::{FilterState, evaluate};
-use super::message::Message;
+use super::message::{InputKey, Message};
 use super::model::{
-    CollectionState, DetailSelection, EditMode, EditSession, EditableField, Exit, Focus,
+    CollectionState, DetailSelection, EditSession, EditState, EditableField, Exit, Focus,
     HistoryEntry, HistoryOutcome, Model, ResponseTab, SecretError, SecretInput, StatusMessage,
     environment_name_at, field_enabled, field_value, secret_env_vars, secret_lookups, secret_rows,
     tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
-use super::view::detail::{plain_lines, response_plain_lines};
+use super::text_input::TextInput;
+use super::view::detail::{plain_lines, request_text_and_fields, response_plain_lines};
 use super::view::{
     detail::{detail_text, response_text},
     inner, layout_for,
@@ -24,6 +25,7 @@ use crate::runner::report::ResponseStatus;
 use crate::runner::{RunRequest, SecretString};
 use crate::secrets::{SecretLookup, is_valid_name};
 use crate::writer::{FieldEdit, FileStamp};
+use ratatui::text::Line;
 
 /// Effet demandé par `update`, à exécuter par la boucle `run`, qui seule
 /// détient le `BruRunner` et tourne dans un contexte tokio.
@@ -65,7 +67,7 @@ pub enum Command {
 pub fn update(model: &mut Model, message: Message) -> Command {
     if let Some(confirm) = model.confirm {
         return match message {
-            Message::ConfirmYes | Message::Yank | Message::Right => {
+            Message::ConfirmYes | Message::Yank | Message::Right | Message::Enter => {
                 model.confirm = None;
                 match confirm {
                     super::model::PendingConfirm::DiscardEdit => {
@@ -102,7 +104,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
 
     match message {
         Message::Quit | Message::ForceQuit => {
-            if model.editing.as_ref().is_some_and(|s| s.dirty) {
+            if model.editing.as_ref().is_some_and(EditSession::has_unsaved) {
                 model.confirm = Some(super::model::PendingConfirm::QuitWithUnsavedEdit);
             } else {
                 model.exit = Some(Exit::Normal);
@@ -224,7 +226,8 @@ pub fn update(model: &mut Model, message: Message) -> Command {
         }
         Message::FocusTree => {
             if let Some(session) = &model.editing {
-                if session.dirty {
+                model.last_status = None;
+                if session.has_unsaved() {
                     model.confirm = Some(super::model::PendingConfirm::DiscardEdit);
                 } else {
                     model.editing = None;
@@ -378,6 +381,14 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             start_edit(model);
             Command::None
         }
+        Message::Enter => {
+            if model.focus == Focus::Detail {
+                enter_in_detail(model);
+                Command::None
+            } else {
+                update(model, Message::Right)
+            }
+        }
         Message::MoveFieldCursor(delta) => {
             move_field_cursor(model, delta);
             Command::None
@@ -386,35 +397,22 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             toggle_field(model);
             Command::None
         }
-        Message::EnterInsert => {
-            enter_insert(model);
+        Message::InputKey(key) => {
+            input_key(model, key);
             Command::None
         }
-        Message::LeaveInsert => {
-            leave_insert(model);
+        Message::ValidateInput => {
+            validate_input(model);
             Command::None
         }
-        Message::InsertEnter => {
-            insert_enter(model);
+        Message::CancelInput => {
+            cancel_input(model);
             Command::None
         }
-        Message::InsertChar(c) => {
-            insert_char(model, c);
-            Command::None
+        Message::SaveEdit => {
+            validate_input(model);
+            save_edit(model)
         }
-        Message::InsertBackspace => {
-            insert_backspace(model);
-            Command::None
-        }
-        Message::InsertCursorLeft => {
-            insert_cursor_left(model);
-            Command::None
-        }
-        Message::InsertCursorRight => {
-            insert_cursor_right(model);
-            Command::None
-        }
-        Message::SaveEdit => save_edit(model),
         Message::EditSaved { path, result } => {
             edit_saved(model, path, result);
             Command::None
@@ -426,7 +424,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                     if model
                         .editing
                         .as_ref()
-                        .is_some_and(|s| matches!(s.mode, EditMode::Normal))
+                        .is_some_and(|s| s.state == EditState::FieldSelect)
                     {
                         match navigation {
                             Message::Up => move_field_cursor(model, -1),
@@ -763,6 +761,14 @@ fn navigate_tree(model: &mut Model, message: Message) {
         _ => {}
     }
     if model.tree.selected != before {
+        let changed_node =
+            model.selected_node().map(|node| node.path().to_path_buf()) != previous_path;
+        if changed_node && selection_locked(model) {
+            model.tree.selected = before;
+            model.last_status = Some(StatusMessage::EditLocked);
+            scroll_tree_into_view(model);
+            return;
+        }
         clear_detail_view_state(model);
     }
     reset_filter_if_selection_changed(model, previous_path.as_deref());
@@ -783,7 +789,8 @@ fn clear_detail_view_state(model: &mut Model) {
     model.editing = None;
 }
 
-/// Ouvre une session d'édition sur la requête sélectionnée (D1).
+/// Ouvre une session d'édition sur la requête sélectionnée, dans l'état
+/// Sélection de champ.
 fn start_edit(model: &mut Model) {
     if model.focus != Focus::Detail || model.editing.is_some() {
         return;
@@ -804,18 +811,31 @@ fn start_edit(model: &mut Model) {
         stamp,
         fields,
         cursor: 0,
-        mode: EditMode::Normal,
+        state: EditState::FieldSelect,
         pending: Vec::new(),
         dirty: false,
+        hscroll: 0,
     });
+    model.last_status = None;
+    scroll_edit_into_view(model);
 }
 
-/// Déplace le curseur de champ en mode Normal de session d'édition (D5).
+/// `Entrée` dans le détail : ouvre la session, ou commence la saisie du
+/// champ sous le curseur (`improve-direct-editing`, D3).
+fn enter_in_detail(model: &mut Model) {
+    match &model.editing {
+        None => start_edit(model),
+        Some(session) if session.state == EditState::FieldSelect => begin_input(model),
+        Some(_) => {}
+    }
+}
+
+/// Déplace le curseur de champ en sélection de champ.
 fn move_field_cursor(model: &mut Model, delta: i8) {
     let Some(session) = &mut model.editing else {
         return;
     };
-    if !matches!(session.mode, EditMode::Normal) {
+    if session.state != EditState::FieldSelect {
         return;
     }
     let count = session.fields.len();
@@ -827,17 +847,19 @@ fn move_field_cursor(model: &mut Model, delta: i8) {
     } else if delta > 0 {
         session.cursor = (session.cursor + delta as usize).min(count - 1);
     }
+    model.last_status = None;
+    scroll_edit_into_view(model);
 }
 
-/// Bascule l'état activé/désactivé du champ d'en-tête ou paramètre courant (D5).
+/// Bascule l'état activé/désactivé de l'en-tête ou du paramètre courant.
 fn toggle_field(model: &mut Model) {
     let Some(session) = &model.editing else {
         return;
     };
-    if !matches!(session.mode, EditMode::Normal) {
+    if session.state != EditState::FieldSelect {
         return;
     }
-    let Some(field) = session.fields.get(session.cursor).copied() else {
+    let Some(field) = session.current_field() else {
         return;
     };
     let Some(TreeNode::Request(request)) = model.selected_node() else {
@@ -864,64 +886,103 @@ fn toggle_field(model: &mut Model) {
     {
         session.pending.push(edit);
         session.dirty = true;
+        model.last_status = None;
     }
 }
 
-/// Entre en mode Insert sur le champ sous le curseur (D5).
-fn enter_insert(model: &mut Model) {
+/// Commence la saisie du champ sous le curseur, curseur de texte en fin de
+/// valeur (validée la plus récente, sinon chargée).
+fn begin_input(model: &mut Model) {
     let Some(session) = &model.editing else {
         return;
     };
-    if !matches!(session.mode, EditMode::Normal) {
+    if session.state != EditState::FieldSelect {
         return;
     }
-    let Some(field) = session.fields.get(session.cursor).copied() else {
+    let Some(field) = session.current_field() else {
         return;
     };
     let Some(TreeNode::Request(request)) = model.selected_node() else {
         return;
     };
-    let current_val = field_value(session, &request.view, &field);
-    let text_cursor = current_val.chars().count();
-    let buffer = current_val.to_owned();
+    let input = TextInput::new(
+        field_value(session, &request.view, &field),
+        field == EditableField::BodyText,
+    );
     if let Some(session) = &mut model.editing {
-        session.mode = EditMode::Insert {
-            text_cursor,
-            buffer,
-        };
+        session.state = EditState::Input(input);
+        session.hscroll = 0;
     }
+    model.last_status = None;
+    scroll_edit_into_view(model);
 }
 
-/// Quitte le mode Insert vers le mode Normal, conservant la valeur modifiée en mémoire (D5).
-fn leave_insert(model: &mut Model) {
+/// Valide la saisie en cours : le texte devient la valeur du champ en
+/// mémoire, sans écriture. Sans effet hors saisie.
+fn validate_input(model: &mut Model) {
     let Some(session) = &model.editing else {
         return;
     };
-    let EditMode::Insert { buffer, .. } = &session.mode else {
-        return;
-    };
-    let Some(field) = session.fields.get(session.cursor).copied() else {
-        if let Some(session) = &mut model.editing {
-            session.mode = EditMode::Normal;
-        }
+    let EditState::Input(input) = &session.state else {
         return;
     };
     let Some(TreeNode::Request(request)) = model.selected_node() else {
         return;
     };
-    let committed = super::model::field_value_committed(session, &request.view, &field);
-    let maybe_new_value = if buffer != committed {
-        Some(buffer.clone())
-    } else {
-        None
-    };
+    let new_value = session.current_field().and_then(|field| {
+        let committed = super::model::field_value_committed(session, &request.view, &field);
+        (input.text() != committed).then(|| (field, input.text().to_owned()))
+    });
     if let Some(session) = &mut model.editing {
-        if let Some(new_value) = maybe_new_value {
-            update_or_push_pending(session, field, new_value);
+        if let Some((field, value)) = new_value {
+            update_or_push_pending(session, field, value);
             session.dirty = true;
         }
-        session.mode = EditMode::Normal;
+        session.state = EditState::FieldSelect;
+        session.hscroll = 0;
     }
+    model.last_status = None;
+    scroll_edit_into_view(model);
+}
+
+/// Annule la saisie en cours : `pending` n'est pas touché, le champ
+/// reprend la valeur qu'il avait au début de la saisie.
+fn cancel_input(model: &mut Model) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    if !matches!(session.state, EditState::Input(_)) {
+        return;
+    }
+    session.state = EditState::FieldSelect;
+    session.hscroll = 0;
+    model.last_status = None;
+    scroll_edit_into_view(model);
+}
+
+/// Touche d'édition du tampon pendant une saisie.
+fn input_key(model: &mut Model, key: InputKey) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let EditState::Input(input) = &mut session.state else {
+        return;
+    };
+    match key {
+        InputKey::Char(c) => input.insert(c),
+        InputKey::Backspace => input.backspace(),
+        InputKey::Delete => input.delete(),
+        InputKey::Left => input.left(),
+        InputKey::Right => input.right(),
+        InputKey::Up => input.up(),
+        InputKey::Down => input.down(),
+        InputKey::Home => input.home(),
+        InputKey::End => input.end(),
+        InputKey::Enter if input.is_multiline() => input.newline(),
+        InputKey::Enter => return validate_input(model),
+    }
+    model.last_status = None;
+    scroll_edit_into_view(model);
 }
 
 fn update_or_push_pending(session: &mut EditSession, field: EditableField, value: String) {
@@ -985,91 +1046,67 @@ fn update_or_push_pending(session: &mut EditSession, field: EditableField, value
     }
 }
 
-/// `Entrée` en mode Insert : saut de ligne sur le corps, sortie d'Insert sinon (D5).
-fn insert_enter(model: &mut Model) {
-    let Some(session) = &mut model.editing else {
+/// Fait défiler le détail pour que le champ sous le curseur (en sélection)
+/// ou la ligne du curseur de texte (en saisie) soit visible, et ajuste le
+/// décalage horizontal de la valeur en saisie (`improve-direct-editing`,
+/// D7).
+fn scroll_edit_into_view(model: &mut Model) {
+    let Some(areas) = layout_for(model.size) else {
         return;
     };
-    let current_field = session.fields.get(session.cursor).copied();
-    if current_field == Some(EditableField::BodyText) {
-        if let EditMode::Insert {
-            text_cursor,
-            buffer,
-        } = &mut session.mode
-        {
-            let mut chars: Vec<char> = buffer.chars().collect();
-            let cursor = (*text_cursor).min(chars.len());
-            chars.insert(cursor, '\n');
-            *buffer = chars.into_iter().collect();
-            *text_cursor = cursor + 1;
+    let area = inner(areas.detail);
+    let (height, width) = (area.height.max(1), area.width);
+    let Some(session) = &model.editing else {
+        return;
+    };
+    let Some(TreeNode::Request(request)) = model.selected_node() else {
+        return;
+    };
+    if request.path != session.path {
+        return;
+    }
+    let Some(field) = session.current_field() else {
+        return;
+    };
+    let (_, field_lines) = request_text_and_fields(request, Some(session));
+    let Some(location) = field_lines.iter().find(|l| l.field == field) else {
+        return;
+    };
+    let (target_line, hscroll) = match &session.state {
+        EditState::FieldSelect => (location.line, 0),
+        EditState::Input(input) => {
+            let (line, _) = input.cursor_line_col();
+            let column = u16::try_from(Line::raw(input.text_before_cursor_on_line()).width())
+                .unwrap_or(u16::MAX);
+            let available = width
+                .saturating_sub(u16::try_from(location.prefix_width).unwrap_or(u16::MAX))
+                .max(1);
+            let mut hscroll = session.hscroll;
+            if column < hscroll {
+                hscroll = column;
+            } else if column >= hscroll.saturating_add(available) {
+                hscroll = column - available + 1;
+            }
+            (location.line + line, hscroll)
         }
-    } else {
-        leave_insert(model);
+    };
+    let target = u16::try_from(target_line).unwrap_or(u16::MAX);
+    let mut scroll = model.detail_scroll;
+    if target < scroll {
+        scroll = target;
+    } else if target >= scroll.saturating_add(height) {
+        scroll = target - height + 1;
+    }
+    model.detail_scroll = scroll;
+    if let Some(session) = &mut model.editing {
+        session.hscroll = hscroll;
     }
 }
 
-/// Caractère saisi en mode Insert (D4, D5).
-fn insert_char(model: &mut Model, c: char) {
-    let Some(session) = &mut model.editing else {
-        return;
-    };
-    if let EditMode::Insert {
-        text_cursor,
-        buffer,
-    } = &mut session.mode
-    {
-        let mut chars: Vec<char> = buffer.chars().collect();
-        let cursor = (*text_cursor).min(chars.len());
-        chars.insert(cursor, c);
-        *buffer = chars.into_iter().collect();
-        *text_cursor = cursor + 1;
-    }
-}
-
-/// `Retour arrière` en mode Insert (D4, D5).
-fn insert_backspace(model: &mut Model) {
-    let Some(session) = &mut model.editing else {
-        return;
-    };
-    if let EditMode::Insert {
-        text_cursor,
-        buffer,
-    } = &mut session.mode
-        && *text_cursor > 0
-    {
-        let mut chars: Vec<char> = buffer.chars().collect();
-        let cursor = *text_cursor;
-        if cursor <= chars.len() {
-            chars.remove(cursor - 1);
-            *buffer = chars.into_iter().collect();
-            *text_cursor = cursor - 1;
-        }
-    }
-}
-
-/// Déplacement du curseur texte vers la gauche (D4, D5).
-fn insert_cursor_left(model: &mut Model) {
-    let Some(session) = &mut model.editing else {
-        return;
-    };
-    if let EditMode::Insert { text_cursor, .. } = &mut session.mode {
-        *text_cursor = text_cursor.saturating_sub(1);
-    }
-}
-
-/// Déplacement du curseur texte vers la droite (D4, D5).
-fn insert_cursor_right(model: &mut Model) {
-    let Some(session) = &mut model.editing else {
-        return;
-    };
-    if let EditMode::Insert {
-        text_cursor,
-        buffer,
-    } = &mut session.mode
-    {
-        let char_count = buffer.chars().count();
-        *text_cursor = (*text_cursor + 1).min(char_count);
-    }
+/// Une session porte des modifications non enregistrées : tout changement
+/// de requête sélectionnée est refusé (`improve-direct-editing`, D6).
+fn selection_locked(model: &Model) -> bool {
+    model.editing.as_ref().is_some_and(EditSession::has_unsaved)
 }
 
 /// Déclenche la sauvegarde des modifications si la session est modifiée (D7).
@@ -1453,6 +1490,15 @@ fn select_environment_picker(model: &mut Model, index: usize) {
 /// déplie les dossiers ancêtres (et le nœud lui-même si dossier), sélectionne
 /// le nœud et repasse le focus à l'arbre.
 fn cross_navigate_to_tree(model: &mut Model, address: &[usize]) {
+    let current = model
+        .tree
+        .rows
+        .get(model.tree.selected)
+        .map(|row| row.address.as_slice());
+    if selection_locked(model) && current != Some(address) {
+        model.last_status = Some(StatusMessage::EditLocked);
+        return;
+    }
     for prefix_len in 1..=address.len() {
         let prefix = &address[..prefix_len];
         if let Some(TreeNode::Folder(folder)) = model.node_at(prefix) {
@@ -1575,6 +1621,13 @@ fn search_tree(model: &mut Model, pattern: &str, forward: bool) -> bool {
         return false;
     };
     let address = all[found].address.clone();
+    if selection_locked(model) && current.as_ref() != Some(&address) {
+        model.last_status = Some(StatusMessage::EditLocked);
+        return true;
+    }
+    let Some(collection) = model.loaded() else {
+        return false;
+    };
     let mut ancestors = Vec::new();
     for depth in 1..address.len() {
         if let Some(TreeNode::Folder(folder)) = tree_node_at(&collection.tree, &address[..depth]) {
@@ -3194,7 +3247,7 @@ mod tests {
 
     #[test]
     fn confirm_priority_and_responses() {
-        use super::super::model::{EditMode, EditSession, EditableField, PendingConfirm};
+        use super::super::model::{EditSession, EditState, EditableField, PendingConfirm};
         use std::path::PathBuf;
 
         let mut model = loaded_model((100, 30));
@@ -3209,9 +3262,10 @@ mod tests {
             stamp,
             fields: vec![EditableField::Url],
             cursor: 0,
-            mode: EditMode::Normal,
+            state: EditState::FieldSelect,
             pending: vec![],
             dirty: true,
+            hscroll: 0,
         });
 
         // 1. PendingConfirm::DiscardEdit
@@ -3257,9 +3311,10 @@ mod tests {
             stamp,
             fields: vec![EditableField::Url],
             cursor: 0,
-            mode: EditMode::Normal,
+            state: EditState::FieldSelect,
             pending: vec![],
             dirty: true,
+            hscroll: 0,
         });
         model.confirm = Some(PendingConfirm::QuitWithUnsavedEdit);
 
@@ -3306,7 +3361,7 @@ mod tests {
         let session = model.editing.as_ref().unwrap();
         assert_eq!(session.path, std::path::PathBuf::from("simple-get.bru"));
         assert_eq!(session.cursor, 0);
-        assert_eq!(session.mode, EditMode::Normal);
+        assert_eq!(session.state, EditState::FieldSelect);
         assert!(session.pending.is_empty());
         assert!(!session.dirty);
         assert!(!session.fields.is_empty());
@@ -3577,7 +3632,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_mode_transitions_and_value_preservation() {
+    fn input_transitions_and_value_preservation() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
@@ -3594,22 +3649,22 @@ mod tests {
         };
         let expected_len = initial_url.chars().count();
 
-        // Entrée en mode Insert
-        update(&mut model, Message::EnterInsert);
-        match &model.editing.as_ref().unwrap().mode {
-            EditMode::Insert {
-                text_cursor,
-                buffer,
-            } => {
-                assert_eq!(*text_cursor, expected_len);
-                assert_eq!(buffer, &initial_url);
+        // Début de la saisie (Entrée)
+        update(&mut model, Message::Enter);
+        match &model.editing.as_ref().unwrap().state {
+            EditState::Input(input) => {
+                assert_eq!(input.cursor(), expected_len);
+                assert_eq!(input.text(), initial_url);
             }
-            EditMode::Normal => panic!("Insert attendu"),
+            EditState::FieldSelect => panic!("saisie attendue"),
         }
 
-        // Sortie sans frappe via LeaveInsert (Échap) : valeur conservée, pas de dirty
-        update(&mut model, Message::LeaveInsert);
-        assert_eq!(model.editing.as_ref().unwrap().mode, EditMode::Normal);
+        // Validation sans frappe (Tab) : valeur conservée, pas de dirty
+        update(&mut model, Message::ValidateInput);
+        assert_eq!(
+            model.editing.as_ref().unwrap().state,
+            EditState::FieldSelect
+        );
         assert!(!model.editing.as_ref().unwrap().dirty);
         assert!(model.editing.as_ref().unwrap().pending.is_empty());
 
@@ -3622,46 +3677,49 @@ mod tests {
             initial_url.as_str()
         );
 
-        // Entrée en mode Insert puis sortie via InsertEnter sur champ à valeur unique (URL)
-        update(&mut model, Message::EnterInsert);
-        update(&mut model, Message::InsertEnter);
-        assert_eq!(model.editing.as_ref().unwrap().mode, EditMode::Normal);
+        // Saisie puis validation par Entrée sur un champ à une ligne (URL)
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        assert_eq!(
+            model.editing.as_ref().unwrap().state,
+            EditState::FieldSelect
+        );
         assert!(!model.editing.as_ref().unwrap().dirty);
     }
 
     #[test]
-    fn insert_typing_cursor_movement_and_commit_at_exit() {
+    fn input_typing_cursor_movement_and_commit_at_validation() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
 
         // 1. Aller-retour sans modification de valeur mais avec déplacement curseur : dirty inchangé
-        update(&mut model, Message::EnterInsert);
-        update(&mut model, Message::InsertCursorLeft);
-        update(&mut model, Message::InsertCursorRight);
-        update(&mut model, Message::LeaveInsert);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Left));
+        update(&mut model, Message::InputKey(InputKey::Right));
+        update(&mut model, Message::ValidateInput);
         assert!(!model.editing.as_ref().unwrap().dirty);
         assert!(model.editing.as_ref().unwrap().pending.is_empty());
 
         // 2. Frappe, suppression, insertion en milieu de chaîne
-        update(&mut model, Message::EnterInsert);
+        update(&mut model, Message::Enter);
         // Curseur initial à la fin de "https://{{host}}/ping"
         // Ajout d'un caractère à la fin
-        update(&mut model, Message::InsertChar('s'));
+        update(&mut model, Message::InputKey(InputKey::Char('s')));
         // Déplacement à gauche
-        update(&mut model, Message::InsertCursorLeft);
-        update(&mut model, Message::InsertCursorLeft);
+        update(&mut model, Message::InputKey(InputKey::Left));
+        update(&mut model, Message::InputKey(InputKey::Left));
         // Insertion en milieu de chaîne
-        update(&mut model, Message::InsertChar('X'));
+        update(&mut model, Message::InputKey(InputKey::Char('X')));
         // Retour arrière : supprime le X qu'on vient d'insérer
-        update(&mut model, Message::InsertBackspace);
+        update(&mut model, Message::InputKey(InputKey::Backspace));
 
-        // Tant qu'on est en Insert, pending n'est PAS mis à jour à chaque frappe
+        // Pendant la saisie, pending n'est PAS mis à jour à chaque frappe
         assert!(model.editing.as_ref().unwrap().pending.is_empty());
 
-        // Sortie d'Insert
-        update(&mut model, Message::LeaveInsert);
+        // Validation de la saisie (Tab)
+        update(&mut model, Message::ValidateInput);
         assert!(model.editing.as_ref().unwrap().dirty);
         assert_eq!(model.editing.as_ref().unwrap().pending.len(), 1);
 
@@ -3676,7 +3734,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_enter_on_body_inserts_newline() {
+    fn input_enter_on_body_inserts_newline() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
         update(&mut model, Message::NextFocus);
@@ -3692,21 +3750,24 @@ mod tests {
             .expect("corps attendu");
         model.editing.as_mut().unwrap().cursor = body_cursor;
 
-        // Entrée en Insert sur le corps
-        update(&mut model, Message::EnterInsert);
+        // Début de la saisie du corps
+        update(&mut model, Message::Enter);
 
-        // InsertEnter insère un saut de ligne et RESTE en Insert
-        update(&mut model, Message::InsertEnter);
-        match &model.editing.as_ref().unwrap().mode {
-            EditMode::Insert { buffer, .. } => {
-                assert!(buffer.ends_with('\n'), "saut de ligne inséré");
+        // Entrée insère un saut de ligne et la saisie continue
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        match &model.editing.as_ref().unwrap().state {
+            EditState::Input(input) => {
+                assert!(input.text().ends_with('\n'), "saut de ligne inséré");
             }
-            EditMode::Normal => panic!("devrait rester en mode Insert sur le corps"),
+            EditState::FieldSelect => panic!("devrait rester en saisie sur le corps"),
         }
 
-        // Sortie par LeaveInsert (Échap)
-        update(&mut model, Message::LeaveInsert);
-        assert_eq!(model.editing.as_ref().unwrap().mode, EditMode::Normal);
+        // Validation par Tab
+        update(&mut model, Message::ValidateInput);
+        assert_eq!(
+            model.editing.as_ref().unwrap().state,
+            EditState::FieldSelect
+        );
         assert!(model.editing.as_ref().unwrap().dirty);
         assert_eq!(model.editing.as_ref().unwrap().pending.len(), 1);
     }
@@ -3723,9 +3784,9 @@ mod tests {
         assert!(matches!(cmd, Command::None));
 
         // 2. Modification -> session dirty
-        update(&mut model, Message::EnterInsert);
-        update(&mut model, Message::InsertChar('x'));
-        update(&mut model, Message::LeaveInsert);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('x')));
+        update(&mut model, Message::ValidateInput);
         assert!(model.editing.as_ref().unwrap().dirty);
 
         // 3. Session modifiée -> Command::SaveEdit avec path, ast, stamp, edits
@@ -3764,9 +3825,9 @@ mod tests {
         update(&mut model, Message::StartEdit);
 
         // Modification
-        update(&mut model, Message::EnterInsert);
-        update(&mut model, Message::InsertChar('x'));
-        update(&mut model, Message::LeaveInsert);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('x')));
+        update(&mut model, Message::ValidateInput);
 
         let initial_stamp = model.editing.as_ref().unwrap().stamp;
         let new_source = "get {\n  url: https://updated.example.com\n}\n";
@@ -3818,9 +3879,9 @@ mod tests {
         update(&mut model, Message::StartEdit);
 
         // Modification
-        update(&mut model, Message::EnterInsert);
-        update(&mut model, Message::InsertChar('x'));
-        update(&mut model, Message::LeaveInsert);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('x')));
+        update(&mut model, Message::ValidateInput);
 
         let pending_before = model.editing.as_ref().unwrap().pending.clone();
         let path = std::path::PathBuf::from("simple-get.bru");
@@ -3856,9 +3917,9 @@ mod tests {
         update(&mut model, Message::StartEdit);
 
         // Modification
-        update(&mut model, Message::EnterInsert);
-        update(&mut model, Message::InsertChar('x'));
-        update(&mut model, Message::LeaveInsert);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('x')));
+        update(&mut model, Message::ValidateInput);
 
         let pending_before = model.editing.as_ref().unwrap().pending.clone();
         let stamp_before = model.editing.as_ref().unwrap().stamp;
@@ -3906,9 +3967,9 @@ mod tests {
 
         // 2. Session modifiée (dirty) -> Échap (FocusTree) demande confirmation DiscardEdit
         update(&mut model, Message::StartEdit);
-        update(&mut model, Message::EnterInsert);
-        update(&mut model, Message::InsertChar('a'));
-        update(&mut model, Message::LeaveInsert);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('a')));
+        update(&mut model, Message::ValidateInput);
         assert!(model.editing.as_ref().unwrap().dirty);
 
         update(&mut model, Message::FocusTree);
@@ -3954,9 +4015,9 @@ mod tests {
         model.exit = None;
 
         // 3. Session modifiée (dirty) : Quit demande confirmation QuitWithUnsavedEdit
-        update(&mut model, Message::EnterInsert);
-        update(&mut model, Message::InsertChar('a'));
-        update(&mut model, Message::LeaveInsert);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('a')));
+        update(&mut model, Message::ValidateInput);
         assert!(model.editing.as_ref().unwrap().dirty);
 
         update(&mut model, Message::Quit);
@@ -3977,6 +4038,430 @@ mod tests {
         // Acceptation : sortie
         update(&mut model, Message::ConfirmYes);
         assert!(matches!(model.exit, Some(Exit::Normal)));
+    }
+
+    // --- Édition directe (`improve-direct-editing`) ---------------------
+
+    /// Modèle avec une session ouverte sur `path`, focus Détail.
+    fn edit_session(path: &str, size: (u16, u16)) -> Model {
+        let mut model = loaded_model(size);
+        select(&mut model, path);
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        assert!(model.editing.is_some(), "session ouverte sur {path}");
+        model
+    }
+
+    fn move_to_field(model: &mut Model, field: EditableField) {
+        let index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == field))
+            .expect("champ présent");
+        while model.editing.as_ref().map(|s| s.cursor) != Some(index) {
+            update(model, Message::Down);
+        }
+    }
+
+    fn type_input(model: &mut Model, text: &str) {
+        for c in text.chars() {
+            update(model, Message::InputKey(InputKey::Char(c)));
+        }
+    }
+
+    fn press(model: &mut Model, key: InputKey, times: usize) {
+        for _ in 0..times {
+            update(model, Message::InputKey(key));
+        }
+    }
+
+    fn input_of(model: &Model) -> &TextInput {
+        match &model.editing.as_ref().expect("session").state {
+            EditState::Input(input) => input,
+            EditState::FieldSelect => panic!("saisie attendue"),
+        }
+    }
+
+    fn shown_value(model: &Model, field: EditableField) -> String {
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        field_value(
+            model.editing.as_ref().expect("session"),
+            &request.view,
+            &field,
+        )
+        .to_owned()
+    }
+
+    fn session(model: &Model) -> &EditSession {
+        model.editing.as_ref().expect("session")
+    }
+
+    #[test]
+    fn enter_opens_the_session_and_e_is_an_alias() {
+        // Ouverture par Entrée, sur le premier champ, en sélection de champ.
+        let model = edit_session("simple-get.bru", (100, 30));
+        assert_eq!(session(&model).cursor, 0);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+
+        // Alias `e`.
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::StartEdit);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+
+        // Sans effet sur un dossier ni sur un nœud en erreur.
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "grp");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        assert!(model.editing.is_none());
+        select(&mut model, "broken.bru");
+        update(&mut model, Message::Enter);
+        assert!(model.editing.is_none());
+    }
+
+    #[test]
+    fn enter_keeps_its_meaning_outside_the_detail() {
+        // Arbre : déplie le dossier, comme `→`.
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "grp");
+        update(&mut model, Message::Enter);
+        assert!(model.tree.expanded.contains(Path::new("grp")));
+
+        // Sélecteur d'environnement : valide l'entrée, comme `→`.
+        let mut model = loaded_model((100, 30));
+        model.current_environment = Some("local".into());
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 0;
+        update(&mut model, Message::Enter);
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.current_environment, None);
+
+        // Réponse : onglet suivant, comme `→`.
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::Response;
+        update(&mut model, Message::Enter);
+        let mut expected = loaded_model((100, 30));
+        expected.focus = Focus::Response;
+        update(&mut expected, Message::Right);
+        assert_eq!(model.response_tab, expected.response_tab);
+    }
+
+    #[test]
+    fn validated_url_edit_marks_the_session_modified() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            input_of(&model).cursor(),
+            "https://{{host}}/ping".chars().count()
+        );
+        type_input(&mut model, "/v2");
+        // Rien n'est versé dans `pending` avant la validation.
+        assert!(session(&model).pending.is_empty());
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(
+            shown_value(&model, EditableField::Url),
+            "https://{{host}}/ping/v2"
+        );
+        assert!(session(&model).dirty);
+        assert_eq!(session(&model).cursor, 0, "même champ");
+    }
+
+    #[test]
+    fn escape_cancels_the_input_without_confirmation() {
+        let mut model = edit_session("post-json.bru", (100, 30));
+        move_to_field(&mut model, EditableField::HeaderValue(0));
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "xyz");
+        update(&mut model, Message::CancelInput);
+        assert!(model.confirm.is_none());
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(
+            shown_value(&model, EditableField::HeaderValue(0)),
+            "application/json"
+        );
+        assert!(!session(&model).dirty);
+        assert!(!session(&model).has_unsaved());
+    }
+
+    #[test]
+    fn cancel_after_a_previous_validation_restores_the_validated_value() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "b");
+        update(&mut model, Message::ValidateInput);
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "zzz");
+        update(&mut model, Message::CancelInput);
+        assert_eq!(
+            shown_value(&model, EditableField::Url),
+            "https://{{host}}/pingb"
+        );
+        assert!(session(&model).dirty);
+    }
+
+    #[test]
+    fn body_enter_inserts_a_line_and_tab_validates() {
+        let mut model = edit_session("post-json.bru", (100, 30));
+        move_to_field(&mut model, EditableField::BodyText);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        type_input(&mut model, "ajout");
+        assert!(matches!(session(&model).state, EditState::Input(_)));
+        update(&mut model, Message::ValidateInput);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(shown_value(&model, EditableField::BodyText).ends_with("\najout"));
+        assert!(session(&model).dirty);
+    }
+
+    #[test]
+    fn unchanged_value_does_not_mark_the_session_modified() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "x");
+        press(&mut model, InputKey::Backspace, 1);
+        update(&mut model, Message::ValidateInput);
+        assert!(!session(&model).dirty);
+        assert!(session(&model).pending.is_empty());
+    }
+
+    #[test]
+    fn has_unsaved_covers_validated_and_in_progress_edits() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        update(&mut model, Message::Enter);
+        assert!(!session(&model).has_unsaved(), "saisie inchangée");
+        type_input(&mut model, "x");
+        assert!(session(&model).has_unsaved(), "saisie modifiée");
+        assert!(!session(&model).dirty);
+        update(&mut model, Message::ValidateInput);
+        assert!(session(&model).has_unsaved(), "modification validée");
+    }
+
+    #[test]
+    fn free_text_cursor_through_update() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        update(&mut model, Message::Enter);
+
+        // Insertion au milieu : après « https://{{host}} ».
+        press(&mut model, InputKey::Home, 1);
+        press(&mut model, InputKey::Right, "https://{{host}}".len());
+        type_input(&mut model, "-v2");
+        assert_eq!(input_of(&model).text(), "https://{{host}}-v2/ping");
+
+        // Début et Fin.
+        press(&mut model, InputKey::Home, 1);
+        type_input(&mut model, "x");
+        press(&mut model, InputKey::End, 1);
+        type_input(&mut model, "y");
+        assert_eq!(input_of(&model).text(), "xhttps://{{host}}-v2/pingy");
+
+        // Suppression arrière et avant.
+        press(&mut model, InputKey::Home, 1);
+        press(&mut model, InputKey::Right, 2);
+        press(&mut model, InputKey::Backspace, 1);
+        press(&mut model, InputKey::Delete, 1);
+        assert_eq!(input_of(&model).text(), "xtps://{{host}}-v2/pingy");
+        assert_eq!(input_of(&model).cursor(), 1);
+
+        // Extrémités.
+        press(&mut model, InputKey::Home, 1);
+        press(&mut model, InputKey::Left, 1);
+        press(&mut model, InputKey::Backspace, 1);
+        assert_eq!(input_of(&model).text(), "xtps://{{host}}-v2/pingy");
+        assert_eq!(input_of(&model).cursor(), 0);
+
+        // ↑/↓ sans effet sur un champ à une ligne.
+        press(&mut model, InputKey::Down, 1);
+        assert_eq!(input_of(&model).cursor(), 0);
+
+        // Caractère multi-octet.
+        press(&mut model, InputKey::End, 1);
+        type_input(&mut model, "é");
+        press(&mut model, InputKey::Backspace, 1);
+        assert_eq!(input_of(&model).text(), "xtps://{{host}}-v2/pingy");
+    }
+
+    #[test]
+    fn body_vertical_moves_and_line_join_through_update() {
+        let mut model = edit_session("post-json.bru", (100, 30));
+        move_to_field(&mut model, EditableField::BodyText);
+        update(&mut model, Message::Enter);
+        let lines_before = input_of(&model).text().split('\n').count();
+        // Curseur en fin de corps (dernière ligne `}`) ; ↑ remonte d'une ligne.
+        let (last, _) = input_of(&model).cursor_line_col();
+        press(&mut model, InputKey::Up, 1);
+        assert_eq!(input_of(&model).cursor_line_col().0, last - 1);
+        press(&mut model, InputKey::Down, 1);
+        assert_eq!(input_of(&model).cursor_line_col().0, last);
+        // Jointure : début de la dernière ligne, Retour arrière.
+        press(&mut model, InputKey::Home, 1);
+        press(&mut model, InputKey::Backspace, 1);
+        assert_eq!(
+            input_of(&model).text().split('\n').count(),
+            lines_before - 1
+        );
+    }
+
+    #[test]
+    fn save_from_input_validates_then_saves() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        // Sauvegarde sans modification : aucune écriture.
+        assert!(matches!(
+            update(&mut model, Message::SaveEdit),
+            Command::None
+        ));
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "!");
+        match update(&mut model, Message::SaveEdit) {
+            Command::SaveEdit { edits, .. } => {
+                assert_eq!(edits, vec![FieldEdit::Url("https://{{host}}/ping!".into())]);
+            }
+            other => panic!("Command::SaveEdit attendu : {other:?}"),
+        }
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        // Hors session, Ctrl+S est sans effet.
+        let mut model = loaded_model((100, 30));
+        assert!(matches!(
+            update(&mut model, Message::SaveEdit),
+            Command::None
+        ));
+    }
+
+    #[test]
+    fn quitting_during_a_modified_input_asks_and_keeps_the_input() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "abc");
+        press(&mut model, InputKey::Left, 1);
+
+        // `q` en saisie est du texte.
+        update(&mut model, Message::InputKey(InputKey::Char('q')));
+        assert!(model.confirm.is_none());
+        assert!(model.exit.is_none());
+        assert_eq!(input_of(&model).text(), "https://{{host}}/pingabqc");
+        let cursor = input_of(&model).cursor();
+
+        update(&mut model, Message::ForceQuit);
+        assert_eq!(model.confirm, Some(PendingConfirm::QuitWithUnsavedEdit));
+        // La confirmation reprend le clavier : plus de capture de texte.
+        assert_eq!(model.text_capture(), None);
+        update(&mut model, Message::FocusTree);
+        assert!(model.exit.is_none());
+        assert_eq!(input_of(&model).text(), "https://{{host}}/pingabqc");
+        assert_eq!(input_of(&model).cursor(), cursor);
+        assert_eq!(
+            model.text_capture(),
+            Some(crate::app::message::TextCapture::Input)
+        );
+    }
+
+    #[test]
+    fn selection_change_is_refused_while_the_session_is_modified() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "!");
+        update(&mut model, Message::ValidateInput);
+        let selected = model.tree.selected;
+
+        // Navigation dans l'arbre.
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::NextFocus);
+        assert_eq!(model.focus, Focus::Tree);
+        update(&mut model, Message::Down);
+        assert_eq!(model.tree.selected, selected);
+        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
+        assert!(session(&model).dirty);
+
+        // Recherche dans l'arbre.
+        model.last_status = None;
+        update(&mut model, Message::StartSearch);
+        for c in "inherit".chars() {
+            update(&mut model, Message::SearchInput(c));
+        }
+        update(&mut model, Message::ConfirmSearch);
+        assert_eq!(model.tree.selected, selected);
+        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
+        assert!(!model.tree.expanded.contains(Path::new("grp")));
+
+        // Navigation croisée depuis les diagnostics.
+        model.last_status = None;
+        model.focus = Focus::Diagnostics;
+        model.diagnostics_selected = 1;
+        update(&mut model, Message::Right);
+        assert_eq!(model.tree.selected, selected);
+        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
+        assert!(session(&model).dirty);
+
+        // Une navigation qui ne change pas de nœud reste permise.
+        model.last_status = None;
+        model.focus = Focus::Tree;
+        update(&mut model, Message::Left);
+        assert!(model.last_status.is_none());
+        assert!(model.editing.is_some());
+    }
+
+    #[test]
+    fn clean_session_is_closed_on_selection_change() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::CancelInput);
+        model.focus = Focus::Tree;
+        let before = model.tree.selected;
+        update(&mut model, Message::Down);
+        assert_ne!(model.tree.selected, before);
+        assert!(model.editing.is_none());
+    }
+
+    #[test]
+    fn field_cursor_and_text_cursor_stay_visible() {
+        // Terminal bas : le corps de post-json est hors écran au départ.
+        let mut model = edit_session("post-json.bru", (100, 12));
+        let height = layout_for(model.size)
+            .map(|a| inner(a.detail).height)
+            .expect("layout");
+        assert_eq!(model.detail_scroll, 0);
+        move_to_field(&mut model, EditableField::BodyText);
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        let (_, lines) = request_text_and_fields(request, model.editing.as_ref());
+        let body = lines
+            .iter()
+            .find(|l| l.field == EditableField::BodyText)
+            .expect("corps")
+            .line as u16;
+        assert!(model.detail_scroll <= body && body < model.detail_scroll + height);
+
+        // Nouvelle ligne en bas du corps : le détail suit le curseur.
+        update(&mut model, Message::Enter);
+        press(&mut model, InputKey::Enter, 3);
+        let (line, _) = input_of(&model).cursor_line_col();
+        let target = body + line as u16;
+        assert!(
+            model.detail_scroll <= target && target < model.detail_scroll + height,
+            "ligne {target} visible (défilement {})",
+            model.detail_scroll
+        );
+
+        // URL plus large que le panneau : décalage horizontal.
+        let mut model = edit_session("simple-get.bru", (60, 20));
+        let width = layout_for(model.size)
+            .map(|a| inner(a.detail).width)
+            .expect("layout");
+        update(&mut model, Message::Enter);
+        type_input(&mut model, &"a".repeat(usize::from(width) * 2));
+        let hscroll = session(&model).hscroll;
+        assert!(hscroll > 0);
+        press(&mut model, InputKey::Home, 1);
+        assert_eq!(session(&model).hscroll, 0);
+        press(&mut model, InputKey::End, 1);
+        assert_eq!(session(&model).hscroll, hscroll);
+        update(&mut model, Message::ValidateInput);
+        assert_eq!(session(&model).hscroll, 0);
     }
 
     #[test]
@@ -4346,6 +4831,14 @@ mod tests {
                 key: "TOKEN".into()
             }
         );
+    }
+
+    #[test]
+    fn enter_opens_the_secret_input_like_right() {
+        let mut model = local_model();
+        update(&mut model, Message::ToggleSecrets);
+        update(&mut model, Message::Enter);
+        assert!(model.secrets.input.is_some());
     }
 
     #[test]

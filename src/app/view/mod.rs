@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{
-    CollectionState, EditMode, Focus, Model, PendingConfirm, RunFailure, StatusMessage,
+    CollectionState, EditState, Focus, Model, PendingConfirm, RunFailure, StatusMessage,
 };
 use crate::collection::TreeNode;
 
@@ -165,13 +165,17 @@ pub fn view(model: &Model, frame: &mut Frame) {
             }
             Focus::Tree | Focus::Detail | Focus::Response => {
                 render_tree(model, frame, areas.tree);
-                frame.render_widget(
-                    Paragraph::new(detail::render_text(model))
-                        .wrap(Wrap { trim: false })
-                        .scroll((model.detail_scroll, 0))
-                        .block(panel(" Détail ", model.focus == Focus::Detail)),
-                    areas.detail,
-                );
+                // Pendant une saisie, pas de retour à la ligne : une ligne
+                // logique = une ligne affichée, pour que le curseur de texte
+                // et le décalage horizontal tombent exactement
+                // (`improve-direct-editing`, D7).
+                let mut detail = Paragraph::new(detail::render_text(model))
+                    .scroll((model.detail_scroll, 0))
+                    .block(panel(" Détail ", model.focus == Focus::Detail));
+                if !input_in_progress(model) {
+                    detail = detail.wrap(Wrap { trim: false });
+                }
+                frame.render_widget(detail, areas.detail);
                 render_insert_cursor(model, frame, areas.detail);
                 render_status_panel(model, frame, &areas);
                 render_response(model, frame, areas.response);
@@ -185,11 +189,21 @@ pub fn view(model: &Model, frame: &mut Frame) {
     );
 }
 
+/// Une saisie de champ est en cours sur la requête affichée.
+fn input_in_progress(model: &Model) -> bool {
+    match (&model.editing, model.selected_node()) {
+        (Some(session), Some(TreeNode::Request(request))) => {
+            request.path == session.path && matches!(session.state, EditState::Input(_))
+        }
+        _ => false,
+    }
+}
+
 fn render_insert_cursor(model: &Model, frame: &mut Frame, detail_area: Rect) {
     let Some(session) = &model.editing else {
         return;
     };
-    if !matches!(session.mode, EditMode::Insert { .. }) {
+    if !matches!(session.state, EditState::Input(_)) {
         return;
     }
     let Some(TreeNode::Request(req)) = model.selected_node() else {
@@ -214,7 +228,8 @@ fn render_insert_cursor(model: &Model, frame: &mut Frame, detail_area: Rect) {
         return;
     }
     let cursor_y = inner_area.y + rel_y as u16;
-    let cursor_x = inner_area.x + (col_index as u16).min(inner_area.width.saturating_sub(1));
+    let col_index = u16::try_from(col_index).unwrap_or(u16::MAX);
+    let cursor_x = inner_area.x + col_index.min(inner_area.width.saturating_sub(1));
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
@@ -323,7 +338,40 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::ClipboardError(reason) => format!("Échec de la copie : {reason}"),
         StatusMessage::NoMatch => "Aucune correspondance".to_owned(),
         StatusMessage::SaveError(reason) => format!("Échec de sauvegarde : {reason}"),
+        StatusMessage::EditLocked => {
+            "Modifications non enregistrées : Ctrl+S pour enregistrer, Échap pour abandonner"
+                .to_owned()
+        }
     }
+}
+
+/// Barre d'aide d'une session d'édition : état, champ, indicateur de
+/// modification non enregistrée et touches utiles à l'état.
+fn session_help_line(model: &Model, session: &crate::app::model::EditSession) -> String {
+    let field_name = match (session.current_field(), model.selected_node()) {
+        (Some(field), Some(TreeNode::Request(req))) => field.display_name(&req.view),
+        _ => String::new(),
+    };
+    let unsaved = if session.has_unsaved() {
+        " ● non enregistré"
+    } else {
+        ""
+    };
+    let (state, keys) = match &session.state {
+        EditState::FieldSelect => (
+            "Sélection",
+            "↑↓ champ  Entrée modifier  Espace activer  Ctrl+S enregistrer  Échap fermer",
+        ),
+        EditState::Input(input) if input.is_multiline() => (
+            "Saisie",
+            "Entrée nouvelle ligne  Tab valider  Échap annuler  Ctrl+S enregistrer",
+        ),
+        EditState::Input(_) => (
+            "Saisie",
+            "Entrée valider  Tab valider  Échap annuler  Ctrl+S enregistrer",
+        ),
+    };
+    format!("{state} · {field_name}{unsaved} — {keys}")
 }
 
 fn status_line(model: &Model) -> String {
@@ -351,19 +399,7 @@ fn status_line(model: &Model) -> String {
         return status_message_text(message);
     }
     if let Some(session) = &model.editing {
-        let mode_str = match &session.mode {
-            EditMode::Normal => "-- NORMAL --",
-            EditMode::Insert { .. } => "-- INSERT --",
-        };
-        let field_name = match (session.fields.get(session.cursor), model.selected_node()) {
-            (Some(field), Some(TreeNode::Request(req))) => field.display_name(&req.view),
-            _ => String::new(),
-        };
-        return if field_name.is_empty() {
-            mode_str.to_owned()
-        } else {
-            format!("{mode_str}  {field_name}")
-        };
+        return session_help_line(model, session);
     }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
@@ -371,7 +407,7 @@ fn status_line(model: &Model) -> String {
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
-            "↑↓ défiler  Début/Fin  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
+            "↑↓ défiler  Début/Fin  Entrée éditer  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Diagnostics) => {
@@ -811,9 +847,12 @@ mod tests {
         );
 
         // Édition de l'URL
-        update(&mut model, Message::EnterInsert);
-        update(&mut model, Message::InsertChar('!'));
-        update(&mut model, Message::LeaveInsert);
+        update(&mut model, Message::Enter);
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Char('!')),
+        );
+        update(&mut model, Message::ValidateInput);
 
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let buffer = terminal.backend().buffer();
@@ -833,33 +872,126 @@ mod tests {
         // 1. Aucune session : contenu habituel
         let line = status_line(&model);
         assert!(line.contains("q quitter"));
-        assert!(!line.contains("-- NORMAL --"));
-        assert!(!line.contains("-- INSERT --"));
+        assert!(!line.contains("Sélection ·"));
 
-        // 2. Session ouverte en mode Normal
+        // 2. Session ouverte en sélection de champ
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
+        assert!(status_line(&model).contains("Entrée éditer"));
         update(&mut model, Message::StartEdit);
         let line = status_line(&model);
-        assert!(line.contains("-- NORMAL --"));
-        assert!(line.contains("Url"));
+        assert!(line.contains("Sélection · Url"), "{line}");
+        assert!(line.contains("Entrée modifier"), "{line}");
+        assert!(line.contains("Ctrl+S enregistrer"), "{line}");
+        assert!(line.contains("Échap fermer"), "{line}");
+        assert!(!line.contains("non enregistré"), "{line}");
 
-        // 3. Session en mode Insert
-        update(&mut model, Message::EnterInsert);
+        // 3. Barre d'aide en saisie de l'URL
+        update(&mut model, Message::Enter);
         let line = status_line(&model);
-        assert!(line.contains("-- INSERT --"));
-        assert!(line.contains("Url"));
+        assert!(line.contains("Saisie · Url"), "{line}");
+        assert!(line.contains("Entrée valider"), "{line}");
+        assert!(line.contains("Échap annuler"), "{line}");
+        assert!(line.contains("Ctrl+S enregistrer"), "{line}");
 
-        // 4. Confirmation active (prioritaire)
-        update(&mut model, Message::LeaveInsert);
+        // 4. Indicateur de modification : saisie modifiée, puis validée
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Char('x')),
+        );
+        assert!(status_line(&model).contains("● non enregistré"));
+        update(&mut model, Message::ValidateInput);
+        let line = status_line(&model);
+        assert!(line.contains("Sélection · Url ● non enregistré"), "{line}");
+
+        // 5. Confirmation active (prioritaire)
         model.confirm = Some(PendingConfirm::DiscardEdit);
         let line = status_line(&model);
         assert!(line.contains("Abandonner les modifications ?"), "{line}");
-        assert!(!line.contains("-- NORMAL --"));
+        assert!(!line.contains("Sélection ·"));
 
         model.confirm = Some(PendingConfirm::QuitWithUnsavedEdit);
         let line = status_line(&model);
         assert!(line.contains("Quitter sans sauvegarder"), "{line}");
+    }
+
+    #[test]
+    fn help_line_while_editing_the_body() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::StartEdit);
+        let body = model.editing.as_ref().expect("session").fields.len() - 1;
+        for _ in 0..body {
+            update(&mut model, Message::Down);
+        }
+        update(&mut model, Message::Enter);
+        let line = status_line(&model);
+        assert!(line.contains("Saisie · Corps"), "{line}");
+        assert!(line.contains("Entrée nouvelle ligne"), "{line}");
+        assert!(line.contains("Tab valider"), "{line}");
+        // Indicateur effacé après une sauvegarde réussie.
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Char('x')),
+        );
+        update(&mut model, Message::ValidateInput);
+        assert!(status_line(&model).contains("● non enregistré"));
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        let saved = crate::app::model::SavedEdit {
+            stamp: model.editing.as_ref().expect("session").stamp,
+            ast: request.ast.clone().expect("ast"),
+            view: request.view.clone(),
+        };
+        update(
+            &mut model,
+            Message::EditSaved {
+                path: "post-json.bru".into(),
+                result: Ok(saved),
+            },
+        );
+        assert!(!status_line(&model).contains("non enregistré"));
+    }
+
+    #[test]
+    fn wide_url_input_keeps_the_text_cursor_inside_the_panel() {
+        let mut model = loaded_model((60, 20));
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::Enter);
+        for _ in 0..80 {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char('a')),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Char('Z')),
+        );
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).expect("terminal");
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let inner_area = inner(layout_for((60, 20)).expect("layout").detail);
+        let cursor = terminal.get_cursor_position().expect("curseur");
+        assert!(cursor.x >= inner_area.x && cursor.x < inner_area.x + inner_area.width);
+
+        // La fin de l'URL est visible juste avant le curseur, sur la ligne
+        // de l'URL qui n'est pas repliée.
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(cursor.x - 1, cursor.y)].symbol(), "Z");
+        let row: String = (inner_area.x..inner_area.x + inner_area.width)
+            .map(|x| buffer[(x, cursor.y)].symbol())
+            .collect();
+        assert!(row.starts_with("GET "), "préfixe conservé : {row}");
+        let next: String = (inner_area.x..inner_area.x + inner_area.width)
+            .map(|x| buffer[(x, cursor.y + 1)].symbol())
+            .collect();
+        assert!(next.contains("Auth"), "pas de retour à la ligne : {next}");
     }
 
     #[test]
@@ -872,11 +1004,11 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
 
-        // En mode Normal : pas de curseur positionné
+        // En sélection de champ : pas de curseur positionné
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
 
-        // En mode Insert : curseur positionné
-        update(&mut model, Message::EnterInsert);
+        // En saisie : curseur positionné
+        update(&mut model, Message::Enter);
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("cursor position");
 

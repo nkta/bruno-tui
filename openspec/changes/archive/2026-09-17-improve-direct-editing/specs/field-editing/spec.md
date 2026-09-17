@@ -1,13 +1,4 @@
-# field-editing Specification
-
-## Purpose
-
-Permettre de modifier, depuis le panneau de détail d'une requête, les
-champs déjà présents dans son fichier `.bru` (URL, en-têtes, paramètres,
-corps textuel), avec une ergonomie vim (modes Normal et Insert) et une
-sauvegarde explicite et sûre vers le disque.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Ouverture et fermeture d'une session d'édition
 Le système SHALL permettre d'ouvrir une session d'édition sur la requête
@@ -149,18 +140,6 @@ l'écriture MUST NOT bloquer la saisie ni le rendu.
   disque est lente
 - **THEN** l'interface continue de répondre aux touches pendant l'écriture
 
-### Requirement: Échec de sauvegarde sans perte
-Le système SHALL afficher un message explicite quand `bru-writer` refuse
-l'écriture (fichier modifié depuis l'ouverture de la session, erreur
-d'entrée-sortie), et MUST NOT perdre la modification en mémoire dans ce
-cas : la session reste ouverte, modifiée, avec les mêmes valeurs.
-
-#### Scenario: Fichier modifié entre-temps
-- **WHEN** le fichier de la requête a été modifié sur disque depuis
-  l'ouverture de la session, et l'utilisateur sauvegarde
-- **THEN** un message signale le conflit, la session reste ouverte et
-  modifiée, rien n'est écrasé sur disque
-
 ### Requirement: Confirmation avant de quitter avec des modifications non sauvegardées
 Le système SHALL demander confirmation avant de fermer le terminal si une
 session d'édition porte des modifications non enregistrées au moment où
@@ -196,6 +175,25 @@ ouverte, dans son état et avec sa saisie éventuelle intacts.
 - **THEN** l'application se ferme sans confirmation, comme `tui-shell` le
   définit déjà
 
+## REMOVED Requirements
+
+### Requirement: Barre de mode
+**Reason**: La barre de mode Normal/Insert disparaît avec les modes vim ;
+elle est remplacée par une barre d'aide qui rappelle aussi les touches
+utiles et l'état non enregistré.
+**Migration**: Voir « Barre d'aide de la session ».
+
+### Requirement: Mode Insert et édition de texte
+**Reason**: Les modes vim Normal/Insert sont remplacés par les états
+Sélection de champ et Saisie ; `i` ne sert plus à entrer en saisie et
+`Échap` annule la saisie au lieu de la conserver.
+**Migration**: Utiliser `Entrée` pour commencer la saisie du champ sous
+le curseur, `Entrée` (champ à une ligne) ou `Tab` (tout champ) pour
+valider, `Échap` pour annuler ; voir « Saisie d'un champ » et « Curseur
+de texte libre ».
+
+## ADDED Requirements
+
 ### Requirement: Barre d'aide de la session
 Le système SHALL afficher, quand une session d'édition est ouverte, à la
 place de la barre d'état habituelle du panneau de détail : l'état courant
@@ -225,6 +223,7 @@ habituelle.
 - **WHEN** une session porte une modification validée non enregistrée
 - **THEN** la barre affiche l'indicateur de modification non enregistrée
 - **AND** l'indicateur disparaît après une sauvegarde réussie
+
 
 ### Requirement: Saisie d'un champ
 Dans l'état Sélection de champ, le système SHALL commencer la saisie du
