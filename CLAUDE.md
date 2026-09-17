@@ -56,3 +56,11 @@ Ce projet suit OpenSpec. Avant toute modification de code, vérifier
 qu'un changement correspondant existe dans `openspec/changes/`.
 Si la demande ne rentre dans aucun changement actif, le dire et
 proposer `/opsx:propose` plutôt que de coder directement.
+
+Quand un travail peut être parallélisé (tâches indépendantes d'un
+changement, exploration, tests ou revues concurrentes) :
+- Isoler les contextes d'exécution via des **git worktrees** dédiés.
+- Utiliser le skill `/herdr` pour orchestrer, superviser et distribuer
+  les tâches entre plusieurs agents.
+- Utiliser le skill `/loop` pour piloter les boucles itératives
+  (ex. cycles d'implémentation / tests / corrections).
