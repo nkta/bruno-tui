@@ -222,9 +222,9 @@ async fn launching_a_request_shows_its_result() {
     // `ok` (seq 1) est le premier nœud de `runner-probe` : sélectionné par
     // défaut, sans navigation.
     let collection = BruLoader.load(&runner_probe()).expect("collection chargée");
-    // Terminal haut : le texte du détail (requête + section « Résultat »)
-    // dépasse largement une hauteur usuelle, et le test vérifie à la fois le
-    // verdict et le message d'assertion sans faire défiler.
+    // Terminal haut : le texte du détail dépasse largement une hauteur
+    // usuelle, et le test vérifie à la fois le verdict (panneau Statut) et
+    // le message d'assertion sans faire défiler.
     let (sender, handle, open) =
         spawn_app(collection, runner_probe(), fake_bru(), (100, 150)).await;
 
@@ -249,7 +249,8 @@ async fn launching_a_request_shows_its_result() {
     let _ = open.send(());
     assert!(matches!(exit, Exit::Normal));
     let screen = screen(&terminal).join("\n");
-    assert!(screen.contains("Verdict : échec"), "{screen}");
+    // Verdict affiché par le panneau Statut (`status-panel`).
+    assert!(screen.contains("● échec"), "{screen}");
     assert!(screen.contains("expected 200 to equal 404"), "{screen}");
     assert!(screen.contains(FAILURE_MARK), "{screen}");
 }

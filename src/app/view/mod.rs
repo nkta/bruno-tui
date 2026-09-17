@@ -6,6 +6,7 @@
 
 pub mod detail;
 pub mod panels;
+pub mod status;
 pub mod theme;
 pub mod tree;
 
@@ -34,6 +35,14 @@ const MIN_DETAIL_WIDTH: u16 = 18;
 /// Largeur minimale du panneau de réponse.
 const MIN_RESPONSE_WIDTH: u16 = 18;
 
+/// Hauteur du panneau Statut en forme complète (3 lignes intérieures).
+const STATUS_PANEL_HEIGHT: u16 = 5;
+/// Hauteur du panneau Statut en forme compacte (1 ligne intérieure).
+const STATUS_PANEL_COMPACT_HEIGHT: u16 = 3;
+/// Hauteur de terminal à partir de laquelle le panneau Statut prend sa
+/// forme complète (`status-panel`, `design.md` D3).
+const STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT: u16 = 20;
+
 const TOO_SMALL: &str = "Terminal trop petit : agrandir à 60×10 au moins.";
 
 /// Zones de l'écran.
@@ -44,8 +53,19 @@ pub struct Areas {
     pub body: Rect,
     pub tree: Rect,
     pub detail: Rect,
+    /// Panneau Statut, au-dessus de la réponse, même largeur.
+    pub response_status: Rect,
+    /// Panneau Réponse, sous le panneau Statut.
     pub response: Rect,
+    /// Barre d'état du bas de l'écran.
     pub status: Rect,
+}
+
+impl Areas {
+    /// Vrai si le panneau Statut est en forme compacte.
+    pub fn status_panel_compact(&self) -> bool {
+        self.response_status.height < STATUS_PANEL_HEIGHT
+    }
 }
 
 /// Découpe l'écran ; `None` sous la taille minimale.
@@ -59,16 +79,23 @@ pub fn layout(area: Rect) -> Option<Areas> {
     let remaining = area.width - tree_width;
     let detail_width = (remaining * 50 / 100).max(MIN_DETAIL_WIDTH);
     let response_width = (remaining - detail_width).max(MIN_RESPONSE_WIDTH);
+    let response_x = body.x + tree_width + detail_width;
+    let status_panel_height = if area.height >= STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT {
+        STATUS_PANEL_HEIGHT
+    } else {
+        STATUS_PANEL_COMPACT_HEIGHT
+    };
     Some(Areas {
         title: Rect::new(area.x, area.y, area.width, 1),
         body,
         tree: Rect::new(body.x, body.y, tree_width, body_height),
         detail: Rect::new(body.x + tree_width, body.y, detail_width, body_height),
+        response_status: Rect::new(response_x, body.y, response_width, status_panel_height),
         response: Rect::new(
-            body.x + tree_width + detail_width,
-            body.y,
+            response_x,
+            body.y + status_panel_height,
             response_width,
-            body_height,
+            body_height - status_panel_height,
         ),
         status: Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     })
@@ -105,7 +132,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 areas.tree,
             );
             frame.render_widget(panel(" Détail ", false), areas.detail);
-            frame.render_widget(panel(" Réponse ", false), areas.response);
+            frame.render_widget(panel(" Réponse ", false), response_column(&areas));
         }
         CollectionState::Failed(error) => {
             let lines = vec![
@@ -146,6 +173,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     areas.detail,
                 );
                 render_insert_cursor(model, frame, areas.detail);
+                render_status_panel(model, frame, &areas);
                 render_response(model, frame, areas.response);
             }
         },
@@ -413,6 +441,22 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
+/// Colonne de réponse entière (Statut et Réponse réunis), pour les états
+/// où le panneau Statut n'est pas affiché.
+fn response_column(areas: &Areas) -> Rect {
+    areas.response_status.union(areas.response)
+}
+
+/// Dessine le panneau Statut (`status-panel`) : jamais focalisable, donc
+/// toujours bordé de la couleur ordinaire.
+fn render_status_panel(model: &Model, frame: &mut Frame, areas: &Areas) {
+    let lines = status::status_panel_lines(model, areas.status_panel_compact());
+    frame.render_widget(
+        Paragraph::new(lines).block(panel(" Statut ", false)),
+        areas.response_status,
+    );
+}
+
 /// Dessine le panneau Réponse : le résultat de la dernière exécution de la
 /// requête sélectionnée, ou un message unique délibérément centré quand
 /// il n'y en a aucun (`visual-theme`, `split-request-response-panels`).
@@ -552,6 +596,41 @@ mod tests {
             60
         );
         assert_eq!(areas.tree.height, 8);
+        // Panneau Statut compact au-dessus d'une réponse qui garde au
+        // moins une ligne intérieure (`status-panel`).
+        assert_eq!(areas.response_status.height, 3);
+        assert_eq!(areas.response.height, 5);
+        assert!(inner(areas.response).height >= 1);
+        assert!(areas.status_panel_compact());
+    }
+
+    #[test]
+    fn status_panel_is_stacked_above_the_response() {
+        for (size, status_height) in [
+            ((60, 10), 3),
+            ((100, 19), 3),
+            ((100, 20), 5),
+            ((100, 30), 5),
+        ] {
+            let areas = layout_for(size).expect("taille suffisante");
+            let (status, response) = (areas.response_status, areas.response);
+            assert_eq!(status.height, status_height, "{size:?}");
+            assert_eq!(status.height == 3, areas.status_panel_compact(), "{size:?}");
+            assert_eq!(
+                (status.x, status.width),
+                (response.x, response.width),
+                "{size:?}"
+            );
+            assert_eq!(status.y, areas.body.y, "{size:?}");
+            assert_eq!(response.y, status.bottom(), "{size:?}");
+            assert_eq!(
+                status.height + response.height,
+                areas.body.height,
+                "{size:?}"
+            );
+            assert_eq!(areas.tree.height, areas.body.height, "{size:?}");
+            assert_eq!(areas.detail.height, areas.body.height, "{size:?}");
+        }
     }
 
     /// À la taille minimale, les trois panneaux sont affichés ; juste
@@ -856,8 +935,9 @@ mod tests {
         let lines = render(&model, 100, 30);
         let screen = lines.join("\n");
         assert!(screen.contains("Réponse"), "{screen}");
-        assert!(screen.contains("Résultat"), "{screen}");
-        assert!(screen.contains("Verdict"), "{screen}");
+        assert!(screen.contains("Statut"), "{screen}");
+        assert!(screen.contains(" 200  OK"), "{screen}");
+        assert!(screen.contains("✓ réussi"), "{screen}");
         let detail_col_end = layout_for((100, 30)).expect("layout").detail.right();
         let detail_only: String = lines
             .iter()
@@ -869,7 +949,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            !detail_only.contains("Résultat"),
+            !detail_only.contains("réussi"),
             "le détail ne doit plus afficher le résultat :\n{detail_only}"
         );
 
@@ -908,9 +988,12 @@ mod tests {
         ] {
             model.response_tab = tab;
             let screen = render(&model, 100, 30).join("\n");
-            assert!(screen.contains("Résultat"), "{tab:?} :\n{screen}");
-            assert!(screen.contains("Verdict"), "{tab:?} :\n{screen}");
-            assert!(screen.contains("Statut : 200"), "{tab:?} :\n{screen}");
+            assert!(screen.contains(" 200  OK"), "{tab:?} :\n{screen}");
+            assert!(screen.contains("6 ms · 21 o"), "{tab:?} :\n{screen}");
+            assert!(screen.contains("✓ réussi · 2/2"), "{tab:?} :\n{screen}");
+            // Aucune répétition dans le panneau Réponse.
+            let response = detail::response_plain_lines(&model).join("\n");
+            assert!(!response.contains("Verdict"), "{tab:?} :\n{response}");
         }
     }
 
@@ -1287,5 +1370,170 @@ mod tests {
         let model = loaded_model((100, 30));
         let status = &render(&model, 100, 30)[29];
         assert!(status.contains("S secrets"), "{status}");
+    }
+
+    /// Lignes de l'écran restreintes à un rectangle.
+    fn region(lines: &[String], area: Rect) -> Vec<String> {
+        lines[usize::from(area.y)..usize::from(area.bottom())]
+            .iter()
+            .map(|line| {
+                line.chars()
+                    .skip(usize::from(area.x))
+                    .take(usize::from(area.width))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn status_panel_is_drawn_above_the_response_panel() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        let lines = render(&model, 100, 30);
+        let areas = layout_for((100, 30)).expect("layout");
+        let status = region(&lines, areas.response_status);
+        assert!(status[0].contains("Statut"), "{status:?}");
+        assert!(status[1].contains(" 200  OK"), "{status:?}");
+        assert!(status[2].contains("6 ms · 21 o"), "{status:?}");
+        assert!(status[3].contains("✓ réussi · 2/2"), "{status:?}");
+        let response = region(&lines, areas.response);
+        assert!(response[0].contains("Réponse"), "{response:?}");
+        assert!(!response.join("\n").contains("200"), "{response:?}");
+    }
+
+    #[test]
+    fn status_panel_is_hidden_by_full_body_panels_and_loading_states() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        for focus in [
+            Focus::History,
+            Focus::Diagnostics,
+            Focus::EnvironmentPicker,
+            Focus::Secrets,
+        ] {
+            model.focus = focus;
+            let screen = render(&model, 100, 30).join("\n");
+            assert!(!screen.contains(" Statut "), "{focus:?} :\n{screen}");
+        }
+
+        let loading = Model::new(fixture(), (100, 30));
+        let screen = render(&loading, 100, 30).join("\n");
+        assert!(!screen.contains(" Statut "), "{screen}");
+    }
+
+    #[test]
+    fn status_panel_never_takes_the_focus_style() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        let areas = layout_for((100, 30)).expect("layout");
+        let focus_fg = theme::FOCUS.fg.expect("fg défini");
+        let mut foci = Vec::new();
+        for _ in 0..3 {
+            update(&mut model, Message::NextFocus);
+            foci.push(model.focus);
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                .expect("terminal");
+            terminal.draw(|frame| view(&model, frame)).expect("rendu");
+            let corner =
+                &terminal.backend().buffer()[(areas.response_status.x, areas.response_status.y)];
+            assert_ne!(corner.fg, focus_fg, "{:?}", model.focus);
+        }
+        assert_eq!(foci, [Focus::Detail, Focus::Response, Focus::Tree]);
+    }
+
+    #[test]
+    fn status_panel_survives_minimal_and_absurd_sizes() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+        model.size = (60, 10);
+        let lines = render(&model, 60, 10);
+        let areas = layout_for((60, 10)).expect("layout");
+        let status = region(&lines, areas.response_status);
+        assert!(status[1].contains(" 200 "), "{status:?}");
+        let response = region(&lines, areas.response);
+        assert!(
+            response[1..response.len() - 1]
+                .iter()
+                .any(|row| !row.trim_matches(['│', ' ']).is_empty()),
+            "{response:?}"
+        );
+        render(&model, 1, 1);
+    }
+
+    #[test]
+    fn response_end_shows_the_last_line_under_the_status_panel() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        model.size = (100, 12);
+        select(&mut model, "green.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        update(&mut model, Message::End);
+        let last = detail::response_plain_lines(&model)
+            .last()
+            .cloned()
+            .expect("réponse non vide");
+        let lines = render(&model, 100, 12);
+        let areas = layout_for((100, 12)).expect("layout");
+        let response = region(&lines, inner(areas.response));
+        assert_eq!(response.last().map(|l| l.trim_end()), Some(last.as_str()));
+    }
+
+    #[test]
+    fn status_panel_follows_the_run_lifecycle() {
+        use crate::app::model::ActiveRun;
+        use crate::app::test_support::runner_probe_model;
+        use crate::runner::{RunEvent, RunId, RunOutcome};
+
+        let areas = layout_for((100, 30)).expect("layout");
+        let status_of =
+            |model: &Model| region(&render(model, 100, 30), areas.response_status).join("\n");
+        let start = |model: &mut Model| {
+            model.run.active = Some(ActiveRun {
+                id: RunId(7),
+                target: "folder".into(),
+                recursive: true,
+                handle: None,
+            });
+        };
+        let cancel = |model: &mut Model| {
+            update(
+                model,
+                Message::RunFinished(RunEvent {
+                    id: RunId(7),
+                    outcome: RunOutcome::Cancelled,
+                }),
+            );
+        };
+
+        let mut model = runner_probe_model();
+        select(&mut model, "folder/down.bru");
+        start(&mut model);
+        let running = status_of(&model);
+        assert!(running.contains(" en cours "), "{running}");
+        assert!(running.contains("précédent :"), "{running}");
+        assert!(running.contains("aucune réponse · 0 ms"), "{running}");
+        cancel(&mut model);
+        let after = status_of(&model);
+        assert!(!after.contains("en cours"), "{after}");
+        assert!(after.contains(" aucune réponse "), "{after}");
+
+        // Première exécution annulée : retour au tiret neutre.
+        model.run.outcomes.clear();
+        start(&mut model);
+        assert!(status_of(&model).contains(" en cours "));
+        cancel(&mut model);
+        let after = status_of(&model);
+        assert!(after.contains('—'), "{after}");
+        assert!(!after.contains("en cours"), "{after}");
     }
 }

@@ -6,6 +6,8 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+use super::status::StatusClass;
+
 /// Fond de l'application, posé une seule fois sur toute la zone du
 /// terminal au début de `view()`.
 pub const BACKGROUND: Style = Style::new().bg(Color::Rgb(18, 22, 40));
@@ -19,6 +21,12 @@ pub const SUCCESS: Style = Style::new().fg(Color::Green);
 pub const FAILURE: Style = Style::new().fg(Color::Red);
 /// Requête dont l'exécution est en cours.
 pub const RUNNING: Style = Style::new().fg(Color::Blue);
+/// Réponse de redirection (3xx), dans le panneau Statut. Distinct de
+/// [`RUNNING`] et de [`METHOD`].
+pub const REDIRECT: Style = Style::new().fg(Color::Cyan);
+/// Réponse d'erreur client (4xx), dans le panneau Statut. Distinct de
+/// [`FOCUS`] et de [`FAILURE`].
+pub const CLIENT_ERROR: Style = Style::new().fg(Color::Yellow);
 /// Nœud ou fichier en erreur de chargement, distinct de [`FAILURE`] :
 /// un fichier invalide n'a pas la même cause qu'une requête qui échoue à
 /// l'exécution.
@@ -45,6 +53,30 @@ pub const LABEL: Style = Style::new().add_modifier(Modifier::DIM);
 /// « aucune erreur »).
 pub const EMPTY_MESSAGE: Style = Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC));
 
+/// Style du badge de statut du panneau Statut : texte gras de la couleur
+/// du fond sur fond de la couleur de catégorie ; style neutre sans fond
+/// pour une classe sans catégorie (`visual-theme`).
+pub fn status_badge(class: StatusClass) -> Style {
+    let category = match class {
+        StatusClass::Success => SUCCESS,
+        StatusClass::Redirect => REDIRECT,
+        StatusClass::ClientError => CLIENT_ERROR,
+        StatusClass::Failure => FAILURE,
+        StatusClass::Neutral => return LABEL,
+    };
+    category.fg.map_or(category, badge_on)
+}
+
+/// Badge sur fond `color` : texte gras de la couleur du fond de
+/// l'application, pour un contraste maximal.
+pub fn badge_on(color: Color) -> Style {
+    let style = Style::new().bg(color).add_modifier(Modifier::BOLD);
+    match BACKGROUND.bg {
+        Some(background) => style.fg(background),
+        None => style,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,12 +89,27 @@ mod tests {
     fn categories_that_could_be_confused_have_distinct_colors() {
         assert_ne!(FAILURE.fg, LOAD_ERROR.fg, "échec vs erreur de chargement");
         assert_ne!(RUNNING.fg, FOCUS.fg, "en cours vs focus actif");
+        for other in [RUNNING, METHOD, SUCCESS, CLIENT_ERROR] {
+            assert_ne!(REDIRECT.fg, other.fg, "redirection vs {other:?}");
+        }
+        for other in [FOCUS, FAILURE, LOAD_ERROR] {
+            assert_ne!(CLIENT_ERROR.fg, other.fg, "erreur client vs {other:?}");
+        }
     }
 
     #[test]
     fn every_category_has_a_foreground_color_except_pure_text_styles() {
         for style in [
-            METHOD, SUCCESS, FAILURE, RUNNING, LOAD_ERROR, FOCUS, SECTION, BORDER,
+            METHOD,
+            SUCCESS,
+            FAILURE,
+            RUNNING,
+            LOAD_ERROR,
+            FOCUS,
+            SECTION,
+            BORDER,
+            REDIRECT,
+            CLIENT_ERROR,
         ] {
             assert!(style.fg.is_some());
         }
@@ -76,5 +123,23 @@ mod tests {
     #[test]
     fn background_has_a_color() {
         assert!(BACKGROUND.bg.is_some());
+    }
+
+    #[test]
+    fn status_badge_uses_category_color_as_background() {
+        for (class, category) in [
+            (StatusClass::Success, SUCCESS),
+            (StatusClass::Redirect, REDIRECT),
+            (StatusClass::ClientError, CLIENT_ERROR),
+            (StatusClass::Failure, FAILURE),
+        ] {
+            let badge = status_badge(class);
+            assert_eq!(badge.bg, category.fg, "{class:?}");
+            assert_eq!(badge.fg, BACKGROUND.bg, "{class:?}");
+            assert!(badge.add_modifier.contains(Modifier::BOLD), "{class:?}");
+        }
+        let neutral = status_badge(StatusClass::Neutral);
+        assert_eq!(neutral, LABEL);
+        assert!(neutral.bg.is_none());
     }
 }

@@ -22,7 +22,7 @@ use crate::collection::{
     AuthMode, BodyContent, BodyKind, ErrorNode, FileMeta, FolderNode, KeyValue, RequestNode,
     RequestView, TreeNode,
 };
-use crate::runner::report::{AssertionResult, ResponseStatus, ResultStatus, TestResult};
+use crate::runner::report::{AssertionResult, ResultStatus, TestResult};
 
 /// Style de mise en valeur de la ligne du champ sous le curseur en session d'édition (D8).
 pub const FIELD_CURSOR_STYLE: Style = Style::new().add_modifier(Modifier::REVERSED);
@@ -74,7 +74,6 @@ pub fn response_text(model: &Model) -> Text<'static> {
         return Text::default();
     };
     let mut lines = status_band(outcome);
-    lines.push(Line::default());
     lines.push(tab_bar(model.response_tab));
     lines.push(Line::default());
     let filter = model.filter.as_ref().filter(|f| f.target == request.path);
@@ -480,37 +479,17 @@ fn filter_line(draft: &str, editing: bool) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Section « Résultat » d'une requête exécutée : verdict, réponse, puis
-/// chaque assertion et test (y compris pré-requête et post-réponse).
-/// Bandeau de statut, toujours visible en tête du panneau Réponse quel
-/// que soit l'onglet actif (`response-tabs`).
+/// Bandeau toujours visible en tête du panneau Réponse, quel que soit
+/// l'onglet actif (`response-tabs`) : réduit au message d'erreur rapporté
+/// par `bru`, suivi d'une ligne vide, ou vide sans erreur. Verdict, statut
+/// et temps de réponse sont portés par le panneau Statut (`status-panel`).
 fn status_band(outcome: &RequestOutcome) -> Vec<Line<'static>> {
-    let result = &outcome.result;
-    let mut lines = vec![section("Résultat")];
-    lines.push(field(
-        "Verdict",
-        if result.is_failure() {
-            "échec"
-        } else {
-            "réussi"
-        },
-    ));
-    match &result.response.status {
-        ResponseStatus::Http(code) => lines.push(field("Statut", code.to_string())),
-        ResponseStatus::Error => lines.push(field("Statut", "aucune réponse")),
-        ResponseStatus::Skipped => lines.push(field("Statut", "ignorée")),
-        ResponseStatus::Other(other) => lines.push(field("Statut", other.clone())),
-    }
     // Affiché quel que soit le statut : c'est la seule explication d'une
     // requête en erreur, y compris quand elle n'a jamais été envoyée.
-    if let Some(error) = &result.error {
-        lines.push(field("Erreur", error.clone()));
+    match &outcome.result.error {
+        Some(error) => vec![field("Erreur", error.clone()), Line::default()],
+        None => Vec::new(),
     }
-    lines.push(field(
-        "Temps de réponse",
-        format!("{} ms", result.response.response_time),
-    ));
-    lines
 }
 
 /// Contenu de l'onglet Corps : le résultat filtré s'il y en a un, sinon
@@ -905,7 +884,9 @@ mod tests {
         assert!(text.contains("En-têtes\n  aucun"), "{text}");
     }
 
-    use crate::runner::report::{RequestFile, RequestInfo, RequestResult, ResponseInfo};
+    use crate::runner::report::{
+        RequestFile, RequestInfo, RequestResult, ResponseInfo, ResponseStatus,
+    };
 
     fn base_result() -> RequestResult {
         RequestResult {
@@ -940,8 +921,8 @@ mod tests {
         }
     }
 
-    /// Bandeau de statut (toujours visible) + onglet Tests actif, pour
-    /// couvrir en un seul texte le verdict/statut (`status_band`) et les
+    /// Bandeau (toujours visible) + onglet Tests actif, pour couvrir en un
+    /// seul texte le message d'erreur (`status_band`) et les
     /// assertions/tests (`response-tabs` : ces derniers ne sont visibles
     /// que quand l'onglet Tests est actif).
     fn result_detail(result: RequestResult) -> String {
@@ -972,10 +953,12 @@ mod tests {
             },
             ..base_result()
         });
-        assert!(text.contains("Résultat"), "{text}");
-        assert!(text.contains("Verdict : réussi"), "{text}");
-        assert!(text.contains("Statut : 200"), "{text}");
-        assert!(text.contains("Temps de réponse : 12 ms"), "{text}");
+        // Verdict, statut et temps sont portés par le panneau Statut
+        // (`status-panel`), jamais répétés dans la réponse.
+        assert!(text.starts_with("Corps"), "{text}");
+        for moved in ["Résultat", "Verdict", "Statut", "Temps de réponse", "12 ms"] {
+            assert!(!text.contains(moved), "{moved} :\n{text}");
+        }
     }
 
     #[test]
@@ -993,7 +976,7 @@ mod tests {
             }],
             ..base_result()
         });
-        assert!(text.contains("Verdict : échec"), "{text}");
+        assert!(!text.contains("Verdict"), "{text}");
         assert!(text.contains("expected 200 to equal 404"), "{text}");
     }
 
@@ -1010,7 +993,7 @@ mod tests {
             }],
             ..base_result()
         });
-        assert!(text.contains("Verdict : échec"), "{text}");
+        assert!(!text.contains("Verdict"), "{text}");
         assert!(text.contains("post ko"), "{text}");
         assert!(text.contains("expected 2 to equal 3"), "{text}");
     }
@@ -1030,13 +1013,12 @@ mod tests {
             },
             ..base_result()
         });
-        assert!(text.contains("Verdict : échec"), "{text}");
-        assert!(text.contains("Statut : aucune réponse"), "{text}");
         assert!(
-            text.contains("connect ECONNREFUSED 127.0.0.1:18799"),
+            text.starts_with("Erreur : connect ECONNREFUSED 127.0.0.1:18799\n\nCorps"),
             "{text}"
         );
-        assert!(!text.contains("Statut : 200"), "{text}");
+        assert!(!text.contains("Verdict"), "{text}");
+        assert!(!text.contains("aucune réponse"), "{text}");
     }
 
     /// Résultat réel d'une requête en échec avant envoi (script pré-requête
@@ -1053,12 +1035,11 @@ mod tests {
     fn status_band_shows_error_of_a_request_failed_before_sending() {
         for tab in [ResponseTab::Body, ResponseTab::Headers, ResponseTab::Tests] {
             let text = result_detail_on_tab(pre_request_error_result(), tab);
-            assert!(text.contains("Verdict : échec"), "{text}");
-            assert!(text.contains("Statut : aucune réponse"), "{text}");
             assert!(
-                text.contains("Erreur : pre-request failure (fixture)"),
-                "{text}"
+                text.starts_with("Erreur : pre-request failure (fixture)"),
+                "{tab:?} :\n{text}"
             );
+            assert!(!text.contains("Verdict"), "{text}");
         }
     }
 
@@ -1068,7 +1049,7 @@ mod tests {
             error: Some("Missing required environment variables: oktaClientSecret".into()),
             ..base_result()
         });
-        assert!(text.contains("Statut : 200"), "{text}");
+        assert!(!text.contains("Statut"), "{text}");
         assert!(
             text.contains("Erreur : Missing required environment variables: oktaClientSecret"),
             "{text}"
@@ -1078,7 +1059,7 @@ mod tests {
     #[test]
     fn status_band_has_no_error_line_without_error() {
         let text = result_detail(base_result());
-        assert!(text.contains("Statut : 200"), "{text}");
+        assert!(text.starts_with("Corps"), "{text}");
         assert!(!text.contains("Erreur"), "{text}");
     }
 
@@ -1097,8 +1078,9 @@ mod tests {
             },
             ..base_result()
         });
-        assert!(text.contains("Statut : ignorée"), "{text}");
-        assert!(!text.contains("Verdict : échec"), "{text}");
+        assert!(!text.contains("ignorée"), "{text}");
+        assert!(!text.contains("Verdict"), "{text}");
+        assert!(text.starts_with("Corps"), "{text}");
     }
 
     /// Le résultat d'exécution n'apparaît plus dans `detail_text` : il est
@@ -1119,8 +1101,8 @@ mod tests {
         assert!(!detail.contains("Verdict"), "{detail}");
         assert!(!detail.contains("Corps de réponse"), "{detail}");
         let response = plain(&response_text(&model));
-        assert!(response.contains("Résultat"), "{response}");
-        assert!(response.contains("Verdict"), "{response}");
+        assert!(response.contains("Corps"), "{response}");
+        assert!(!response.contains("Verdict"), "{response}");
     }
 
     #[test]
