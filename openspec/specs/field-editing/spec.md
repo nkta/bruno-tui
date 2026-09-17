@@ -60,21 +60,29 @@ disque.
 
 ### Requirement: Champs éditables et curseur de champ
 Dans l'état Sélection de champ, le système SHALL exposer un curseur qui
-se déplace, par `↓` ou `j` et `↑` ou `k`, exclusivement parmi les champs
-éditables de la requête, dans l'ordre où ils apparaissent dans le
-détail : l'URL, puis chaque en-tête existant, chaque paramètre de requête
-existant, chaque paramètre de chemin existant, puis le corps si son type
-est éditable par `bru-writer` (`json`, `text`, `xml`, `sparql`,
-`graphql`). Le déplacement MUST NOT avoir d'effet aux extrémités de cette
-liste. Un champ non éditable (corps de forme formulaire, absence de
-corps, sections vides) MUST NOT apparaître dans cette liste. Le champ
-sous le curseur MUST être visuellement distingué du reste du détail.
+se déplace, par `↓` ou `j` et `↑` ou `k`, exclusivement parmi les
+positions de la session, dans l'ordre où elles apparaissent dans le
+détail : l'URL, puis chaque en-tête suivi d'une ligne « + Ajouter un
+en-tête », chaque paramètre de requête suivi d'une ligne « + Ajouter un
+paramètre de requête », chaque paramètre de chemin suivi d'une ligne
+« + Ajouter un paramètre de chemin », puis le corps si son type est
+éditable par `bru-writer` (`json`, `text`, `xml`, `sparql`, `graphql`).
+Les trois lignes d'ajout MUST être présentes même quand leur section est
+vide. Les en-têtes et paramètres listés MUST être ceux de l'aperçu de la
+requête après application des modifications validées de la session : une
+entrée ajoutée, ou créée par la synchronisation de l'URL, y figure ; une
+entrée supprimée n'y figure plus. Le déplacement MUST NOT avoir d'effet
+aux extrémités de cette liste. Un corps non éditable (forme formulaire,
+absence de corps) MUST NOT apparaître dans cette liste. La position sous
+le curseur MUST être visuellement distinguée du reste du détail. Les
+lignes d'ajout MUST NOT être affichées hors session.
 
 #### Scenario: Parcours des champs
 - **WHEN** une session est ouverte sur une requête ayant une URL, deux
-  en-têtes et un corps `json`
-- **THEN** quatre positions de curseur existent, dans cet ordre : URL,
-  premier en-tête, second en-tête, corps
+  en-têtes, aucun paramètre et un corps `json`
+- **THEN** sept positions de curseur existent, dans cet ordre : URL,
+  premier en-tête, second en-tête, ajout d'en-tête, ajout de paramètre de
+  requête, ajout de paramètre de chemin, corps
 
 #### Scenario: Corps non éditable exclu
 - **WHEN** la requête a un corps de type `formUrlEncoded`
@@ -84,6 +92,16 @@ sous le curseur MUST être visuellement distingué du reste du détail.
 - **WHEN** le curseur de champ est sur le premier champ et l'utilisateur
   appuie sur `↑`
 - **THEN** le curseur ne bouge pas
+
+#### Scenario: Liste suivant les modifications validées
+- **WHEN** une session porte, non enregistrés, l'ajout d'un en-tête et la
+  suppression d'un paramètre de requête
+- **THEN** le curseur peut se placer sur l'en-tête ajouté et ne peut plus
+  se placer sur le paramètre supprimé
+
+#### Scenario: Lignes d'ajout absentes hors session
+- **WHEN** le détail affiche une requête sans session d'édition ouverte
+- **THEN** aucune ligne « + Ajouter » n'est affichée
 
 ### Requirement: Bascule d'activation d'une entrée
 Dans l'état Sélection de champ, quand le curseur de champ est sur un
@@ -108,12 +126,16 @@ Le système SHALL enregistrer sur disque uniquement sur `Ctrl+S`, pendant
 une session d'édition, en appelant `bru-writer` avec l'instantané de
 fraîcheur de la session et l'ensemble des modifications validées depuis.
 Dans l'état Saisie, `Ctrl+S` MUST d'abord valider la saisie en cours,
-exactement comme `Tab`, puis enregistrer. Sur une session sans
-modification après cette éventuelle validation, `Ctrl+S` MUST NOT
-déclencher d'écriture. Aucune autre touche ni aucun autre événement
-(validation d'un champ, fermeture de session, changement de focus,
-sortie de l'application) MUST NOT déclencher d'écriture. Une sauvegarde
-réussie MUST effacer l'indicateur de modification, remplacer
+exactement comme `Tab`, puis enregistrer ; par exception, pendant la
+saisie de la clé d'une nouvelle entrée, `Ctrl+S` MUST valider la clé et
+ajouter l'entrée avec une valeur vide, puis enregistrer. Si cette
+validation est refusée (exigence « Refus immédiat d'une modification
+invalide »), `Ctrl+S` MUST NOT enregistrer et la saisie reste ouverte.
+Sur une session sans modification après cette éventuelle validation,
+`Ctrl+S` MUST NOT déclencher d'écriture. Aucune autre touche ni aucun
+autre événement (validation d'un champ, fermeture de session, changement
+de focus, sortie de l'application) MUST NOT déclencher d'écriture. Une
+sauvegarde réussie MUST effacer l'indicateur de modification, remplacer
 l'instantané de fraîcheur de la session par celui retourné, et laisser
 la session dans l'état Sélection de champ. Le déclenchement de
 l'écriture MUST NOT bloquer la saisie ni le rendu.
@@ -129,6 +151,13 @@ l'écriture MUST NOT bloquer la saisie ni le rendu.
   l'avoir validée, et appuie sur `Ctrl+S`
 - **THEN** la nouvelle URL est validée puis enregistrée, et la session
   revient à l'état Sélection de champ
+
+#### Scenario: Sauvegarde pendant la saisie de la clé d'une nouvelle entrée
+- **WHEN** l'utilisateur ajoute un en-tête, a tapé la clé `X-Trace` sans
+  la valider, et appuie sur `Ctrl+S`
+- **THEN** l'en-tête `X-Trace` est ajouté avec une valeur vide, le
+  fichier est enregistré, et la session revient à l'état Sélection de
+  champ
 
 #### Scenario: Sauvegarde sans modification
 - **WHEN** une session sans modification reçoit `Ctrl+S`
@@ -203,12 +232,15 @@ place de la barre d'état habituelle du panneau de détail : l'état courant
 indicateur visible tant que la session porte des modifications non
 enregistrées, et les touches utiles dans l'état courant. En Sélection de
 champ, ces touches MUST inclure l'ouverture de la saisie, l'enregistrement
-et la fermeture. En Saisie, elles MUST inclure la validation, l'annulation
-et l'enregistrement, et distinguer le corps (où `Entrée` insère un saut
-de ligne) des champs à une ligne. Un message de statut prioritaire
-(exécution, échec de sauvegarde, refus de changement de sélection) MAY
-remplacer temporairement cette barre, comme pour la barre d'état
-habituelle.
+et la fermeture, ainsi que `a`, `d` et `c` quand le curseur est sur un
+en-tête ou un paramètre. En Saisie, elles MUST inclure la validation,
+l'annulation et l'enregistrement, et distinguer le corps (où `Entrée`
+insère un saut de ligne) des champs à une ligne. Pendant l'ajout d'une
+entrée, la barre MUST nommer la section visée et l'étape (clé ou valeur) ;
+pendant un renommage, elle MUST l'indiquer. Un message de statut
+prioritaire (exécution, échec de sauvegarde, refus de changement de
+sélection, refus d'une modification invalide) MAY remplacer
+temporairement cette barre, comme pour la barre d'état habituelle.
 
 #### Scenario: Barre d'aide en saisie de l'URL
 - **WHEN** l'état Saisie est actif sur le champ URL
@@ -225,6 +257,18 @@ habituelle.
 - **WHEN** une session porte une modification validée non enregistrée
 - **THEN** la barre affiche l'indicateur de modification non enregistrée
 - **AND** l'indicateur disparaît après une sauvegarde réussie
+
+#### Scenario: Barre d'aide sur un en-tête
+- **WHEN** l'état Sélection de champ est actif et le curseur est sur un
+  en-tête
+- **THEN** la barre rappelle `a` pour ajouter, `d` pour supprimer et `c`
+  pour renommer
+
+#### Scenario: Barre d'aide pendant l'ajout
+- **WHEN** l'utilisateur ajoute un en-tête et en est à la saisie de la
+  clé
+- **THEN** la barre indique l'état Saisie, la section En-têtes et l'étape
+  de saisie de la clé
 
 ### Requirement: Saisie d'un champ
 Dans l'état Sélection de champ, le système SHALL commencer la saisie du
@@ -243,7 +287,11 @@ exclusives :
 - validation suivie d'un enregistrement, par `Ctrl+S` (voir « Sauvegarde
   explicite »).
 Dans les trois cas, la session revient à l'état Sélection de champ, le
-curseur de champ sur le même champ.
+curseur de champ sur le même champ. Par exception, une validation refusée
+par les règles de `bru-writer` (exigence « Refus immédiat d'une
+modification invalide ») MUST laisser la saisie ouverte, texte et curseur
+intacts. Sur une ligne « + Ajouter », `Entrée` commence l'ajout d'une
+entrée (exigence « Ajout d'une entrée ») et non la saisie d'un champ.
 
 #### Scenario: Modification validée de l'URL
 - **WHEN** le curseur de champ est sur l'URL, l'utilisateur appuie sur
@@ -278,6 +326,14 @@ curseur de champ sur le même champ.
 - **WHEN** l'utilisateur commence la saisie d'un champ puis la valide
   sans avoir changé le texte
 - **THEN** la session n'est pas marquée modifiée par ce seul aller-retour
+
+#### Scenario: Validation refusée d'un paramètre de requête
+- **WHEN** l'état Saisie est actif sur un paramètre de requête avec le
+  texte `a#b` et l'utilisateur appuie sur `Entrée`
+- **THEN** un message signale un caractère interdit et la saisie reste
+  ouverte avec `a#b`
+- **AND** si l'utilisateur appuie ensuite sur `Échap`, le paramètre
+  reprend sa valeur d'avant la saisie
 
 ### Requirement: Curseur de texte libre
 Dans l'état Saisie, le système SHALL maintenir un curseur de texte
@@ -341,20 +397,20 @@ touche.
 Pendant l'état Saisie, le système SHALL traiter toute touche imprimable
 comme du texte, y compris les lettres et symboles qui portent un
 raccourci global hors saisie (`q`, `r`, `/`, `|`, `n`, `v`, `y`, `e`,
-`D`, `H`, `E`, `S`, espace, etc.), et MUST NOT déclencher l'action
-associée. Les seules combinaisons qui gardent un sens hors du texte en
-Saisie sont `Ctrl+C` (fermeture, avec confirmation selon l'exigence de
-confirmation), `Ctrl+X` (annulation d'une exécution en cours) et `Ctrl+S`
-(enregistrement). `Tab` y valide la saisie et MUST NOT changer le focus.
-Toute autre touche non décrite par les exigences de saisie MUST être sans
-effet.
+`a`, `d`, `c`, `D`, `H`, `E`, `S`, espace, etc.), et MUST NOT déclencher
+l'action associée. Les seules combinaisons qui gardent un sens hors du
+texte en Saisie sont `Ctrl+C` (fermeture, avec confirmation selon
+l'exigence de confirmation), `Ctrl+X` (annulation d'une exécution en
+cours) et `Ctrl+S` (enregistrement). `Tab` y valide la saisie et MUST NOT
+changer le focus. Toute autre touche non décrite par les exigences de
+saisie MUST être sans effet.
 
 Dans l'état Sélection de champ, le système SHALL redéfinir uniquement
-`↑`/`k`, `↓`/`j`, `Entrée`, `Espace`, `Échap` et `Ctrl+S` comme décrit par
-les autres exigences de cette capacité ; toute autre touche MUST conserver
-le sens que lui donnent les autres capacités lorsque le détail a le
-focus. Les anciennes touches de session `i` et `w` MUST NOT avoir d'effet
-propre à l'édition.
+`↑`/`k`, `↓`/`j`, `Entrée`, `Espace`, `Échap`, `Ctrl+S`, `a`, `d` et `c`
+comme décrit par les autres exigences de cette capacité ; toute autre
+touche MUST conserver le sens que lui donnent les autres capacités
+lorsque le détail a le focus. Les anciennes touches de session `i` et `w`
+MUST NOT avoir d'effet propre à l'édition.
 
 #### Scenario: Lettres de raccourci en saisie
 - **WHEN** l'état Saisie est actif sur un en-tête et l'utilisateur tape
@@ -362,6 +418,12 @@ propre à l'édition.
 - **THEN** ces quatre caractères sont insérés, aucune exécution n'est
   lancée, aucune recherche ni panneau ne s'ouvre, et l'application reste
   ouverte
+
+#### Scenario: Lettres d'ajout et de suppression en saisie
+- **WHEN** l'état Saisie est actif sur un en-tête et l'utilisateur tape
+  `adc`
+- **THEN** ces trois caractères sont insérés, aucune entrée n'est
+  ajoutée, supprimée ni renommée
 
 #### Scenario: Tab en saisie
 - **WHEN** l'état Saisie est actif et l'utilisateur appuie sur `Tab`
@@ -439,3 +501,166 @@ des caractères.
   et l'utilisateur appuie sur `Entrée`
 - **THEN** le détail défile pour que la nouvelle ligne et le curseur
   soient visibles
+
+### Requirement: Ajout d'une entrée
+Dans l'état Sélection de champ, le système SHALL commencer l'ajout d'une
+entrée par `Entrée` sur une ligne « + Ajouter » (dans la section de cette
+ligne), ou par `a` sur un en-tête, un paramètre ou une ligne « + Ajouter »
+(dans la section de cette position). Sur l'URL ou le corps, `a` MUST NOT
+avoir d'effet. L'ajout enchaîne deux saisies, avec les mêmes touches
+d'édition de texte que l'exigence « Curseur de texte libre » pour un
+champ à une ligne :
+- saisie de la clé, texte initialement vide : `Entrée` ou `Tab` valide la
+  clé et passe à la saisie de la valeur ;
+- saisie de la valeur, texte initialement vide : `Entrée` ou `Tab` valide
+  la valeur ; une valeur vide MUST être acceptée.
+`Échap` MUST abandonner l'ajout entier, à l'une ou l'autre étape, sans
+rien ajouter et sans confirmation ; le curseur de champ revient à la
+position d'où l'ajout a commencé. À la validation de la valeur, l'entrée
+MUST être ajoutée, activée, en fin de sa section, la session marquée
+modifiée, l'état redevient Sélection de champ et le curseur de champ est
+placé sur la nouvelle entrée. Pendant l'ajout, une ligne provisoire
+affiche la clé et la valeur en cours de saisie en fin de section. Aucune
+écriture disque MUST NOT avoir lieu avant `Ctrl+S`. Sur une ligne
+« + Ajouter », `Espace`, `d` et `c` MUST NOT avoir d'effet.
+
+#### Scenario: Ajout d'un en-tête depuis un en-tête existant
+- **WHEN** le curseur de champ est sur un en-tête, l'utilisateur appuie
+  sur `a`, tape `X-Trace`, `Entrée`, `abc`, `Entrée`
+- **THEN** un en-tête `X-Trace` de valeur `abc` apparaît en dernier dans
+  la section En-têtes, le curseur est dessus, et la session est marquée
+  modifiée
+
+#### Scenario: Ajout d'un paramètre de requête depuis sa ligne d'ajout
+- **WHEN** l'URL est `https://h/items`, le curseur est sur la ligne
+  « + Ajouter un paramètre de requête », et l'utilisateur appuie sur
+  `Entrée`, tape `page`, `Tab`, `2`, `Entrée`
+- **THEN** le paramètre de requête `page` de valeur `2` apparaît, et l'URL
+  affichée devient `https://h/items?page=2`
+
+#### Scenario: Abandon pendant la saisie de la valeur
+- **WHEN** l'utilisateur a validé la clé d'un nouvel en-tête et appuie sur
+  `Échap` pendant la saisie de la valeur
+- **THEN** aucun en-tête n'est ajouté, l'état redevient Sélection de
+  champ et l'indicateur de modification reste dans l'état où il était
+  avant l'ajout
+
+#### Scenario: Ajout dans une section vide
+- **WHEN** la requête n'a aucun paramètre de chemin, le curseur est sur
+  la ligne « + Ajouter un paramètre de chemin », et l'utilisateur ajoute
+  le paramètre `id` de valeur `42`
+- **THEN** la section Paramètres de chemin affiche `id` et le curseur de
+  champ est sur cette entrée
+
+#### Scenario: a sans effet sur l'URL
+- **WHEN** le curseur de champ est sur l'URL et l'utilisateur appuie sur
+  `a`
+- **THEN** aucun ajout ne commence
+
+### Requirement: Suppression d'une entrée
+Dans l'état Sélection de champ, quand le curseur de champ est sur un
+en-tête ou un paramètre, le système SHALL supprimer cette entrée de la
+session sur `d`, immédiatement, sans confirmation, et marquer la session
+comme modifiée. Le curseur de champ MUST rester au même indice dans la
+liste des positions, borné à sa dernière position. Sur l'URL, le corps ou
+une ligne « + Ajouter », `d` MUST NOT avoir d'effet. La suppression d'un
+paramètre de requête MUST mettre à jour l'URL affichée selon les règles
+de `bru-writer`. Une suppression est une modification non enregistrée au
+sens de l'exigence « Changement de requête pendant une session
+modifiée ».
+
+#### Scenario: Suppression d'un en-tête
+- **WHEN** le curseur de champ est sur le second de trois en-têtes et
+  l'utilisateur appuie sur `d`
+- **THEN** l'en-tête n'est plus affiché, le curseur est sur l'ancien
+  troisième en-tête, et la session est marquée modifiée
+
+#### Scenario: Suppression d'un paramètre de requête
+- **WHEN** l'URL affichée est `https://h/items?page=2&size=10`, le curseur
+  est sur le paramètre `size` et l'utilisateur appuie sur `d`
+- **THEN** l'URL affichée devient `https://h/items?page=2`
+
+#### Scenario: Sans effet sur le corps
+- **WHEN** le curseur de champ est sur le corps et l'utilisateur appuie
+  sur `d`
+- **THEN** rien ne change
+
+#### Scenario: Changement de requête bloqué après suppression
+- **WHEN** l'utilisateur a supprimé un en-tête sans enregistrer, rend le
+  focus à l'arbre et sélectionne une autre requête
+- **THEN** la sélection ne change pas et le message invitant à
+  enregistrer ou fermer la session s'affiche
+
+### Requirement: Renommage d'une clé
+Dans l'état Sélection de champ, quand le curseur de champ est sur un
+en-tête ou un paramètre, le système SHALL commencer sur `c` une saisie de
+sa clé, pré-remplie avec la clé actuelle, curseur de texte en fin de clé,
+avec les touches d'un champ à une ligne. `Entrée` ou `Tab` MUST valider
+le renommage et marquer la session modifiée si la clé a changé ; `Échap`
+MUST annuler la saisie en laissant la clé inchangée ; `Ctrl+S` MUST
+valider puis enregistrer. L'entrée MUST conserver sa valeur et son état
+activé ou désactivé. Sur l'URL, le corps ou une ligne « + Ajouter », `c`
+MUST NOT avoir d'effet.
+
+#### Scenario: Renommage d'un paramètre de requête
+- **WHEN** l'URL affichée est `https://h/items?p=2`, le curseur est sur le
+  paramètre `p`, l'utilisateur appuie sur `c`, efface la clé, tape `page`
+  puis `Entrée`
+- **THEN** le paramètre affiché s'appelle `page`, garde la valeur `2`,
+  l'URL affichée devient `https://h/items?page=2`, et la session est
+  marquée modifiée
+
+#### Scenario: Renommage annulé
+- **WHEN** l'utilisateur commence le renommage d'un en-tête, tape des
+  caractères puis `Échap`
+- **THEN** la clé affichée est celle d'avant `c` et la session n'est pas
+  marquée modifiée par cette saisie
+
+### Requirement: Refus immédiat d'une modification invalide
+Le système SHALL vérifier chaque modification au moment où elle serait
+validée (validation d'une valeur de champ, d'une clé d'ajout, d'une
+valeur d'ajout, d'un renommage, y compris via `Ctrl+S`), avec les règles
+de `bru-writer`. Une modification refusée (clé invalide, `&`, `#` ou saut
+de ligne dans un paramètre de requête) MUST afficher un message nommant
+la nature du problème sans citer le texte saisi, MUST laisser la saisie
+ouverte avec son texte et son curseur, et MUST NOT être ajoutée aux
+modifications validées. `Échap` reste disponible et annule la saisie. Une
+clé déjà présente dans la section MUST être acceptée.
+
+#### Scenario: Clé d'en-tête invalide
+- **WHEN** pendant l'ajout d'un en-tête, l'utilisateur tape `X Trace`
+  puis `Entrée` à l'étape de la clé
+- **THEN** un message signale une clé invalide, la saisie de la clé reste
+  ouverte avec `X Trace`, et rien n'est ajouté
+
+#### Scenario: Ctrl+S sur une clé invalide
+- **WHEN** pendant l'ajout d'un en-tête, l'utilisateur tape `X:Trace`
+  puis `Ctrl+S`
+- **THEN** un message signale une clé invalide, aucune écriture n'est
+  déclenchée et la saisie de la clé reste ouverte
+
+#### Scenario: Clé dupliquée acceptée
+- **WHEN** la section En-têtes contient `Accept` et l'utilisateur ajoute un
+  en-tête de clé `Accept`
+- **THEN** l'ajout est accepté et deux en-têtes `Accept` sont affichés
+
+### Requirement: Détail affiché depuis l'aperçu de la session
+Pendant une session d'édition, le système SHALL afficher dans le panneau
+de détail l'URL, les en-têtes et les paramètres tels que les expose
+l'aperçu `bru-writer` des modifications validées, de sorte que ce qui est
+affiché avant `Ctrl+S` soit ce qui sera écrit. Une sauvegarde réussie
+MUST laisser le détail inchangé visuellement, hormis la disparition de
+l'indicateur de modification.
+
+#### Scenario: URL synchronisée avant sauvegarde
+- **WHEN** l'utilisateur valide l'URL `https://h/items?page=3` dans une
+  requête dont la section Paramètres de requête affichait `page` de valeur
+  `2`
+- **THEN** dès la validation, la section affiche `page` de valeur `3`,
+  sans écriture disque
+
+#### Scenario: Touche capturée pendant la saisie d'une clé
+- **WHEN** la saisie de la clé d'un ajout est ouverte et l'utilisateur
+  tape `q`
+- **THEN** `q` est ajouté au texte de la clé et l'application ne se ferme
+  pas
