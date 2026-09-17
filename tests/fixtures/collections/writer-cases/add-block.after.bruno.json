@@ -1,0 +1,11 @@
+{
+  "url": "https://{{host}}/ping",
+  "headers": [
+    {
+      "name": "Accept",
+      "value": "text/plain",
+      "enabled": true
+    }
+  ],
+  "params": []
+}

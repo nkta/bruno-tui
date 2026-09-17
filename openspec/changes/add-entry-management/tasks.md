@@ -1,0 +1,49 @@
+## 1. Chaîne de requête de l'URL (`src/writer/query.rs`)
+
+- [x] 1.1 Implémenter `split_url` (premier `#`, puis premier `?`), `parse_query` (`&`, premier `=`, noms vides ignorés, aucun décodage) et `build_url` (activées seulement, `nom` si valeur vide, pas de `?` sans paramètre, fragment conservé) ; vérifier par des tests unitaires couvrant `?tag=a&tag=b&flag`, `?page=2#top` → `#top`, URL sans `?`, `?a=b=c` et `{{var}}` non touché
+
+## 2. Brouillon ordonné et validation (`src/writer/draft.rs`, `edit.rs`, `error.rs`)
+
+- [x] 2.1 Ajouter `EntrySection` et les variantes `AddEntry`, `RemoveEntry`, `RenameKey` à `FieldEdit`, et `EditError::InvalidEntry { block, index, problem }` avec `EntryProblem` ; vérifier par un test que `Display` et `Debug` de chaque erreur ne contiennent ni la clé ni la valeur fournies
+- [x] 2.2 Implémenter `Draft::from_ast` et l'application ordonnée de toutes les variantes (indices relatifs à l'état courant, arrêt sur la première erreur) ; vérifier par des tests unitaires « supprimer 0 puis modifier 0 cible l'ancien 1 » et « ajouter puis désactiver l'indice ajouté »
+- [x] 2.3 Implémenter la validation des clés (vide, espace/tabulation/saut de ligne, `:`, `~` ou `"` en tête) et des paramètres de requête (`&`, `#`, `=` dans la clé ; `&`, `#`, saut de ligne dans la valeur), clés dupliquées acceptées ; vérifier par un test par problème et un test d'ajout de doublon accepté
+- [x] 2.4 Brancher la synchronisation `params:query` ↔ URL dans le brouillon (reconstruction de l'URL après toute opération sur les paramètres de requête ; remplacement positionnel des activées après `Url`, désactivées en place) ; vérifier par des tests unitaires reprenant les scénarios « Modification de l'URL recalculant les paramètres », « Suppression du dernier paramètre activé » et « En-tête sans effet sur l'URL »
+
+## 3. Diff vers des tranches et sérialisation (`edit.rs`, `format.rs`)
+
+- [x] 3.1 Remplacer `resolve` par le diff brouillon → `Replacement` (suppression = `bytes` vides, modification = `format_entry`, ajout = insertion après la dernière entrée d'origine ou après l'ouverture du bloc) avec tri stable et contrôle de chevauchement autorisant plusieurs insertions au même point ; vérifier que les tests existants de `src/writer/` passent inchangés, sauf celui migré en 3.4
+- [x] 3.2 Implémenter la création de bloc (après le dernier prédécesseur présent dans l'ordre méthode, `params:query`, `params:path`, `headers`, précédée d'une ligne vide, `eol` du fichier) et le retrait d'un bloc devenu vide avec la ligne vide qui le précède ; vérifier par des tests unitaires sur fichier sans saut de ligne final, bloc inséré entre deux blocs, bloc vide non touché conservé, et « ajouter puis supprimer = identité »
+- [x] 3.3 Implémenter `writer::preview(ast, edits) -> Result<RequestView, EditError>` (sérialisation en mémoire, `BruFile::parse`, `RequestView::from_ast`, `EditError::Unreadable` sans contenu) et l'exporter ; vérifier par un test qu'une liste refusée retourne la même erreur que `BruWriter::write_request`
+- [x] 3.4 Migrer `multiline-target.bru`/`.after.bru` d'un paramètre de requête vers un en-tête, et adapter `multiline_target_edit_reloads_with_expected_value` ; vérifier que `cargo test --test writer_fixtures` passe
+
+## 4. Fixtures d'écriture et vérification Bruno
+
+- [x] 4.1 Créer les fixtures `add-header`, `add-block`, `add-path-between`, `remove-entry`, `rename-disabled`, `duplicates`, `query-sync`, `url-sync`, `crlf-add` et leurs `*.after.bru` rédigés à la main (design D9) ; vérifier que chaque fichier se charge sans erreur avec `BruLoader`
+- [x] 4.2 Ajouter à `tests/writer_fixtures.rs` un test par fixture : écriture réelle comparée octet à octet au `*.after.bru`, aucun fichier temporaire résiduel, égalité `preview` = vue relue ; plus les cas « ajout refusé sur fichier modifié entre-temps » (`Stale`, fichier du tiers intact) et « liste avec une modification invalide » (fichier inchangé) ; vérifier que `cargo test --test writer_fixtures` passe
+- [x] 4.3 Écrire `scripts/bruno-lang-dump.js` (`BRUNO_LANG_DIR` ou `$(npm root -g)/@usebruno/cli/node_modules/@usebruno/lang`, `bruToJsonV2`, sortie JSON stable `{ url, headers, params }`) et `scripts/gen-writer-bruno-fixtures.sh` ; vérifier en l'exécutant qu'il produit un `*.after.bruno.json` par `*.after.bru` et versionner ces fichiers
+- [x] 4.4 Écrire `tests/writer_bruno_lang.rs` : test non ignoré comparant chaque `*.after.bruno.json` à la vue `bru-parser` du `*.after.bru` (URL, en-têtes et paramètres avec états), et test `#[ignore]` relançant le script Node et comparant sa sortie au JSON versionné ; vérifier que `cargo test` passe sans Node et que `cargo test --test writer_bruno_lang -- --ignored` passe avec `bru` installé
+
+## 5. Session d'édition : modèle et journal
+
+- [x] 5.1 Ajouter `EditSession.preview: RequestView` (initialisé par `start_edit`), `EditSession.target: InputTarget` et `EditableField::AddRow(EntrySection)` ; faire lire `list_for` (lignes d'ajout après chaque section), `display_name`, `field_value_committed`, `field_value` et `field_enabled` depuis l'aperçu ; vérifier que les tests de `model.rs` passent après adaptation (sept positions pour URL + deux en-têtes + corps) et qu'un test « champ ajouté présent, champ supprimé absent » passe
+- [x] 5.2 Remplacer `update_or_push_pending` par le helper `try_commit` (journal ordonné, coalescence de deux modifications de valeur consécutives du même champ, validation par `writer::preview`, recalcul de `preview`/`fields`, curseur borné, `StatusMessage::EditRefused` sans texte saisi) et y faire passer `validate_input` et `toggle_field` ; vérifier par des tests `update` qu'une modification refusée ne touche ni `pending` ni `dirty` et que les tests existants de saisie et de bascule passent
+- [x] 5.3 Adapter `has_unsaved` (saisie de valeur d'une nouvelle entrée comptée non enregistrée) et `edit_saved` (aperçu remplacé par la vue enregistrée, journal vidé, `fields` recalculé) ; vérifier par des tests que `selection_locked` refuse un changement de requête après un `d` et pendant la saisie de la valeur d'un ajout, et que `edit_saved_success_updates_node_and_resets_dirty_and_pending` passe avec une session contenant un ajout
+
+## 6. Session d'édition : touches et messages
+
+- [x] 6.1 Renommer `AddSecret`/`ForgetSecret` en `Message::Add`/`Message::Delete` aiguillés vers le panneau Secrets (focus Secrets) ou la session (`FieldSelect`), et lier `c` à un nouveau `Message::Rename` ; vérifier que les tests de `secret-env-vars` et `every_key_binding` passent et qu'un test de capture `Input` montre que `a`, `d`, `c` restent du texte en saisie
+- [x] 6.2 Implémenter l'ajout : `Entrée` ou `a` sur `AddRow`, `a` sur une entrée, `NewKey` → `NewValue` par `Entrée`/`Tab` avec vérification de la clé, ajout à la validation de la valeur avec curseur sur l'entrée, `Échap` revenant à `return_cursor`, `a` sans effet sur l'URL/le corps ; vérifier par des tests `update` reprenant « Ajout d'un en-tête depuis un en-tête existant », « Ajout d'un paramètre de requête depuis sa ligne d'ajout », « Ajout dans une section vide », « Abandon pendant la saisie de la valeur » et « a sans effet sur l'URL »
+- [x] 6.3 Implémenter `d` (suppression immédiate, curseur borné, sans effet sur URL, corps et `AddRow`) et `c` (`RenameKey` pré-rempli, validation par `Entrée`/`Tab`, annulation par `Échap`, sans effet sur URL, corps et `AddRow`) ; vérifier par des tests `update` reprenant « Suppression d'un en-tête », « Suppression d'un paramètre de requête », « Sans effet sur le corps », « Renommage d'un paramètre de requête » et « Renommage annulé »
+- [x] 6.4 Remplacer `validate_input` par `commit_input(model) -> bool` traitant les cibles, et faire enregistrer `SaveEdit` seulement si le commit réussit (en `NewKey` : ajout à valeur vide puis enregistrement) ; vérifier par des tests `update` reprenant « Sauvegarde pendant la saisie de la clé d'une nouvelle entrée », « Ctrl+S sur une clé invalide », « Clé d'en-tête invalide », « Validation refusée d'un paramètre de requête » et « Clé dupliquée acceptée »
+
+## 7. Rendu
+
+- [x] 7.1 Faire lire l'aperçu à `request_text_and_fields` en session, rendre les lignes « + Ajouter » (absentes hors session) et la ligne provisoire d'ajout avec leurs `FieldLine`, et placer le curseur de texte sur la clé ou la valeur saisie (`cursor_position_in_detail`, `scroll_edit_into_view`) ; vérifier par des tests de rendu sur `TestBackend` pour « Lignes d'ajout absentes hors session », « URL synchronisée avant sauvegarde » et le curseur visible pendant la saisie d'une clé
+- [x] 7.2 Étendre `session_help_line` (`a`/`d`/`c` sur une entrée, `Entrée ajouter` sur une ligne d'ajout, cible nommée en saisie) et le texte de `StatusMessage::EditRefused` ; vérifier par des tests de rendu reprenant « Barre d'aide sur un en-tête » et « Barre d'aide pendant l'ajout »
+
+## 8. Intégration et contrôles finaux
+
+- [x] 8.1 Ajouter à `tests/field_editing.rs` un parcours complet sur une copie de fixture : ouverture par `Entrée`, ajout d'un paramètre de requête depuis sa ligne d'ajout, `d` sur un en-tête, `c` sur un paramètre de chemin, `Ctrl+S` ; vérifier que le fichier écrit est égal au `*.after.bru` attendu et qu'un `q` tapé pendant la saisie de clé ne ferme pas l'application
+- [x] 8.2 Mettre à jour le `README.md` (lignes d'ajout, touches `a`, `d`, `c` en Sélection de champ, synchronisation de l'URL, caractères refusés dans les paramètres de requête) ; vérifier par relecture que les touches documentées correspondent à la table de `message.rs`
+- [x] 8.3 Vérifier que `openspec validate add-entry-management --strict` passe et que `design.md` (D10) décrit toujours les points de contact avec `add-mouse-support` sans avoir touché à son code
+- [x] 8.4 Lancer `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` puis `cargo test` ; vérifier que les trois passent sans avertissement ni échec

@@ -1,0 +1,16 @@
+{
+  "url": "https://{{host}}/items",
+  "headers": [
+    {
+      "name": "Accept",
+      "value": "application/json",
+      "enabled": true
+    },
+    {
+      "name": "X-Verbose",
+      "value": "1",
+      "enabled": false
+    }
+  ],
+  "params": []
+}

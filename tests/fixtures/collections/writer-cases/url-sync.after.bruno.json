@@ -1,0 +1,30 @@
+{
+  "url": "https://{{host}}/items?page=3&limit=5&flag",
+  "headers": [],
+  "params": [
+    {
+      "name": "page",
+      "value": "3",
+      "enabled": true,
+      "type": "query"
+    },
+    {
+      "name": "debug",
+      "value": "1",
+      "enabled": false,
+      "type": "query"
+    },
+    {
+      "name": "limit",
+      "value": "5",
+      "enabled": true,
+      "type": "query"
+    },
+    {
+      "name": "flag",
+      "value": "",
+      "enabled": true,
+      "type": "query"
+    }
+  ]
+}

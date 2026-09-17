@@ -1,0 +1,20 @@
+meta {
+  name: crlf-add
+  type: http
+  seq: 18
+}
+
+get {
+  url: https://{{host}}/items
+  body: none
+  auth: none
+}
+
+params:path {
+  id: 1
+}
+
+headers {
+  B: 2
+  C: 3
+}

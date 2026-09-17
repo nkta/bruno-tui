@@ -176,10 +176,15 @@ pub enum Message {
     ToggleEnvironmentPicker,
     /// `S`, hors saisie : ouvre ou ferme le panneau des variables secrètes.
     ToggleSecrets,
-    /// `a`, hors saisie, dans le panneau des variables secrètes.
-    AddSecret,
-    /// `d`, hors saisie, dans le panneau des variables secrètes.
-    ForgetSecret,
+    /// `a`, hors saisie : ajoute une variable dans le panneau des variables
+    /// secrètes, ou une entrée en sélection de champ.
+    Add,
+    /// `d`, hors saisie : oublie une variable dans le panneau des variables
+    /// secrètes, ou supprime l'entrée sous le curseur en sélection de champ.
+    Delete,
+    /// `c`, hors saisie, en sélection de champ : renomme la clé de l'entrée
+    /// sous le curseur.
+    Rename,
     /// Caractère tapé pendant une saisie de nom ou de valeur secrète.
     SecretInput(MaskedChar),
     /// `Retour arrière` pendant une saisie secrète.
@@ -252,8 +257,9 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('H') => Message::ToggleHistory,
         KeyCode::Char('E') => Message::ToggleEnvironmentPicker,
         KeyCode::Char('S') => Message::ToggleSecrets,
-        KeyCode::Char('a') => Message::AddSecret,
-        KeyCode::Char('d') => Message::ForgetSecret,
+        KeyCode::Char('a') => Message::Add,
+        KeyCode::Char('d') => Message::Delete,
+        KeyCode::Char('c') => Message::Rename,
         KeyCode::Char('/') => Message::StartSearch,
         KeyCode::Char('|') => Message::OpenFilter,
         KeyCode::Char('n') => Message::NextMatch,
@@ -411,8 +417,9 @@ mod tests {
             (KeyCode::Char('s'), KeyModifiers::CONTROL, "SaveEdit"),
             (KeyCode::Char('S'), none, "ToggleSecrets"),
             (KeyCode::Char('S'), KeyModifiers::SHIFT, "ToggleSecrets"),
-            (KeyCode::Char('a'), none, "AddSecret"),
-            (KeyCode::Char('d'), none, "ForgetSecret"),
+            (KeyCode::Char('a'), none, "Add"),
+            (KeyCode::Char('d'), none, "Delete"),
+            (KeyCode::Char('c'), none, "Rename"),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(
@@ -425,7 +432,7 @@ mod tests {
 
     #[test]
     fn ignored_keys() {
-        assert!(name(key(KeyCode::Char('c'), KeyModifiers::NONE)).is_none());
+        assert!(name(key(KeyCode::Char('z'), KeyModifiers::NONE)).is_none());
         assert!(name(key(KeyCode::Char('q'), KeyModifiers::CONTROL)).is_none());
         assert!(name(key(KeyCode::Char('j'), KeyModifiers::ALT)).is_none());
         assert!(name(key(KeyCode::F(1), KeyModifiers::NONE)).is_none());
@@ -582,6 +589,8 @@ mod tests {
         };
         for (code, expected) in [
             (KeyCode::Char('a'), "InputKey(Char('a'))"),
+            (KeyCode::Char('d'), "InputKey(Char('d'))"),
+            (KeyCode::Char('c'), "InputKey(Char('c'))"),
             (KeyCode::Char('q'), "InputKey(Char('q'))"),
             (KeyCode::Char('r'), "InputKey(Char('r'))"),
             (KeyCode::Char('/'), "InputKey(Char('/'))"),

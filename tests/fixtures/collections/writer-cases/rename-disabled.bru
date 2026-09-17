@@ -1,0 +1,16 @@
+meta {
+  name: rename-disabled
+  type: http
+  seq: 14
+}
+
+get {
+  url: https://{{host}}/items
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+  ~X-Debug: 1
+}

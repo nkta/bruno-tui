@@ -1,0 +1,18 @@
+{
+  "url": "https://{{host}}/items?sort=asc#top",
+  "headers": [],
+  "params": [
+    {
+      "name": "size",
+      "value": "10",
+      "enabled": false,
+      "type": "query"
+    },
+    {
+      "name": "sort",
+      "value": "asc",
+      "enabled": true,
+      "type": "query"
+    }
+  ]
+}

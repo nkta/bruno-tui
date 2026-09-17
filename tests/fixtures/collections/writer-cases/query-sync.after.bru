@@ -1,0 +1,16 @@
+meta {
+  name: query-sync
+  type: http
+  seq: 16
+}
+
+get {
+  url: https://{{host}}/items?sort=asc#top
+  body: none
+  auth: none
+}
+
+params:query {
+  ~size: 10
+  sort: asc
+}

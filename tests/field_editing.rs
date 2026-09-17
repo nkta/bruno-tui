@@ -399,3 +399,81 @@ async fn cancelled_input_and_closed_session_never_write() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn add_delete_rename_then_save_matches_expected_after_file() {
+    let dir = workdir("entry-flow");
+    copy_single_case("session-flow.bru", &dir);
+
+    let (clipboard, _) = SpyClipboard::new();
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let handle = spawn_run(
+        dir.clone(),
+        sender.clone(),
+        events,
+        Arc::new(BruWriter),
+        clipboard,
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let send = |event: AppEvent| {
+        let sender = sender.clone();
+        async move { sender.send(event).await.expect("envoi") }
+    };
+
+    // Détail, ouverture de la session. Positions : Url, Accept, X-Debug,
+    // + en-tête, + paramètre de requête, id, + paramètre de chemin.
+    send(key(KeyCode::Tab)).await;
+    send(key(KeyCode::Enter)).await;
+
+    // Ajout du paramètre de requête `page: 2` depuis sa ligne d'ajout ; un
+    // `q` tapé dans la clé est du texte et ne ferme pas l'application.
+    for _ in 0..4 {
+        send(key(KeyCode::Down)).await;
+    }
+    send(key(KeyCode::Enter)).await;
+    send(key(KeyCode::Char('q'))).await;
+    send(key(KeyCode::Backspace)).await;
+    for c in "page".chars() {
+        send(key(KeyCode::Char(c))).await;
+    }
+    send(key(KeyCode::Tab)).await;
+    send(key(KeyCode::Char('2'))).await;
+    send(key(KeyCode::Enter)).await;
+
+    // Curseur sur `page` : remonter sur `X-Debug` et le supprimer.
+    for _ in 0..2 {
+        send(key(KeyCode::Up)).await;
+    }
+    send(key(KeyCode::Char('d'))).await;
+
+    // Curseur sur la ligne d'ajout d'en-tête : descendre sur `id` et le
+    // renommer en `userId`.
+    for _ in 0..3 {
+        send(key(KeyCode::Down)).await;
+    }
+    send(key(KeyCode::Char('c'))).await;
+    send(key(KeyCode::Backspace)).await;
+    send(key(KeyCode::Backspace)).await;
+    for c in "userId".chars() {
+        send(key(KeyCode::Char(c))).await;
+    }
+    send(key(KeyCode::Enter)).await;
+
+    send(ctrl('s')).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    send(key(KeyCode::Char('q'))).await;
+
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("l'application se ferme sans confirmation après la sauvegarde")
+        .expect("join handle");
+    assert!(matches!(exit, Exit::Normal));
+
+    let expected =
+        fs::read_to_string(writer_cases().join("session-flow.after.bru")).expect("fixture after");
+    let written = fs::read_to_string(dir.join("session-flow.bru")).expect("relecture");
+    assert_eq!(written, expected);
+
+    let _ = fs::remove_dir_all(&dir);
+}

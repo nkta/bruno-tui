@@ -1,0 +1,19 @@
+meta {
+  name: duplicates
+  type: http
+  seq: 15
+}
+
+get {
+  url: https://{{host}}/items?tag=a
+  body: none
+  auth: none
+}
+
+params:query {
+  tag: a
+}
+
+headers {
+  Accept: text/plain
+}
