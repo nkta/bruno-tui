@@ -43,6 +43,13 @@ fn key(code: KeyCode) -> AppEvent {
     AppEvent::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
 }
 
+fn ctrl(c: char) -> AppEvent {
+    AppEvent::Terminal(Event::Key(KeyEvent::new(
+        KeyCode::Char(c),
+        KeyModifiers::CONTROL,
+    )))
+}
+
 fn screen(terminal: &Terminal<TestBackend>) -> Vec<String> {
     let buffer = terminal.backend().buffer();
     (0..buffer.area.height)
@@ -157,17 +164,17 @@ async fn save_does_not_block_the_interface_during_slow_write() {
     // Attente du chargement initial
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Navigation : passer au détail (Tab), démarrer l'édition (e)
+    // Navigation : passer au détail (Tab), ouvrir l'édition (Entrée)
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Char('e'))).await.expect("e");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
 
-    // Mode Insert (i), frappe d'un caractère, sortie d'Insert (Esc)
-    sender.send(key(KeyCode::Char('i'))).await.expect("i");
+    // Saisie de l'URL (Entrée), frappe d'un caractère, validation (Tab)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
     sender.send(key(KeyCode::Char('!'))).await.expect("char");
-    sender.send(key(KeyCode::Esc)).await.expect("esc");
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
 
-    // Lancer la sauvegarde (w)
-    sender.send(key(KeyCode::Char('w'))).await.expect("w");
+    // Lancer la sauvegarde (Ctrl+S)
+    sender.send(ctrl('s')).await.expect("ctrl+s");
 
     // Attendre la notification que write_request a démarré
     tokio::task::spawn_blocking(move || {
@@ -230,10 +237,10 @@ async fn save_url_matches_expected_after_file_byte_for_byte() {
 
     // Aller sur le focus Détail (Tab)
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    // Ouvrir la session d'édition (e)
-    sender.send(key(KeyCode::Char('e'))).await.expect("e");
-    // Entrer en mode Insert (i)
-    sender.send(key(KeyCode::Char('i'))).await.expect("i");
+    // Ouvrir la session d'édition (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+    // Commencer la saisie de l'URL (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
 
     // Remplacer "ping" par "pong" à la fin de "https://{{host}}/ping"
     for _ in 0..4 {
@@ -246,11 +253,8 @@ async fn save_url_matches_expected_after_file_byte_for_byte() {
         sender.send(key(KeyCode::Char(c))).await.expect("char");
     }
 
-    // Sortir d'Insert (Esc)
-    sender.send(key(KeyCode::Esc)).await.expect("esc");
-
-    // Sauvegarder (w)
-    sender.send(key(KeyCode::Char('w'))).await.expect("w");
+    // Valider et enregistrer en une touche (Ctrl+S)
+    sender.send(ctrl('s')).await.expect("ctrl+s");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Quitter (q)
@@ -296,14 +300,14 @@ async fn stale_file_refusal_keeps_screen_state_and_shows_conflict_message() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Focus Détail (Tab) et ouvrir édition (e)
+    // Focus Détail (Tab) et ouvrir édition (Entrée)
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Char('e'))).await.expect("e");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
 
-    // Modifier l'URL en mémoire
-    sender.send(key(KeyCode::Char('i'))).await.expect("i");
+    // Modifier l'URL en mémoire (validée par Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
     sender.send(key(KeyCode::Char('X'))).await.expect("char");
-    sender.send(key(KeyCode::Esc)).await.expect("esc");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
 
     // Modifier le fichier sur disque en externe pour invalider le FileStamp
     let target_file = dir.join("simple.bru");
@@ -314,8 +318,8 @@ async fn stale_file_refusal_keeps_screen_state_and_shows_conflict_message() {
     )
     .expect("write external");
 
-    // Tentative de sauvegarde (w)
-    sender.send(key(KeyCode::Char('w'))).await.expect("w");
+    // Tentative de sauvegarde (Ctrl+S)
+    sender.send(ctrl('s')).await.expect("ctrl+s");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Tenter de quitter (q) -> doit demander confirmation car session toujours modifiée !
@@ -342,6 +346,56 @@ async fn stale_file_refusal_keeps_screen_state_and_shows_conflict_message() {
         found_edit,
         "l'écran doit avoir conservé l'état de l'édition locale malgré l'erreur de sauvegarde"
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn cancelled_input_and_closed_session_never_write() {
+    let dir = workdir("cancel-no-write");
+    copy_single_case("simple.bru", &dir);
+    let before = fs::read(dir.join("simple.bru")).expect("lecture initiale");
+
+    let (clipboard, _) = SpyClipboard::new();
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let handle = spawn_run(
+        dir.clone(),
+        sender.clone(),
+        events,
+        Arc::new(BruWriter),
+        clipboard,
+    );
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Saisie annulée par Échap : `q` tapé est du texte, pas une sortie.
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+    for c in "qr/".chars() {
+        sender.send(key(KeyCode::Char(c))).await.expect("char");
+    }
+    sender.send(key(KeyCode::Esc)).await.expect("esc");
+
+    // Saisie validée puis session fermée en abandonnant (Échap, y).
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+    sender.send(key(KeyCode::Char('Z'))).await.expect("char");
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+    sender.send(key(KeyCode::Esc)).await.expect("esc");
+    sender.send(key(KeyCode::Char('y'))).await.expect("y");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Session fermée et propre : `q` quitte sans confirmation.
+    sender.send(key(KeyCode::Char('q'))).await.expect("quit");
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("timeout")
+        .expect("join");
+
+    assert!(matches!(exit, Exit::Normal));
+    let after = fs::read(dir.join("simple.bru")).expect("lecture finale");
+    assert_eq!(after, before, "aucune écriture sans Ctrl+S");
 
     let _ = fs::remove_dir_all(&dir);
 }

@@ -30,12 +30,30 @@ use crate::secrets::Resolved;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextCapture {
     Search,
-    Insert,
+    /// Saisie de la valeur d'un champ en session d'édition.
+    Input,
     Filter,
     /// Nom d'une variable secrète à ajouter, en clair.
     SecretName,
     /// Valeur d'une variable secrète, masquée.
     SecretValue,
+}
+
+/// Touche d'édition du tampon pendant la saisie d'un champ
+/// (`improve-direct-editing`, D4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKey {
+    Char(char),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    /// Saut de ligne sur le corps, validation sur un champ à une ligne.
+    Enter,
 }
 
 /// Caractère tapé dans le panneau des variables secrètes : son `Debug`
@@ -58,7 +76,7 @@ pub enum Message {
     Home,
     End,
     Left,
-    /// `→`, `l` ou `Entrée`.
+    /// `→` ou `l` (et `Entrée` hors du détail, via `Enter`).
     Right,
     /// `Tab` : bascule le focus.
     NextFocus,
@@ -122,26 +140,21 @@ pub enum Message {
     },
     /// `e`, hors saisie.
     StartEdit,
-    /// `↓`/`j` (+1), `↑`/`k` (-1), en session Normal.
+    /// `Entrée`, hors saisie : ouvre la session ou la saisie d'un champ
+    /// dans le détail, équivaut à `Right` partout ailleurs.
+    Enter,
+    /// `↓`/`j` (+1), `↑`/`k` (-1), en sélection de champ.
     MoveFieldCursor(i8),
-    /// `Espace`, en session Normal.
+    /// `Espace`, en sélection de champ.
     ToggleField,
-    /// `i`, en session Normal.
-    EnterInsert,
-    /// `w`, en session Normal.
+    /// `Ctrl+S`, en session : valide une saisie en cours puis enregistre.
     SaveEdit,
-    /// `Échap`, en saisie Insert.
-    LeaveInsert,
-    /// Caractère tapé pendant une saisie Insert.
-    InsertChar(char),
-    /// `Retour arrière` pendant une saisie Insert.
-    InsertBackspace,
-    /// Flèche gauche pendant une saisie Insert.
-    InsertCursorLeft,
-    /// Flèche droite pendant une saisie Insert.
-    InsertCursorRight,
-    /// `Entrée` pendant une saisie Insert.
-    InsertEnter,
+    /// Touche d'édition du tampon pendant une saisie de champ.
+    InputKey(InputKey),
+    /// `Tab` pendant une saisie de champ.
+    ValidateInput,
+    /// `Échap` pendant une saisie de champ.
+    CancelInput,
     /// Renvoyé par la boucle après `Command::SaveEdit`.
     EditSaved {
         path: PathBuf,
@@ -211,6 +224,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         return match key.code {
             KeyCode::Char('c') => Some(Message::ForceQuit),
             KeyCode::Char('x') => Some(Message::CancelRun),
+            KeyCode::Char('s') => Some(Message::SaveEdit),
             _ => None,
         };
     }
@@ -224,7 +238,8 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Up | KeyCode::Char('k') => Message::Up,
         KeyCode::Down | KeyCode::Char('j') => Message::Down,
         KeyCode::Left | KeyCode::Char('h') => Message::Left,
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => Message::Right,
+        KeyCode::Right | KeyCode::Char('l') => Message::Right,
+        KeyCode::Enter => Message::Enter,
         KeyCode::Home | KeyCode::Char('g') => Message::Home,
         KeyCode::End | KeyCode::Char('G') => Message::End,
         KeyCode::PageUp => Message::PageUp,
@@ -247,8 +262,6 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('y') => Message::Yank,
         KeyCode::Char('e') => Message::StartEdit,
         KeyCode::Char(' ') => Message::ToggleField,
-        KeyCode::Char('i') => Message::EnterInsert,
-        KeyCode::Char('w') => Message::SaveEdit,
         _ => return None,
     };
     Some(message)
@@ -259,7 +272,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
 fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
     match capture {
         TextCapture::Search => search_capture_message(key),
-        TextCapture::Insert => insert_capture_message(key),
+        TextCapture::Input => input_capture_message(key),
         TextCapture::Filter => filter_capture_message(key),
         TextCapture::SecretName | TextCapture::SecretValue => secret_capture_message(key),
     }
@@ -277,17 +290,26 @@ fn secret_capture_message(key: KeyEvent) -> Option<Message> {
     }
 }
 
-/// Capture des caractères en mode Insert de session d'édition.
-fn insert_capture_message(key: KeyEvent) -> Option<Message> {
-    match key.code {
-        KeyCode::Char(c) => Some(Message::InsertChar(c)),
-        KeyCode::Backspace => Some(Message::InsertBackspace),
-        KeyCode::Left => Some(Message::InsertCursorLeft),
-        KeyCode::Right => Some(Message::InsertCursorRight),
-        KeyCode::Enter => Some(Message::InsertEnter),
-        KeyCode::Esc => Some(Message::LeaveInsert),
-        _ => None,
-    }
+/// Capture pendant la saisie d'un champ : toute touche imprimable est du
+/// texte, `Tab` valide, `Échap` annule ; le reste est ignoré. `Ctrl+C`,
+/// `Ctrl+X` et `Ctrl+S` sont traités en amont par `key_message`.
+fn input_capture_message(key: KeyEvent) -> Option<Message> {
+    let input = match key.code {
+        KeyCode::Char(c) => InputKey::Char(c),
+        KeyCode::Backspace => InputKey::Backspace,
+        KeyCode::Delete => InputKey::Delete,
+        KeyCode::Left => InputKey::Left,
+        KeyCode::Right => InputKey::Right,
+        KeyCode::Up => InputKey::Up,
+        KeyCode::Down => InputKey::Down,
+        KeyCode::Home => InputKey::Home,
+        KeyCode::End => InputKey::End,
+        KeyCode::Enter => InputKey::Enter,
+        KeyCode::Tab => return Some(Message::ValidateInput),
+        KeyCode::Esc => return Some(Message::CancelInput),
+        _ => return None,
+    };
+    Some(Message::InputKey(input))
 }
 
 /// Un caractère composé (`Alt` inclus) reste un caractère pendant la
@@ -355,7 +377,7 @@ mod tests {
             (KeyCode::Char('h'), none, "Left"),
             (KeyCode::Right, none, "Right"),
             (KeyCode::Char('l'), none, "Right"),
-            (KeyCode::Enter, none, "Right"),
+            (KeyCode::Enter, none, "Enter"),
             (KeyCode::Home, none, "Home"),
             (KeyCode::Char('g'), none, "Home"),
             (KeyCode::End, none, "End"),
@@ -386,8 +408,7 @@ mod tests {
             (KeyCode::Char('y'), none, "Yank"),
             (KeyCode::Char('e'), none, "StartEdit"),
             (KeyCode::Char(' '), none, "ToggleField"),
-            (KeyCode::Char('i'), none, "EnterInsert"),
-            (KeyCode::Char('w'), none, "SaveEdit"),
+            (KeyCode::Char('s'), KeyModifiers::CONTROL, "SaveEdit"),
             (KeyCode::Char('S'), none, "ToggleSecrets"),
             (KeyCode::Char('S'), KeyModifiers::SHIFT, "ToggleSecrets"),
             (KeyCode::Char('a'), none, "AddSecret"),
@@ -547,51 +568,65 @@ mod tests {
     }
 
     #[test]
-    fn insert_capture_redirects_navigation_keys_to_input() {
+    fn removed_vim_session_keys_are_unbound() {
         let none = KeyModifiers::NONE;
+        assert!(name(key(KeyCode::Char('i'), none)).is_none());
+        assert!(name(key(KeyCode::Char('w'), none)).is_none());
+    }
+
+    #[test]
+    fn input_capture_turns_every_printable_key_into_text() {
+        let none = KeyModifiers::NONE;
+        let capture = |code, modifiers| {
+            to_message(key(code, modifiers), Some(TextCapture::Input)).map(|m| format!("{m:?}"))
+        };
         for (code, expected) in [
-            (KeyCode::Char('a'), "InsertChar"),
-            (KeyCode::Char('j'), "InsertChar"),
-            (KeyCode::Char('q'), "InsertChar"),
-            (KeyCode::Char(' '), "InsertChar"),
-            (KeyCode::Backspace, "InsertBackspace"),
-            (KeyCode::Left, "InsertCursorLeft"),
-            (KeyCode::Right, "InsertCursorRight"),
-            (KeyCode::Enter, "InsertEnter"),
-            (KeyCode::Esc, "LeaveInsert"),
+            (KeyCode::Char('a'), "InputKey(Char('a'))"),
+            (KeyCode::Char('q'), "InputKey(Char('q'))"),
+            (KeyCode::Char('r'), "InputKey(Char('r'))"),
+            (KeyCode::Char('/'), "InputKey(Char('/'))"),
+            (KeyCode::Char('S'), "InputKey(Char('S'))"),
+            (KeyCode::Char(' '), "InputKey(Char(' '))"),
+            (KeyCode::Backspace, "InputKey(Backspace)"),
+            (KeyCode::Delete, "InputKey(Delete)"),
+            (KeyCode::Left, "InputKey(Left)"),
+            (KeyCode::Right, "InputKey(Right)"),
+            (KeyCode::Up, "InputKey(Up)"),
+            (KeyCode::Down, "InputKey(Down)"),
+            (KeyCode::Home, "InputKey(Home)"),
+            (KeyCode::End, "InputKey(End)"),
+            (KeyCode::Enter, "InputKey(Enter)"),
+            (KeyCode::Tab, "ValidateInput"),
+            (KeyCode::Esc, "CancelInput"),
         ] {
-            assert_eq!(
-                name_capturing(key(code, none), TextCapture::Insert).as_deref(),
-                Some(expected),
-                "{code:?}"
-            );
+            assert_eq!(capture(code, none).as_deref(), Some(expected), "{code:?}");
         }
-        // Alt inclus lors de la saisie
+        // Maj et Alt composent des caractères.
         assert_eq!(
-            name_capturing(
-                key(KeyCode::Char('e'), KeyModifiers::ALT),
-                TextCapture::Insert
-            )
-            .as_deref(),
-            Some("InsertChar")
+            capture(KeyCode::Char('E'), KeyModifiers::SHIFT).as_deref(),
+            Some("InputKey(Char('E'))")
         );
-        // Ctrl+C reste prioritaire
         assert_eq!(
-            name_capturing(
-                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                TextCapture::Insert
-            )
-            .as_deref(),
+            capture(KeyCode::Char('e'), KeyModifiers::ALT).as_deref(),
+            Some("InputKey(Char('e'))")
+        );
+        // Seules Ctrl+C, Ctrl+X et Ctrl+S gardent un sens global.
+        assert_eq!(
+            capture(KeyCode::Char('c'), KeyModifiers::CONTROL).as_deref(),
             Some("ForceQuit")
         );
-        // Touches non liées en saisie Insert
-        assert!(name_capturing(key(KeyCode::Up, none), TextCapture::Insert).is_none());
-        assert!(name_capturing(key(KeyCode::Down, none), TextCapture::Insert).is_none());
-        assert!(name_capturing(key(KeyCode::Tab, none), TextCapture::Insert).is_none());
-        assert!(name_capturing(key(KeyCode::PageDown, none), TextCapture::Insert).is_none());
-        assert!(name_capturing(key(KeyCode::Home, none), TextCapture::Insert).is_none());
-        assert!(name_capturing(key(KeyCode::End, none), TextCapture::Insert).is_none());
-        assert!(name_capturing(key(KeyCode::F(1), none), TextCapture::Insert).is_none());
+        assert_eq!(
+            capture(KeyCode::Char('x'), KeyModifiers::CONTROL).as_deref(),
+            Some("CancelRun")
+        );
+        assert_eq!(
+            capture(KeyCode::Char('s'), KeyModifiers::CONTROL).as_deref(),
+            Some("SaveEdit")
+        );
+        // Tab ne change jamais le focus pendant une saisie.
+        assert_ne!(capture(KeyCode::Tab, none).as_deref(), Some("NextFocus"));
+        assert!(capture(KeyCode::PageDown, none).is_none());
+        assert!(capture(KeyCode::F(1), none).is_none());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use super::theme;
 use super::tree::file_name;
 use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
-    EditMode, EditSession, EditableField, Model, RequestOutcome, ResponseTab, field_enabled,
+    EditSession, EditState, EditableField, Model, RequestOutcome, ResponseTab, field_enabled,
     field_value,
 };
 use crate::app::update::{response_selection_range, selection_range};
@@ -154,8 +154,49 @@ pub fn body_label(kind: &BodyKind) -> &str {
     }
 }
 
+/// Emplacement d'un champ éditable dans le texte du détail
+/// (`improve-direct-editing`, D7) : construit en même temps que les
+/// lignes, pour ne jamais recalculer des indices de ligne à part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldLine {
+    pub field: EditableField,
+    /// Première ligne logique du champ dans le texte du détail.
+    pub line: usize,
+    /// Nombre de lignes occupées (plusieurs pour le corps).
+    pub count: usize,
+    /// Largeur d'affichage du préfixe qui précède la valeur sur la ligne.
+    pub prefix_width: usize,
+}
+
+/// Retire de `text` les premières colonnes d'affichage, sans jamais couper
+/// un caractère : renvoie le reste et la largeur réellement retirée.
+fn skip_columns(text: &str, columns: usize) -> (&str, usize) {
+    let mut skipped = 0;
+    for (index, c) in text.char_indices() {
+        let width = Line::raw(c.to_string()).width();
+        if skipped + width > columns {
+            return (&text[index..], skipped);
+        }
+        skipped += width;
+    }
+    ("", skipped)
+}
+
+/// Décalage horizontal à appliquer à la valeur de `field` : celui de la
+/// session si ce champ est en saisie, zéro sinon.
+fn value_hscroll(session: Option<&EditSession>, field: &EditableField) -> usize {
+    session
+        .filter(|s| matches!(s.state, EditState::Input(_)) && s.current_field() == Some(*field))
+        .map_or(0, |s| usize::from(s.hscroll))
+}
+
+fn is_field_cursor(session: Option<&EditSession>, field: &EditableField) -> bool {
+    session.is_some_and(|s| s.fields.get(s.cursor) == Some(field))
+}
+
 fn editable_entries<F>(
     lines: &mut Vec<Line<'static>>,
+    field_lines: &mut Vec<FieldLine>,
     values: &[KeyValue],
     session: Option<&EditSession>,
     view: &RequestView,
@@ -170,8 +211,16 @@ fn editable_entries<F>(
     for (i, entry) in values.iter().enumerate() {
         let field = field_ctor(i);
         let val = session.map_or(entry.value.as_str(), |s| field_value(s, view, &field));
+        let (val, _) = skip_columns(val, value_hscroll(session, &field));
         let enabled = session.map_or(entry.enabled, |s| field_enabled(s, view, &field));
-        let text = format!("  {}: {}", entry.key, val);
+        let prefix = format!("  {}: ", entry.key);
+        field_lines.push(FieldLine {
+            field,
+            line: lines.len(),
+            count: 1,
+            prefix_width: Line::raw(prefix.as_str()).width(),
+        });
+        let text = format!("{prefix}{val}");
         let mut line = if enabled {
             Line::raw(text)
         } else {
@@ -180,7 +229,7 @@ fn editable_entries<F>(
                 Style::new().add_modifier(Modifier::DIM),
             )
         };
-        if session.is_some_and(|s| s.fields.get(s.cursor) == Some(&field)) {
+        if is_field_cursor(session, &field) {
             line = tint_line(line, FIELD_CURSOR_STYLE);
         }
         lines.push(line);
@@ -192,7 +241,17 @@ pub fn request_text_with_session(
     request: &RequestNode,
     session: Option<&EditSession>,
 ) -> Text<'static> {
+    request_text_and_fields(request, session).0
+}
+
+/// Texte de détail d'une requête et emplacement de chacun de ses champs
+/// éditables (`improve-direct-editing`, D7).
+pub fn request_text_and_fields(
+    request: &RequestNode,
+    session: Option<&EditSession>,
+) -> (Text<'static>, Vec<FieldLine>) {
     let view = &request.view;
+    let mut field_lines = Vec::new();
     let node_name = view.name.clone().unwrap_or_else(|| {
         request
             .path
@@ -208,14 +267,19 @@ pub fn request_text_with_session(
 
     let url_field = EditableField::Url;
     let url_val = session.map_or(view.url.as_str(), |s| field_value(s, view, &url_field));
+    let (url_val, _) = skip_columns(url_val, value_hscroll(session, &url_field));
+    let method = format!("{} ", view.method);
+    field_lines.push(FieldLine {
+        field: url_field,
+        line: lines.len(),
+        count: 1,
+        prefix_width: Line::raw(method.as_str()).width(),
+    });
     let mut url_line = Line::from(vec![
-        Span::styled(
-            format!("{} ", view.method),
-            Style::new().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(method, Style::new().add_modifier(Modifier::BOLD)),
         Span::raw(url_val.to_owned()),
     ]);
-    if session.is_some_and(|s| s.fields.get(s.cursor) == Some(&url_field)) {
+    if is_field_cursor(session, &url_field) {
         url_line = tint_line(url_line, FIELD_CURSOR_STYLE);
     }
     lines.push(url_line);
@@ -232,6 +296,7 @@ pub fn request_text_with_session(
     lines.push(section("En-têtes"));
     editable_entries(
         &mut lines,
+        &mut field_lines,
         &view.headers,
         session,
         view,
@@ -241,6 +306,7 @@ pub fn request_text_with_session(
     lines.push(section("Paramètres de requête"));
     editable_entries(
         &mut lines,
+        &mut field_lines,
         &view.query_params,
         session,
         view,
@@ -250,6 +316,7 @@ pub fn request_text_with_session(
     lines.push(section("Paramètres de chemin"));
     editable_entries(
         &mut lines,
+        &mut field_lines,
         &view.path_params,
         session,
         view,
@@ -264,14 +331,25 @@ pub fn request_text_with_session(
             match &body.content {
                 BodyContent::Text(text) => {
                     let field = EditableField::BodyText;
-                    let is_cursor = session.is_some_and(|s| s.fields.get(s.cursor) == Some(&field));
+                    let is_cursor = is_field_cursor(session, &field);
                     let val = session.map_or(text.as_str(), |s| field_value(s, view, &field));
+                    let hscroll = value_hscroll(session, &field);
+                    let first = lines.len();
                     for l in val.split('\n') {
+                        let (l, _) = skip_columns(l, hscroll);
                         let mut line = Line::raw(format!("  {l}"));
                         if is_cursor {
                             line = tint_line(line, FIELD_CURSOR_STYLE);
                         }
                         lines.push(line);
+                    }
+                    if EditableField::list_for(view).contains(&field) {
+                        field_lines.push(FieldLine {
+                            field,
+                            line: first,
+                            count: lines.len() - first,
+                            prefix_width: 2,
+                        });
                     }
                 }
                 BodyContent::Entries(values) => entries(&mut lines, values),
@@ -294,105 +372,29 @@ pub fn request_text_with_session(
     if !view.assertions.is_empty() {
         entries(&mut lines, &view.assertions);
     }
-    Text::from(lines)
+    (Text::from(lines), field_lines)
 }
 
-/// Position du curseur de texte (ligne, colonne) dans le texte du détail pour une session d'édition en mode Insert (D8).
+/// Position du curseur de texte pendant une saisie : ligne logique dans le
+/// texte du détail et colonne d'affichage dans la ligne, décalage
+/// horizontal déjà appliqué (`improve-direct-editing`, D7).
 pub fn cursor_position_in_detail(
     request: &RequestNode,
     session: &EditSession,
 ) -> Option<(usize, usize)> {
-    let (text_cursor, buffer) = match &session.mode {
-        EditMode::Insert {
-            text_cursor,
-            buffer,
-        } => (*text_cursor, buffer),
-        _ => return None,
+    let EditState::Input(input) = &session.state else {
+        return None;
     };
-
-    let current_field = session.fields.get(session.cursor)?;
-    let view = &request.view;
-
-    let chars_before: Vec<char> = buffer.chars().take(text_cursor).collect();
-
-    match current_field {
-        EditableField::Url => {
-            let line_index = 3;
-            let method_len = format!("{} ", view.method).chars().count();
-            let col_index = method_len + chars_before.len();
-            Some((line_index, col_index))
-        }
-        EditableField::HeaderValue(idx) => {
-            let entry = view.headers.get(*idx)?;
-            let line_index = 7 + idx;
-            let prefix_len = format!("  {}: ", entry.key).chars().count();
-            let col_index = prefix_len + chars_before.len();
-            Some((line_index, col_index))
-        }
-        EditableField::QueryParamValue(idx) => {
-            let entry = view.query_params.get(*idx)?;
-            let headers_count = if view.headers.is_empty() {
-                1
-            } else {
-                view.headers.len()
-            };
-            let q_section_line = 7 + headers_count;
-            let line_index = q_section_line + 1 + idx;
-            let prefix_len = format!("  {}: ", entry.key).chars().count();
-            let col_index = prefix_len + chars_before.len();
-            Some((line_index, col_index))
-        }
-        EditableField::PathParamValue(idx) => {
-            let entry = view.path_params.get(*idx)?;
-            let headers_count = if view.headers.is_empty() {
-                1
-            } else {
-                view.headers.len()
-            };
-            let q_section_line = 7 + headers_count;
-            let q_count = if view.query_params.is_empty() {
-                1
-            } else {
-                view.query_params.len()
-            };
-            let p_section_line = q_section_line + 1 + q_count;
-            let line_index = p_section_line + 1 + idx;
-            let prefix_len = format!("  {}: ", entry.key).chars().count();
-            let col_index = prefix_len + chars_before.len();
-            Some((line_index, col_index))
-        }
-        EditableField::BodyText => {
-            let headers_count = if view.headers.is_empty() {
-                1
-            } else {
-                view.headers.len()
-            };
-            let q_section_line = 7 + headers_count;
-            let q_count = if view.query_params.is_empty() {
-                1
-            } else {
-                view.query_params.len()
-            };
-            let p_section_line = q_section_line + 1 + q_count;
-            let p_count = if view.path_params.is_empty() {
-                1
-            } else {
-                view.path_params.len()
-            };
-            let body_content_start = p_section_line + 1 + p_count + 2;
-
-            let newlines_count = chars_before.iter().filter(|&&c| c == '\n').count();
-            let last_newline_pos = chars_before.iter().rposition(|&c| c == '\n');
-            let chars_on_line = match last_newline_pos {
-                Some(pos) => chars_before.len().saturating_sub(pos + 1),
-                None => chars_before.len(),
-            };
-
-            let line_index = body_content_start + newlines_count;
-            let col_index = 2 + chars_on_line;
-            Some((line_index, col_index))
-        }
-    }
+    let field = session.current_field()?;
+    let (_, field_lines) = request_text_and_fields(request, Some(session));
+    let location = field_lines.iter().find(|l| l.field == field)?;
+    let (line, _) = input.cursor_line_col();
+    let before = input.text_before_cursor_on_line();
+    let (visible, _) = skip_columns(&before, usize::from(session.hscroll));
+    Some((
+        location.line + line,
+        location.prefix_width + Line::raw(visible).width(),
+    ))
 }
 
 /// Représentation d'une valeur JSON pour l'affichage : sans guillemets pour
@@ -814,10 +816,100 @@ mod tests {
         assert_ne!(section_style, label_style, "section vs libellé");
     }
 
-    /// Garde-fou direct sur la contrainte de design.md : le nombre de
-    /// lignes produit par `request_text_with_session` ne doit pas changer,
-    /// sous peine de casser `cursor_position_in_detail`
-    /// (`insert_cursor_positioning_and_bounds`).
+    /// Garde-fou sur le nombre de lignes du détail d'une requête ; la
+    /// position des champs éditables vient de `request_text_and_fields`,
+    /// pas d'indices supposés.
+    fn session_on(model: &mut crate::app::model::Model, path: &str) {
+        use crate::app::message::Message;
+        use crate::app::update::update;
+        select(model, path);
+        update(model, Message::NextFocus);
+        update(model, Message::Enter);
+    }
+
+    fn cursor_for(
+        model: &mut crate::app::model::Model,
+        field: EditableField,
+        keys: &[crate::app::message::InputKey],
+    ) -> (usize, usize) {
+        use crate::app::message::Message;
+        use crate::app::update::update;
+        let index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == field))
+            .expect("champ");
+        model.editing.as_mut().expect("session").cursor = index;
+        update(model, Message::Enter);
+        for key in keys {
+            update(model, Message::InputKey(*key));
+        }
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        let position = cursor_position_in_detail(request, model.editing.as_ref().expect("session"))
+            .expect("position");
+        update(model, Message::CancelInput);
+        position
+    }
+
+    /// La position du curseur de texte se lit dans la table des champs,
+    /// jamais dans des indices de ligne supposés.
+    #[test]
+    fn cursor_position_comes_from_the_field_table() {
+        use crate::app::message::InputKey;
+        let text_line = |text: &Text<'_>, needle: &str| {
+            text.lines
+                .iter()
+                .position(|l| l.spans.iter().any(|s| s.content.contains(needle)))
+                .expect("ligne")
+        };
+
+        let mut model = loaded_model((300, 40));
+        session_on(&mut model, "post-json.bru");
+        let text = detail_text(&model);
+        // URL : après « POST ».
+        let (line, col) = cursor_for(&mut model, EditableField::Url, &[InputKey::Home]);
+        assert_eq!(line, text_line(&text, "https://{{host}}/items"));
+        assert_eq!(col, "POST ".len());
+        // En-tête : après « Content-Type: », curseur en fin de valeur.
+        let (line, col) = cursor_for(&mut model, EditableField::HeaderValue(0), &[]);
+        assert_eq!(line, text_line(&text, "Content-Type: "));
+        assert_eq!(col, "  Content-Type: application/json".len());
+        // Deuxième ligne du corps, colonne 1 après l'indentation.
+        let (line, col) = cursor_for(
+            &mut model,
+            EditableField::BodyText,
+            &[
+                InputKey::Up,
+                InputKey::Up,
+                InputKey::Up,
+                InputKey::Up,
+                InputKey::Up,
+                InputKey::Up,
+                InputKey::Up,
+                InputKey::Up,
+                InputKey::Down,
+                InputKey::Home,
+                InputKey::Right,
+            ],
+        );
+        assert_eq!(line, text_line(&text, "\"a\": {"));
+        assert_eq!(col, 3);
+
+        // Paramètre de requête : multiline.bru.
+        let mut model = loaded_model((300, 40));
+        session_on(&mut model, "multiline.bru");
+        let text = detail_text(&model);
+        let (line, col) = cursor_for(
+            &mut model,
+            EditableField::QueryParamValue(1),
+            &[InputKey::Home],
+        );
+        assert_eq!(line, text_line(&text, "page: 1"));
+        assert_eq!(col, "  page: ".len());
+    }
+
     #[test]
     fn request_detail_line_count_is_unchanged() {
         let mut model = loaded_model((100, 30));

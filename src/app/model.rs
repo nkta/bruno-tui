@@ -18,6 +18,7 @@ use crate::writer::{FieldEdit, FileStamp};
 use super::filter::FilterState;
 use super::message::TextCapture;
 use super::search::SearchState;
+use super::text_input::TextInput;
 
 /// État du chargement de la collection.
 #[derive(Debug)]
@@ -180,30 +181,44 @@ pub struct DetailSelection {
 #[derive(Debug, Clone)]
 pub struct EditSession {
     /// Chemin de la requête éditée, relatif à la racine ; la session se
-    /// ferme sans confirmation si la sélection change de nœud.
+    /// ferme sans confirmation si la sélection change de nœud alors
+    /// qu'elle ne porte aucune modification non enregistrée.
     pub path: PathBuf,
     pub stamp: FileStamp,
     /// Champs éditables, dans l'ordre d'affichage (D2).
     pub fields: Vec<EditableField>,
     /// Indice du champ sous le curseur, dans `fields`.
     pub cursor: usize,
-    pub mode: EditMode,
-    /// Modifications en attente, une par cible touchée (fusionnées par
+    pub state: EditState,
+    /// Modifications validées, une par cible touchée (fusionnées par
     /// écrasement, dans l'ordre de `FieldEdit` attendu par bru-writer :
     /// pas besoin de dédupliquer davantage, le writer le fait déjà).
     pub pending: Vec<FieldEdit>,
+    /// Au moins une modification validée depuis la dernière sauvegarde.
     pub dirty: bool,
+    /// Décalage horizontal, en colonnes d'affichage, de la valeur du champ
+    /// en saisie (`improve-direct-editing`, D7).
+    pub hscroll: u16,
 }
 
+impl EditSession {
+    /// Modifications non enregistrées : validées, ou saisie en cours dont
+    /// le texte diffère de la valeur au début de la saisie.
+    pub fn has_unsaved(&self) -> bool {
+        self.dirty || matches!(&self.state, EditState::Input(input) if input.is_modified())
+    }
+
+    /// Champ sous le curseur.
+    pub fn current_field(&self) -> Option<EditableField> {
+        self.fields.get(self.cursor).copied()
+    }
+}
+
+/// État d'une session : choix du champ, ou saisie de sa valeur.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EditMode {
-    Normal,
-    /// Curseur de texte en indice de caractère (pas d'octet) et tampon de
-    /// saisie en cours.
-    Insert {
-        text_cursor: usize,
-        buffer: String,
-    },
+pub enum EditState {
+    FieldSelect,
+    Input(TextInput),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,17 +301,17 @@ pub struct SavedEdit {
     pub view: RequestView,
 }
 
-/// Valeur affichée d'un champ : tampon de saisie si en mode Insert sur ce
+/// Valeur affichée d'un champ : tampon de saisie si en saisie sur ce
 /// champ, sinon vue + éditions en attente (D3).
 pub fn field_value<'a>(
     session: &'a EditSession,
     view: &'a RequestView,
     field: &EditableField,
 ) -> &'a str {
-    if let EditMode::Insert { buffer, .. } = &session.mode
+    if let EditState::Input(input) = &session.state
         && session.fields.get(session.cursor) == Some(field)
     {
-        return buffer.as_str();
+        return input.text();
     }
     field_value_committed(session, view, field)
 }
@@ -506,6 +521,9 @@ pub enum StatusMessage {
     NoMatch,
     /// Échec lors de la sauvegarde sur disque.
     SaveError(String),
+    /// Changement de requête refusé : la session d'édition porte des
+    /// modifications non enregistrées.
+    EditLocked,
 }
 
 impl Model {
@@ -545,6 +563,12 @@ impl Model {
     /// Conçu pour que `add-field-editing`/`add-response-filter` y ajoutent
     /// leur propre branche sans toucher à celle-ci.
     pub fn text_capture(&self) -> Option<TextCapture> {
+        // Une confirmation en attente reprend la main sur le clavier : ses
+        // réponses (`y`, `n`, `Entrée`, `Échap`) ne doivent pas devenir du
+        // texte de saisie.
+        if self.confirm.is_some() {
+            return None;
+        }
         match &self.secrets.input {
             Some(SecretInput::Name(_)) => return Some(TextCapture::SecretName),
             Some(SecretInput::Value { .. }) => return Some(TextCapture::SecretValue),
@@ -553,9 +577,9 @@ impl Model {
         if self
             .editing
             .as_ref()
-            .is_some_and(|s| matches!(s.mode, EditMode::Insert { .. }))
+            .is_some_and(|s| matches!(s.state, EditState::Input(_)))
         {
-            return Some(TextCapture::Insert);
+            return Some(TextCapture::Input);
         }
         if self.search.as_ref().is_some_and(SearchState::is_editing) {
             return Some(TextCapture::Search);
@@ -1014,9 +1038,10 @@ mod tests {
             stamp,
             fields: EditableField::list_for(&view),
             cursor: 0,
-            mode: EditMode::Normal,
+            state: EditState::FieldSelect,
             pending: vec![],
             dirty: false,
+            hscroll: 0,
         };
 
         // Aucune édition en attente -> valeur et activation d'origine

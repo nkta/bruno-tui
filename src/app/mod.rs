@@ -13,6 +13,7 @@ pub mod filter;
 pub mod message;
 pub mod model;
 pub mod search;
+pub mod text_input;
 pub mod update;
 pub mod view;
 
