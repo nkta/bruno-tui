@@ -19,8 +19,8 @@ use tokio::sync::mpsc;
 const USAGE_ERROR: u8 = 2;
 
 fn main() -> ExitCode {
-    let path = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(Command::Run(path)) => path,
+    let (path, secrets) = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(Command::Run { path, secrets }) => (path, secrets),
         Ok(Command::Help) => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -73,6 +73,7 @@ fn main() -> ExitCode {
             "bru".into(),
             Arc::new(SystemClipboard),
             Arc::new(bruno_tui::writer::BruWriter),
+            secrets,
         )),
         Err(error) => Ok(Exit::TerminalError(error)),
     };

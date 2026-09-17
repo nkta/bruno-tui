@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::collection::CollectionLoader;
 use crate::runner::BruRunner;
+use crate::secrets::{self, SecretMapping};
 use crate::writer::{self, RequestWriter};
 use clipboard::Clipboard;
 use event::{AppEvent, EVENT_BUFFER};
@@ -42,7 +43,8 @@ use update::{Command, update};
 /// en usage réel, le chemin d'un faux `bru` dans les tests. `clipboard` est
 /// de même injectable, pour les mêmes raisons (une fausse implémentation
 /// en test, `SystemClipboard` en usage réel). `writer` est également
-/// injectable (`BruWriter` en usage réel).
+/// injectable (`BruWriter` en usage réel). `secrets` porte les
+/// déclarations `--secret` de la ligne de commande.
 #[allow(clippy::too_many_arguments)]
 pub async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
@@ -53,9 +55,11 @@ pub async fn run<B: Backend>(
     bru_program: OsString,
     clipboard: Arc<dyn Clipboard>,
     writer: Arc<dyn RequestWriter>,
+    secrets: Vec<SecretMapping>,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
+    model.secrets.mappings = secrets;
 
     let (run_tx, mut run_rx) = mpsc::channel(EVENT_BUFFER);
     let runner = BruRunner::with_program(bru_program, run_tx);
@@ -164,6 +168,14 @@ pub async fn run<B: Backend>(
                                 })
                             });
                         let _ = sender.blocking_send(AppEvent::EditSaved { path, result });
+                    });
+                }
+                Command::ResolveSecrets { root, lookups } => {
+                    let sender = sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let resolved =
+                            secrets::resolve(&root, &lookups, &|key| std::env::var_os(key));
+                        let _ = sender.blocking_send(AppEvent::SecretsResolved { root, resolved });
                     });
                 }
             }

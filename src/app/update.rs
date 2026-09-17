@@ -9,8 +9,9 @@ use super::filter::{FilterState, evaluate};
 use super::message::Message;
 use super::model::{
     CollectionState, DetailSelection, EditMode, EditSession, EditableField, Exit, Focus,
-    HistoryEntry, HistoryOutcome, Model, ResponseTab, StatusMessage, environment_name_at,
-    field_enabled, field_value, tree_node_at, visible_rows,
+    HistoryEntry, HistoryOutcome, Model, ResponseTab, SecretError, SecretInput, StatusMessage,
+    environment_name_at, field_enabled, field_value, secret_env_vars, secret_lookups, secret_rows,
+    tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::view::detail::{plain_lines, response_plain_lines};
@@ -19,8 +20,9 @@ use super::view::{
     inner, layout_for,
 };
 use crate::collection::TreeNode;
-use crate::runner::RunRequest;
 use crate::runner::report::ResponseStatus;
+use crate::runner::{RunRequest, SecretString};
+use crate::secrets::{SecretLookup, is_valid_name};
 use crate::writer::{FieldEdit, FileStamp};
 
 /// Effet demandé par `update`, à exécuter par la boucle `run`, qui seule
@@ -49,6 +51,13 @@ pub enum Command {
         ast: crate::collection::BruFile,
         stamp: crate::writer::FileStamp,
         edits: Vec<crate::writer::FieldEdit>,
+    },
+    /// Résoudre les variables secrètes depuis `<root>/.env` et le shell ;
+    /// la boucle l'exécute dans `spawn_blocking` et renvoie le résultat à
+    /// `update` via `Message::SecretsResolved`.
+    ResolveSecrets {
+        root: std::path::PathBuf,
+        lookups: Vec<SecretLookup>,
     },
 }
 
@@ -111,19 +120,94 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::CollectionLoaded(result) => {
+            let command = match &result {
+                Ok(collection) => {
+                    let lookups = secret_lookups(&model.secrets.mappings, collection);
+                    if lookups.is_empty() {
+                        Command::None
+                    } else {
+                        Command::ResolveSecrets {
+                            root: collection.root.clone(),
+                            lookups,
+                        }
+                    }
+                }
+                Err(_) => Command::None,
+            };
             model.collection = match result {
                 Ok(collection) => CollectionState::Loaded(collection),
                 Err(error) => CollectionState::Failed(error),
             };
+            reset_secrets_for_collection(model);
             model.tree.expanded.clear();
             refresh_rows(model);
             model.tree.selected = 0;
             model.tree.offset = 0;
             model.detail_scroll = 0;
             model.current_environment = None;
-            if model.focus == Focus::EnvironmentPicker {
+            if matches!(model.focus, Focus::EnvironmentPicker | Focus::Secrets) {
                 model.focus = Focus::Tree;
             }
+            command
+        }
+        Message::SecretsResolved { root, resolved } => {
+            // Résultat d'une collection qui n'est plus chargée : ignoré.
+            if model.loaded().is_some_and(|c| c.root == root) {
+                model.secrets.resolved = resolved;
+            }
+            Command::None
+        }
+        Message::ToggleSecrets => {
+            match model.focus {
+                Focus::Secrets => close_secrets(model),
+                _ => {
+                    if model.loaded().is_some() {
+                        model.secrets.pending_run = None;
+                        model.secrets.selected = 0;
+                        model.secrets.error = None;
+                        model.focus = Focus::Secrets;
+                    }
+                }
+            }
+            Command::None
+        }
+        Message::AddSecret => {
+            if model.focus == Focus::Secrets {
+                model.secrets.error = None;
+                model.secrets.input = Some(SecretInput::Name(String::new()));
+            }
+            Command::None
+        }
+        Message::ForgetSecret => {
+            if model.focus == Focus::Secrets {
+                forget_secret(model);
+            }
+            Command::None
+        }
+        Message::SecretInput(c) => {
+            match &mut model.secrets.input {
+                Some(SecretInput::Name(name)) => name.push(c.0),
+                Some(SecretInput::Value { buffer, .. }) => buffer.push(c.0),
+                None => {}
+            }
+            Command::None
+        }
+        Message::SecretBackspace => {
+            match &mut model.secrets.input {
+                Some(SecretInput::Name(name)) => {
+                    name.pop();
+                }
+                Some(SecretInput::Value { buffer, .. }) => buffer.pop(),
+                None => {}
+            }
+            Command::None
+        }
+        Message::ConfirmSecretInput => {
+            confirm_secret_input(model);
+            Command::None
+        }
+        Message::CancelSecretInput => {
+            model.secrets.input = None;
             Command::None
         }
         Message::NextFocus => {
@@ -132,6 +216,10 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                 Focus::Detail => Focus::Response,
                 _ => Focus::Tree,
             };
+            Command::None
+        }
+        Message::FocusTree if model.focus == Focus::Secrets => {
+            close_secrets(model);
             Command::None
         }
         Message::FocusTree => {
@@ -189,6 +277,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             }
             Command::None
         }
+        Message::RunSelected if model.focus == Focus::Secrets => launch_pending_run(model),
         Message::RunSelected => run_selected(model),
         Message::CancelRun => {
             cancel_run(model);
@@ -356,6 +445,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                 Focus::Diagnostics => navigate_diagnostics(model, navigation),
                 Focus::History => navigate_history(model, navigation),
                 Focus::EnvironmentPicker => navigate_environment_picker(model, navigation),
+                Focus::Secrets => navigate_secrets(model, navigation),
             }
             Command::None
         }
@@ -378,11 +468,29 @@ fn run_selected(model: &mut Model) -> Command {
             Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
             Some(TreeNode::Error(_)) | None => None,
         },
-        Focus::Diagnostics | Focus::EnvironmentPicker => None,
+        Focus::Diagnostics | Focus::EnvironmentPicker | Focus::Secrets => None,
     };
     let Some((target, recursive)) = target else {
         return Command::None;
     };
+    if model.loaded().is_none() {
+        return Command::None;
+    }
+    if should_propose_secrets(model) {
+        let missing = first_missing_declared_secret(model);
+        model.secrets.pending_run = Some((target, recursive));
+        model.secrets.selected = missing;
+        model.secrets.input = None;
+        model.secrets.error = None;
+        model.focus = Focus::Secrets;
+        return Command::None;
+    }
+    start_run(model, target, recursive)
+}
+
+/// Construit l'exécution sur la cible, avec l'environnement et les
+/// variables secrètes en vigueur à cet instant.
+fn start_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> Command {
     let Some(root) = model.loaded().map(|collection| collection.root.clone()) else {
         return Command::None;
     };
@@ -393,10 +501,161 @@ fn run_selected(model: &mut Model) -> Command {
             targets: vec![target.clone()],
             recursive,
             env: model.current_environment.clone(),
-            env_vars: Vec::new(),
+            env_vars: secret_env_vars(model),
         },
         target,
     }
+}
+
+/// Vrai si l'environnement courant, non encore acquitté, déclare un
+/// `vars:secret` resté sans valeur.
+fn should_propose_secrets(model: &Model) -> bool {
+    let Some(env) = &model.current_environment else {
+        return false;
+    };
+    !model.secrets.acknowledged.contains(env)
+        && secret_rows(model)
+            .iter()
+            .any(|row| row.declared && row.value.is_none())
+}
+
+/// Ligne de la première variable déclarée non fournie (0 à défaut).
+fn first_missing_declared_secret(model: &Model) -> usize {
+    secret_rows(model)
+        .iter()
+        .position(|row| row.declared && row.value.is_none())
+        .unwrap_or(0)
+}
+
+/// `r` dans le panneau des variables secrètes : lance l'exécution en
+/// attente avec les valeurs alors résolues, et acquitte l'environnement.
+fn launch_pending_run(model: &mut Model) -> Command {
+    if model.run.active.is_some() {
+        return Command::None;
+    }
+    let Some((target, recursive)) = model.secrets.pending_run.take() else {
+        return Command::None;
+    };
+    acknowledge_environment(model);
+    model.secrets.input = None;
+    model.focus = Focus::Tree;
+    start_run(model, target, recursive)
+}
+
+fn acknowledge_environment(model: &mut Model) {
+    if let Some(env) = &model.current_environment {
+        model.secrets.acknowledged.insert(env.clone());
+    }
+}
+
+/// `Échap` ou `S` : ferme le panneau ; une exécution en attente est
+/// abandonnée et l'environnement acquitté.
+fn close_secrets(model: &mut Model) {
+    if model.secrets.pending_run.take().is_some() {
+        acknowledge_environment(model);
+    }
+    model.secrets.input = None;
+    model.secrets.error = None;
+    model.focus = Focus::Tree;
+}
+
+/// Un nouveau chargement de collection : les résolutions, propositions et
+/// acquittements ne valent que pour la collection précédente. Les valeurs
+/// saisies restent en mémoire pour la session.
+fn reset_secrets_for_collection(model: &mut Model) {
+    let secrets = &mut model.secrets;
+    secrets.resolved.clear();
+    secrets.pending_run = None;
+    secrets.acknowledged.clear();
+    secrets.input = None;
+    secrets.error = None;
+    secrets.selected = 0;
+}
+
+/// `↑`/`↓`/`Début`/`Fin`/`Entrée` dans le panneau des variables secrètes.
+fn navigate_secrets(model: &mut Model, message: Message) {
+    let count = secret_rows(model).len();
+    if count == 0 {
+        model.secrets.selected = 0;
+        return;
+    }
+    let before = model.secrets.selected.min(count - 1);
+    match message {
+        Message::Up => model.secrets.selected = before.saturating_sub(1),
+        Message::Down => model.secrets.selected = (before + 1).min(count - 1),
+        Message::Home => model.secrets.selected = 0,
+        Message::End => model.secrets.selected = count - 1,
+        Message::Right => {
+            if let Some(row) = secret_rows(model).into_iter().nth(before) {
+                model.secrets.error = None;
+                model.secrets.input = Some(SecretInput::Value {
+                    name: row.name,
+                    buffer: SecretString::default(),
+                    adding: false,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `Entrée` pendant une saisie : un nom valide enchaîne sur sa valeur ;
+/// une valeur non vide est retenue pour la session, vide l'oublie.
+fn confirm_secret_input(model: &mut Model) {
+    let Some(input) = model.secrets.input.take() else {
+        return;
+    };
+    match input {
+        SecretInput::Name(name) => {
+            if !is_valid_name(&name) {
+                model.secrets.error = Some(SecretError::InvalidName);
+                model.secrets.input = Some(SecretInput::Name(name));
+            } else if secret_rows(model).iter().any(|row| row.name == name) {
+                model.secrets.error = Some(SecretError::DuplicateName);
+                model.secrets.input = Some(SecretInput::Name(name));
+            } else {
+                model.secrets.error = None;
+                model.secrets.input = Some(SecretInput::Value {
+                    name,
+                    buffer: SecretString::default(),
+                    adding: true,
+                });
+            }
+        }
+        SecretInput::Value {
+            name,
+            buffer,
+            adding,
+        } => {
+            let secrets = &mut model.secrets;
+            secrets.typed.retain(|(typed, _)| *typed != name);
+            if buffer.is_empty() {
+                return;
+            }
+            secrets.typed.push((name.clone(), buffer));
+            if adding {
+                secrets.added.push(name.clone());
+            }
+            if let Some(index) = secret_rows(model).iter().position(|row| row.name == name) {
+                model.secrets.selected = index;
+            }
+        }
+    }
+}
+
+/// `d` : oublie la valeur saisie de la ligne sélectionnée ; un nom ajouté
+/// depuis le panneau est aussi retiré.
+fn forget_secret(model: &mut Model) {
+    let rows = secret_rows(model);
+    let Some(row) = rows.get(model.secrets.selected.min(rows.len().saturating_sub(1))) else {
+        return;
+    };
+    let secrets = &mut model.secrets;
+    secrets.error = None;
+    secrets.typed.retain(|(name, _)| *name != row.name);
+    secrets.added.retain(|name| *name != row.name);
+    let count = secret_rows(model).len();
+    model.secrets.selected = model.secrets.selected.min(count.saturating_sub(1));
 }
 
 /// `Ctrl+X` : annule l'exécution en cours, sans effet si aucune ou si déjà
@@ -1239,7 +1498,9 @@ fn confirm_search(model: &mut Model) {
         Focus::Tree => SearchScope::Tree,
         Focus::Detail => SearchScope::Detail,
         Focus::Response => SearchScope::Response,
-        Focus::Diagnostics | Focus::History | Focus::EnvironmentPicker => SearchScope::Tree,
+        Focus::Diagnostics | Focus::History | Focus::EnvironmentPicker | Focus::Secrets => {
+            SearchScope::Tree
+        }
     };
     search.pattern = search.draft.clone();
     search.editing = false;
@@ -3904,5 +4165,414 @@ mod tests {
             model.filter.is_none(),
             "le filtre ne doit pas être réappliqué"
         );
+    }
+
+    // --- Variables secrètes (`secret-env-vars`) ---
+
+    use crate::app::message::{MaskedChar, TextCapture};
+    use crate::app::model::{SecretInput as Input, secret_rows as rows};
+    use crate::secrets::{Resolved, SecretMapping, SecretSource};
+
+    fn mapping(name: &str, key: Option<&str>) -> SecretMapping {
+        SecretMapping {
+            name: name.to_owned(),
+            key: key.map(str::to_owned),
+        }
+    }
+
+    fn resolved_dotenv(name: &str, key: &str, value: &str) -> Resolved {
+        Resolved {
+            name: name.to_owned(),
+            source: SecretSource::DotEnv {
+                key: key.to_owned(),
+            },
+            value: Some(SecretString::new(value)),
+        }
+    }
+
+    fn type_text(model: &mut Model, text: &str) {
+        for c in text.chars() {
+            update(model, Message::SecretInput(MaskedChar(c)));
+        }
+    }
+
+    fn env_vars_of(command: Command) -> Vec<(String, String)> {
+        match command {
+            Command::StartRun { request, .. } => request
+                .env_vars
+                .iter()
+                .map(|(name, value)| (name.clone(), value.expose().to_owned()))
+                .collect(),
+            other => panic!("StartRun attendu, obtenu {other:?}"),
+        }
+    }
+
+    /// `parser-cases` chargée, environnement `local` (`vars:secret [ token ]`).
+    fn local_model() -> Model {
+        let mut model = loaded_model((100, 30));
+        model.current_environment = Some("local".into());
+        model
+    }
+
+    #[test]
+    fn collection_loaded_requests_resolution_of_all_known_names() {
+        use crate::collection::CollectionLoader;
+        let mut model = Model::new(crate::app::test_support::fixture(), (100, 30));
+        model.secrets.mappings = vec![mapping("oktaClientSecret", None)];
+        let loaded = crate::collection::BruLoader.load(&model.source.clone());
+        match update(&mut model, Message::CollectionLoaded(loaded)) {
+            Command::ResolveSecrets { root, lookups } => {
+                assert_eq!(Some(&root), model.loaded().map(|c| &c.root));
+                let found: Vec<(String, Vec<String>)> = lookups
+                    .into_iter()
+                    .map(|lookup| (lookup.name, lookup.keys))
+                    .collect();
+                assert_eq!(
+                    found,
+                    [
+                        (
+                            "oktaClientSecret".to_owned(),
+                            vec![
+                                "oktaClientSecret".to_owned(),
+                                "OKTA_CLIENT_SECRET".to_owned()
+                            ]
+                        ),
+                        (
+                            "token".to_owned(),
+                            vec!["token".to_owned(), "TOKEN".to_owned()]
+                        ),
+                    ]
+                );
+            }
+            other => panic!("ResolveSecrets attendu, obtenu {other:?}"),
+        }
+
+        // Collection sans `vars:secret` ni `--secret` : aucune I/O demandée.
+        let probe =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/runner-probe");
+        let mut model = Model::new(probe.clone(), (100, 30));
+        let loaded = crate::collection::BruLoader.load(&probe);
+        assert!(matches!(
+            update(&mut model, Message::CollectionLoaded(loaded)),
+            Command::None
+        ));
+    }
+
+    #[test]
+    fn secrets_resolved_for_another_root_is_ignored() {
+        let mut model = local_model();
+        update(
+            &mut model,
+            Message::SecretsResolved {
+                root: PathBuf::from("/ailleurs"),
+                resolved: vec![resolved_dotenv("token", "TOKEN", "x")],
+            },
+        );
+        assert!(model.secrets.resolved.is_empty());
+        let root = model.loaded().map(|c| c.root.clone()).expect("racine");
+        update(
+            &mut model,
+            Message::SecretsResolved {
+                root,
+                resolved: vec![resolved_dotenv("token", "TOKEN", "x")],
+            },
+        );
+        assert_eq!(model.secrets.resolved.len(), 1);
+    }
+
+    #[test]
+    fn toggle_secrets_opens_closes_and_needs_a_collection() {
+        let mut model = local_model();
+        update(&mut model, Message::ToggleSecrets);
+        assert_eq!(model.focus, Focus::Secrets);
+        update(&mut model, Message::ToggleSecrets);
+        assert_eq!(model.focus, Focus::Tree);
+        update(&mut model, Message::ToggleSecrets);
+        update(&mut model, Message::FocusTree);
+        assert_eq!(model.focus, Focus::Tree);
+
+        let mut loading = Model::new(PathBuf::from("/x"), (100, 30));
+        update(&mut loading, Message::ToggleSecrets);
+        assert_eq!(loading.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn secrets_navigation_is_bounded() {
+        let mut model = local_model();
+        model.secrets.mappings = vec![mapping("a", None), mapping("b", None)];
+        update(&mut model, Message::ToggleSecrets);
+        update(&mut model, Message::Up);
+        assert_eq!(model.secrets.selected, 0);
+        for _ in 0..5 {
+            update(&mut model, Message::Down);
+        }
+        // `a`, `b`, puis `token` de `local`.
+        assert_eq!(model.secrets.selected, 2);
+    }
+
+    #[test]
+    fn typing_a_value_is_masked_and_takes_priority() {
+        let mut model = local_model();
+        let root = model.loaded().map(|c| c.root.clone()).expect("racine");
+        update(
+            &mut model,
+            Message::SecretsResolved {
+                root,
+                resolved: vec![resolved_dotenv("token", "TOKEN", "from-env")],
+            },
+        );
+        update(&mut model, Message::ToggleSecrets);
+        update(&mut model, Message::Right);
+        assert!(matches!(model.secrets.input, Some(Input::Value { .. })));
+        assert_eq!(model.text_capture(), Some(TextCapture::SecretValue));
+        type_text(&mut model, "s3cr3tX");
+        update(&mut model, Message::SecretBackspace);
+        assert!(!format!("{model:?}").contains("s3cr3t"));
+        update(&mut model, Message::ConfirmSecretInput);
+        assert!(model.secrets.input.is_none());
+        let row = rows(&model).remove(0);
+        assert_eq!(row.source, SecretSource::Typed);
+        assert_eq!(
+            row.value.map(|v| v.expose().to_owned()).as_deref(),
+            Some("s3cr3t")
+        );
+        assert!(!format!("{model:?}").contains("s3cr3t"));
+
+        // `d` oublie la saisie : la valeur `.env` revient.
+        update(&mut model, Message::ForgetSecret);
+        assert_eq!(
+            rows(&model)[0].source,
+            SecretSource::DotEnv {
+                key: "TOKEN".into()
+            }
+        );
+    }
+
+    #[test]
+    fn cancelling_or_confirming_empty_input() {
+        let mut model = local_model();
+        model.secrets.typed = vec![("token".into(), SecretString::new("keep"))];
+        update(&mut model, Message::ToggleSecrets);
+        update(&mut model, Message::Right);
+        type_text(&mut model, "other");
+        update(&mut model, Message::CancelSecretInput);
+        assert_eq!(model.secrets.typed[0].1.expose(), "keep");
+
+        // Une valeur validée vide vaut oubli.
+        update(&mut model, Message::Right);
+        update(&mut model, Message::ConfirmSecretInput);
+        assert!(model.secrets.typed.is_empty());
+    }
+
+    #[test]
+    fn adding_a_name_then_its_value() {
+        let mut model = local_model();
+        update(&mut model, Message::ToggleSecrets);
+        update(&mut model, Message::AddSecret);
+        assert_eq!(model.text_capture(), Some(TextCapture::SecretName));
+
+        // Nom invalide puis doublon : refusés, la saisie reste ouverte.
+        type_text(&mut model, "a b");
+        update(&mut model, Message::ConfirmSecretInput);
+        assert_eq!(model.secrets.error, Some(SecretError::InvalidName));
+        for _ in 0..3 {
+            update(&mut model, Message::SecretBackspace);
+        }
+        type_text(&mut model, "token");
+        update(&mut model, Message::ConfirmSecretInput);
+        assert_eq!(model.secrets.error, Some(SecretError::DuplicateName));
+        for _ in 0..5 {
+            update(&mut model, Message::SecretBackspace);
+        }
+
+        type_text(&mut model, "oktaClientSecret");
+        update(&mut model, Message::ConfirmSecretInput);
+        assert_eq!(model.secrets.error, None);
+        assert_eq!(model.text_capture(), Some(TextCapture::SecretValue));
+        // Abandon pendant la valeur : rien n'est ajouté.
+        update(&mut model, Message::CancelSecretInput);
+        assert_eq!(rows(&model).len(), 1);
+
+        update(&mut model, Message::AddSecret);
+        type_text(&mut model, "oktaClientSecret");
+        update(&mut model, Message::ConfirmSecretInput);
+        type_text(&mut model, "abc");
+        update(&mut model, Message::ConfirmSecretInput);
+        let all = rows(&model);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1].name, "oktaClientSecret");
+        assert_eq!(all[1].source, SecretSource::Typed);
+        assert_eq!(model.secrets.selected, 1);
+
+        // `d` sur un nom ajouté le retire de la liste.
+        update(&mut model, Message::ForgetSecret);
+        assert_eq!(rows(&model).len(), 1);
+        assert_eq!(model.secrets.selected, 0);
+    }
+
+    #[test]
+    fn run_transmits_resolved_secrets() {
+        // Cas oktaClientSecret : `--secret` sans clé, valeur du `.env`.
+        let mut model = local_model();
+        model.secrets.mappings = vec![mapping("oktaClientSecret", None)];
+        let root = model.loaded().map(|c| c.root.clone()).expect("racine");
+        update(
+            &mut model,
+            Message::SecretsResolved {
+                root,
+                resolved: vec![
+                    resolved_dotenv("oktaClientSecret", "OKTA_CLIENT_SECRET", "abc"),
+                    resolved_dotenv("token", "TOKEN", "t"),
+                ],
+            },
+        );
+        select(&mut model, "simple-get.bru");
+        let command = update(&mut model, Message::RunSelected);
+        if let Command::StartRun { request, .. } = &command {
+            assert_eq!(request.env.as_deref(), Some("local"));
+        }
+        assert_eq!(
+            env_vars_of(command),
+            [
+                ("oktaClientSecret".to_owned(), "abc".to_owned()),
+                ("token".to_owned(), "t".to_owned())
+            ]
+        );
+
+        // Aucune variable secrète : aucune surcharge.
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        assert!(env_vars_of(update(&mut model, Message::RunSelected)).is_empty());
+    }
+
+    #[test]
+    fn replay_uses_values_current_at_launch() {
+        let mut model = local_model();
+        model.secrets.acknowledged.insert("local".into());
+        model.focus = Focus::History;
+        model.history.push_back(HistoryEntry {
+            started_at: std::time::SystemTime::now(),
+            target: PathBuf::from("simple-get.bru"),
+            recursive: false,
+            outcome: HistoryOutcome::Completed {
+                total: 1,
+                failed: 0,
+                duration_secs: 0.1,
+            },
+        });
+        assert!(env_vars_of(update(&mut model, Message::RunSelected)).is_empty());
+
+        model.secrets.typed = vec![("token".into(), SecretString::new("typed"))];
+        assert_eq!(
+            env_vars_of(update(&mut model, Message::RunSelected)),
+            [("token".to_owned(), "typed".to_owned())]
+        );
+    }
+
+    #[test]
+    fn launch_proposes_input_for_missing_declared_secrets() {
+        let mut model = local_model();
+        model.secrets.mappings = vec![mapping("other", None)];
+        select(&mut model, "simple-get.bru");
+        assert!(matches!(
+            update(&mut model, Message::RunSelected),
+            Command::None
+        ));
+        assert_eq!(model.focus, Focus::Secrets);
+        assert_eq!(
+            model.secrets.pending_run,
+            Some((PathBuf::from("simple-get.bru"), false))
+        );
+        // Première variable déclarée non fournie : `token`, après `other`.
+        assert_eq!(model.secrets.selected, 1);
+
+        update(&mut model, Message::Right);
+        type_text(&mut model, "v");
+        update(&mut model, Message::ConfirmSecretInput);
+        let command = update(&mut model, Message::RunSelected);
+        assert_eq!(env_vars_of(command), [("token".to_owned(), "v".to_owned())]);
+        assert_eq!(model.focus, Focus::Tree);
+        assert!(model.secrets.pending_run.is_none());
+        assert!(model.secrets.acknowledged.contains("local"));
+    }
+
+    #[test]
+    fn escape_abandons_pending_run_and_acknowledges() {
+        let mut model = local_model();
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::RunSelected);
+        assert_eq!(model.focus, Focus::Secrets);
+        update(&mut model, Message::FocusTree);
+        assert_eq!(model.focus, Focus::Tree);
+        assert!(model.secrets.pending_run.is_none());
+        // Lancement suivant : direct, sans surcharge pour `token`.
+        assert!(env_vars_of(update(&mut model, Message::RunSelected)).is_empty());
+
+        // `r` dans un panneau ouvert à la main : rien à lancer.
+        update(&mut model, Message::ToggleSecrets);
+        assert!(matches!(
+            update(&mut model, Message::RunSelected),
+            Command::None
+        ));
+    }
+
+    #[test]
+    fn no_proposal_when_found_mapped_only_or_run_active() {
+        // Recherche automatique réussie : lancement direct.
+        let mut model = local_model();
+        let root = model.loaded().map(|c| c.root.clone()).expect("racine");
+        update(
+            &mut model,
+            Message::SecretsResolved {
+                root,
+                resolved: vec![resolved_dotenv("token", "TOKEN", "t")],
+            },
+        );
+        select(&mut model, "simple-get.bru");
+        assert!(matches!(
+            update(&mut model, Message::RunSelected),
+            Command::StartRun { .. }
+        ));
+
+        // Nom seulement déclaré par `--secret` et non fourni : pas de panneau.
+        let mut model = loaded_model((100, 30));
+        model.current_environment = Some("staging".into());
+        model.secrets.mappings = vec![mapping("missing", None)];
+        select(&mut model, "simple-get.bru");
+        assert!(matches!(
+            update(&mut model, Message::RunSelected),
+            Command::StartRun { .. }
+        ));
+
+        // Exécution en cours : ni exécution ni panneau.
+        let mut model = local_model();
+        select(&mut model, "simple-get.bru");
+        model.run.active = Some(ActiveRun {
+            id: runner::RunId(1),
+            target: PathBuf::from("x"),
+            recursive: false,
+            handle: None,
+        });
+        assert!(matches!(
+            update(&mut model, Message::RunSelected),
+            Command::None
+        ));
+        assert_eq!(model.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn collection_reload_resets_proposals_but_keeps_typed_values() {
+        use crate::collection::CollectionLoader;
+        let mut model = local_model();
+        model.secrets.typed = vec![("token".into(), SecretString::new("kept"))];
+        model.secrets.acknowledged.insert("local".into());
+        model.secrets.pending_run = Some((PathBuf::from("x"), false));
+        model.focus = Focus::Secrets;
+        let reloaded = crate::collection::BruLoader.load(&model.source.clone());
+        update(&mut model, Message::CollectionLoaded(reloaded));
+        assert_eq!(model.focus, Focus::Tree);
+        assert!(model.secrets.acknowledged.is_empty());
+        assert!(model.secrets.pending_run.is_none());
+        assert_eq!(model.secrets.typed.len(), 1);
     }
 }

@@ -9,6 +9,7 @@
 //! le modèle : `Up` est interprété par `update` selon le panneau qui a le
 //! focus.
 
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
@@ -18,6 +19,7 @@ use super::clipboard::ClipboardError;
 use super::event::AppEvent;
 use crate::collection::{Collection, LoadError};
 use crate::runner::{RunEvent, RunHandle, RunId};
+use crate::secrets::Resolved;
 
 /// Ce que la boucle capture au clavier hors navigation normale. Au plus une
 /// variante active à la fois, garanti par construction : tant qu'une
@@ -30,6 +32,21 @@ pub enum TextCapture {
     Search,
     Insert,
     Filter,
+    /// Nom d'une variable secrète à ajouter, en clair.
+    SecretName,
+    /// Valeur d'une variable secrète, masquée.
+    SecretValue,
+}
+
+/// Caractère tapé dans le panneau des variables secrètes : son `Debug`
+/// est masqué, un `Message` formaté ne révèle aucune saisie.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct MaskedChar(pub char);
+
+impl fmt::Debug for MaskedChar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MaskedChar(*)")
+    }
 }
 
 #[derive(Debug)]
@@ -144,6 +161,25 @@ pub enum Message {
     /// `update` selon `Focus::EnvironmentPicker`, comme pour les
     /// panneaux de diagnostics et d'historique.
     ToggleEnvironmentPicker,
+    /// `S`, hors saisie : ouvre ou ferme le panneau des variables secrètes.
+    ToggleSecrets,
+    /// `a`, hors saisie, dans le panneau des variables secrètes.
+    AddSecret,
+    /// `d`, hors saisie, dans le panneau des variables secrètes.
+    ForgetSecret,
+    /// Caractère tapé pendant une saisie de nom ou de valeur secrète.
+    SecretInput(MaskedChar),
+    /// `Retour arrière` pendant une saisie secrète.
+    SecretBackspace,
+    /// `Entrée` pendant une saisie secrète.
+    ConfirmSecretInput,
+    /// `Échap` pendant une saisie secrète.
+    CancelSecretInput,
+    /// Renvoyé par la boucle après `Command::ResolveSecrets`.
+    SecretsResolved {
+        root: PathBuf,
+        resolved: Vec<Resolved>,
+    },
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -161,6 +197,9 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
             Some(Message::ClipboardResult { token, result })
         }
         AppEvent::EditSaved { path, result } => Some(Message::EditSaved { path, result }),
+        AppEvent::SecretsResolved { root, resolved } => {
+            Some(Message::SecretsResolved { root, resolved })
+        }
     }
 }
 
@@ -197,6 +236,9 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('D') => Message::ToggleDiagnostics,
         KeyCode::Char('H') => Message::ToggleHistory,
         KeyCode::Char('E') => Message::ToggleEnvironmentPicker,
+        KeyCode::Char('S') => Message::ToggleSecrets,
+        KeyCode::Char('a') => Message::AddSecret,
+        KeyCode::Char('d') => Message::ForgetSecret,
         KeyCode::Char('/') => Message::StartSearch,
         KeyCode::Char('|') => Message::OpenFilter,
         KeyCode::Char('n') => Message::NextMatch,
@@ -219,6 +261,19 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::Search => search_capture_message(key),
         TextCapture::Insert => insert_capture_message(key),
         TextCapture::Filter => filter_capture_message(key),
+        TextCapture::SecretName | TextCapture::SecretValue => secret_capture_message(key),
+    }
+}
+
+/// Capture d'un nom ou d'une valeur dans le panneau des variables
+/// secrètes : toute touche imprimable est du texte.
+fn secret_capture_message(key: KeyEvent) -> Option<Message> {
+    match key.code {
+        KeyCode::Char(c) => Some(Message::SecretInput(MaskedChar(c))),
+        KeyCode::Backspace => Some(Message::SecretBackspace),
+        KeyCode::Enter => Some(Message::ConfirmSecretInput),
+        KeyCode::Esc => Some(Message::CancelSecretInput),
+        _ => None,
     }
 }
 
@@ -333,6 +388,10 @@ mod tests {
             (KeyCode::Char(' '), none, "ToggleField"),
             (KeyCode::Char('i'), none, "EnterInsert"),
             (KeyCode::Char('w'), none, "SaveEdit"),
+            (KeyCode::Char('S'), none, "ToggleSecrets"),
+            (KeyCode::Char('S'), KeyModifiers::SHIFT, "ToggleSecrets"),
+            (KeyCode::Char('a'), none, "AddSecret"),
+            (KeyCode::Char('d'), none, "ForgetSecret"),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(
@@ -402,6 +461,44 @@ mod tests {
                 token: 1,
                 result: Ok(())
             })
+        ));
+    }
+
+    /// En saisie secrète (nom ou valeur), toute touche imprimable est du
+    /// texte, `Ctrl+C` reste `ForceQuit`, et le `Debug` ne montre rien.
+    #[test]
+    fn secret_capture_redirects_keys_and_masks_debug() {
+        let none = KeyModifiers::NONE;
+        for capture in [TextCapture::SecretName, TextCapture::SecretValue] {
+            for (code, expected) in [
+                (KeyCode::Char('q'), "SecretInput"),
+                (KeyCode::Char('r'), "SecretInput"),
+                (KeyCode::Char('j'), "SecretInput"),
+                (KeyCode::Char('S'), "SecretInput"),
+                (KeyCode::Backspace, "SecretBackspace"),
+                (KeyCode::Enter, "ConfirmSecretInput"),
+                (KeyCode::Esc, "CancelSecretInput"),
+            ] {
+                assert_eq!(
+                    name_capturing(key(code, none), capture).as_deref(),
+                    Some(expected),
+                    "{code:?}"
+                );
+            }
+            assert_eq!(
+                name_capturing(key(KeyCode::Char('c'), KeyModifiers::CONTROL), capture).as_deref(),
+                Some("ForceQuit")
+            );
+            let typed = to_message(key(KeyCode::Char('Z'), none), Some(capture));
+            assert!(!format!("{typed:?}").contains('Z'));
+        }
+        let resolved = AppEvent::SecretsResolved {
+            root: "/c".into(),
+            resolved: Vec::new(),
+        };
+        assert!(matches!(
+            to_message(resolved, None),
+            Some(Message::SecretsResolved { .. })
         ));
     }
 

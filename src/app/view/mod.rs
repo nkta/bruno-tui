@@ -133,6 +133,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
             Focus::EnvironmentPicker => {
                 panels::render_environment_picker(model, frame, areas.body);
             }
+            Focus::Secrets => {
+                panels::render_secrets(model, frame, areas.body);
+            }
             Focus::Tree | Focus::Detail | Focus::Response => {
                 render_tree(model, frame, areas.tree);
                 frame.render_widget(
@@ -336,7 +339,7 @@ fn status_line(model: &Model) -> String {
     }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
-            "↑↓ naviguer  → déplier  ← replier  r lancer  / chercher  Tab détail  q quitter"
+            "↑↓ naviguer  → déplier  ← replier  r lancer  / chercher  Tab détail  S secrets  q quitter"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
@@ -352,7 +355,20 @@ fn status_line(model: &Model) -> String {
         (CollectionState::Loaded(_), Focus::EnvironmentPicker) => {
             "↑↓ naviguer  Entrée choisir  Échap annuler".to_owned()
         }
+        (CollectionState::Loaded(_), Focus::Secrets) => secrets_hint(model).to_owned(),
         _ => "q quitter".to_owned(),
+    }
+}
+
+/// Rappel de touches du panneau des variables secrètes.
+fn secrets_hint(model: &Model) -> &'static str {
+    let secrets = &model.secrets;
+    if secrets.input.is_some() {
+        "Entrée valider  Échap annuler"
+    } else if secrets.pending_run.is_some() {
+        "↑↓ naviguer  Entrée saisir  a ajouter  d oublier  r lancer  Échap abandonner"
+    } else {
+        "↑↓ naviguer  Entrée saisir  a ajouter  d oublier  Échap fermer"
     }
 }
 
@@ -1160,5 +1176,116 @@ mod tests {
             bg,
             "terminal trop petit"
         );
+    }
+
+    #[test]
+    fn secrets_panel_shows_sources_never_values() {
+        use crate::app::message::MaskedChar;
+        use crate::runner::SecretString;
+        use crate::secrets::{Resolved, SecretMapping, SecretSource};
+
+        let mut model = loaded_model((120, 30));
+        model.current_environment = Some("local".into());
+        model.secrets.mappings = vec![SecretMapping {
+            name: "oktaClientSecret".into(),
+            key: None,
+        }];
+        model.secrets.resolved = vec![Resolved {
+            name: "oktaClientSecret".into(),
+            source: SecretSource::DotEnv {
+                key: "OKTA_CLIENT_SECRET".into(),
+            },
+            value: Some(SecretString::new("dotenv-s3cr3t")),
+        }];
+        update(&mut model, Message::ToggleSecrets);
+        let screen = render(&model, 120, 30).join("\n");
+        assert!(screen.contains("Variables secrètes"), "{screen}");
+        assert!(
+            screen.contains("oktaClientSecret  .env (OKTA_CLIENT_SECRET)"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("token  non fournie (cherchée : token, TOKEN)"),
+            "{screen}"
+        );
+        assert!(!screen.contains("dotenv-s3cr3t"), "{screen}");
+        assert!(!screen.contains('•'), "longueur révélée : {screen}");
+        assert!(
+            screen.contains("↑↓ naviguer  Entrée saisir  a ajouter  d oublier  Échap fermer"),
+            "{screen}"
+        );
+
+        // Saisie : un `•` par caractère, jamais la valeur.
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Right);
+        for c in "typed-s3cr3t".chars() {
+            update(&mut model, Message::SecretInput(MaskedChar(c)));
+        }
+        let screen = render(&model, 120, 30).join("\n");
+        assert!(
+            screen.contains("Valeur de token : ••••••••••••"),
+            "{screen}"
+        );
+        assert!(!screen.contains("typed-s3cr3t"), "{screen}");
+        assert!(screen.contains("Entrée valider  Échap annuler"), "{screen}");
+
+        update(&mut model, Message::ConfirmSecretInput);
+        let screen = render(&model, 120, 30).join("\n");
+        assert!(screen.contains("token  saisie"), "{screen}");
+        assert!(!screen.contains("typed-s3cr3t"), "{screen}");
+        assert!(!screen.contains('•'), "longueur révélée : {screen}");
+    }
+
+    #[test]
+    fn secrets_panel_empty_pending_and_errors() {
+        use crate::secrets::{InvalidReason, Resolved, SecretSource};
+
+        let mut model = loaded_model((120, 30));
+        update(&mut model, Message::ToggleSecrets);
+        let screen = render(&model, 120, 30).join("\n");
+        assert!(screen.contains("aucune variable secrète"), "{screen}");
+
+        // Proposition au lancement : exécution en attente signalée.
+        let mut model = loaded_model((120, 30));
+        model.current_environment = Some("local".into());
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::RunSelected);
+        let screen = render(&model, 120, 30).join("\n");
+        assert!(
+            screen.contains("Exécution de simple-get.bru en attente"),
+            "{screen}"
+        );
+        assert!(screen.contains("r lancer  Échap abandonner"), "{screen}");
+
+        model.secrets.resolved = vec![Resolved {
+            name: "token".into(),
+            source: SecretSource::Invalid {
+                key: "TOKEN".into(),
+                reason: InvalidReason::Multiline,
+            },
+            value: None,
+        }];
+        let screen = render(&model, 120, 30).join("\n");
+        assert!(
+            screen.contains("token  erreur (TOKEN) : valeur multiligne"),
+            "{screen}"
+        );
+
+        update(&mut model, Message::AddSecret);
+        update(
+            &mut model,
+            Message::SecretInput(crate::app::message::MaskedChar('=')),
+        );
+        update(&mut model, Message::ConfirmSecretInput);
+        let screen = render(&model, 120, 30).join("\n");
+        assert!(screen.contains("Nom : ="), "{screen}");
+        assert!(screen.contains("nom invalide"), "{screen}");
+    }
+
+    #[test]
+    fn tree_status_line_mentions_secrets_panel() {
+        let model = loaded_model((100, 30));
+        let status = &render(&model, 100, 30)[29];
+        assert!(status.contains("S secrets"), "{status}");
     }
 }

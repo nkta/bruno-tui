@@ -99,6 +99,7 @@ fn spawn_run(
             "bru".into(),
             clipboard,
             writer,
+            Vec::new(),
         )
         .await;
         let Ok(exit) = result;

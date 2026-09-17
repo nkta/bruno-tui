@@ -96,6 +96,7 @@ fn spawn_run_sized(
             "bru".into(),
             Arc::new(bruno_tui::app::clipboard::SystemClipboard),
             Arc::new(bruno_tui::writer::BruWriter),
+            Vec::new(),
         )
         .await;
         let Ok(exit) = result;
