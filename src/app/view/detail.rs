@@ -497,14 +497,14 @@ fn status_band(outcome: &RequestOutcome) -> Vec<Line<'static>> {
     ));
     match &result.response.status {
         ResponseStatus::Http(code) => lines.push(field("Statut", code.to_string())),
-        ResponseStatus::Error => {
-            lines.push(field("Statut", "aucune réponse"));
-            if let Some(error) = &result.error {
-                lines.push(field("Erreur", error.clone()));
-            }
-        }
+        ResponseStatus::Error => lines.push(field("Statut", "aucune réponse")),
         ResponseStatus::Skipped => lines.push(field("Statut", "ignorée")),
         ResponseStatus::Other(other) => lines.push(field("Statut", other.clone())),
+    }
+    // Affiché quel que soit le statut : c'est la seule explication d'une
+    // requête en erreur, y compris quand elle n'a jamais été envoyée.
+    if let Some(error) = &result.error {
+        lines.push(field("Erreur", error.clone()));
     }
     lines.push(field(
         "Temps de réponse",
@@ -915,9 +915,9 @@ mod tests {
                 filename: "simple-get.bru".to_owned(),
             },
             request: RequestInfo {
-                method: "GET".into(),
-                url: "https://x/ping".into(),
-                headers: Default::default(),
+                method: Some("GET".into()),
+                url: Some("https://x/ping".into()),
+                headers: Some(Default::default()),
             },
             response: ResponseInfo {
                 status: ResponseStatus::Http(200),
@@ -945,6 +945,11 @@ mod tests {
     /// assertions/tests (`response-tabs` : ces derniers ne sont visibles
     /// que quand l'onglet Tests est actif).
     fn result_detail(result: RequestResult) -> String {
+        result_detail_on_tab(result, ResponseTab::Tests)
+    }
+
+    /// Panneau Réponse d'un résultat, avec l'onglet `tab` actif.
+    fn result_detail_on_tab(result: RequestResult, tab: ResponseTab) -> String {
         let mut model = loaded_model((100, 30));
         model.run.outcomes.insert(
             "simple-get.bru".into(),
@@ -954,7 +959,7 @@ mod tests {
             },
         );
         select(&mut model, "simple-get.bru");
-        model.response_tab = ResponseTab::Tests;
+        model.response_tab = tab;
         plain(&response_text(&model))
     }
 
@@ -1032,6 +1037,49 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Statut : 200"), "{text}");
+    }
+
+    /// Résultat réel d'une requête en échec avant envoi (script pré-requête
+    /// qui lève une exception), issu de `bru run`.
+    fn pre_request_error_result() -> RequestResult {
+        let report: crate::runner::Report = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/reports/pre-request-error.json"
+        ))
+        .expect("pre-request-error.json doit se désérialiser");
+        report.iterations()[0].results[0].clone()
+    }
+
+    #[test]
+    fn status_band_shows_error_of_a_request_failed_before_sending() {
+        for tab in [ResponseTab::Body, ResponseTab::Headers, ResponseTab::Tests] {
+            let text = result_detail_on_tab(pre_request_error_result(), tab);
+            assert!(text.contains("Verdict : échec"), "{text}");
+            assert!(text.contains("Statut : aucune réponse"), "{text}");
+            assert!(
+                text.contains("Erreur : pre-request failure (fixture)"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_band_shows_error_whatever_the_response_status() {
+        let text = result_detail(RequestResult {
+            error: Some("Missing required environment variables: oktaClientSecret".into()),
+            ..base_result()
+        });
+        assert!(text.contains("Statut : 200"), "{text}");
+        assert!(
+            text.contains("Erreur : Missing required environment variables: oktaClientSecret"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn status_band_has_no_error_line_without_error() {
+        let text = result_detail(base_result());
+        assert!(text.contains("Statut : 200"), "{text}");
+        assert!(!text.contains("Erreur"), "{text}");
     }
 
     #[test]

@@ -27,3 +27,22 @@ Aucun secret : requêtes sans auth ni en-têtes, serveur local.
 
 Régénérer modifie les dates, `uid` et durées : mettre à jour les tests
 qui comparent ces valeurs.
+
+## `pre-request-error.json`
+
+- Version : `bru` 2.13.2 (Node 22.17.0, Linux/WSL)
+- Date de capture : 2026-09-17
+- Collection : `tests/fixtures/collections/runner-probe-errored/`
+- Commande : `scripts/gen-report-fixtures.sh`, soit
+  `bru run -r --reporter-json /dev/fd/3 3>pre-request-error.json` à la
+  racine de la collection (aucun serveur requis)
+- Code de sortie : 1
+
+Cas couvert :
+
+| Requête | `status` | `response.status` | Particularité |
+|---|---|---|---|
+| `boom` | `error` | `"error"` | échec avant envoi : le script pré-requête lève une exception, `request.method`, `url`, `headers` et `data` valent `null` |
+
+Même forme que pour des variables d'environnement requises manquantes
+(`Missing required environment variables: …`). Aucun secret.

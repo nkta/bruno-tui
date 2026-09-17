@@ -79,9 +79,12 @@ fn connection_error_has_no_http_response() {
             filename: "folder/down.bru".into()
         }
     );
-    assert_eq!(down.request.method, "GET");
-    assert_eq!(down.request.url, "http://127.0.0.1:18799/nope");
-    assert!(down.request.headers.is_empty());
+    assert_eq!(down.request.method.as_deref(), Some("GET"));
+    assert_eq!(
+        down.request.url.as_deref(),
+        Some("http://127.0.0.1:18799/nope")
+    );
+    assert_eq!(down.request.headers, Some(BTreeMap::new()));
     assert_eq!(down.response.status, ResponseStatus::Error);
     assert_eq!(down.response.status_text, None);
     assert_eq!(down.response.headers, None);
@@ -109,7 +112,10 @@ fn http_response_with_text_body_assertions_and_tests() {
     let ok = result(&report, "ok");
     assert_eq!(ok.path, "ok");
     assert_eq!(ok.test.filename, "ok.bru");
-    assert_eq!(ok.request.url, "http://127.0.0.1:18765/index.html");
+    assert_eq!(
+        ok.request.url.as_deref(),
+        Some("http://127.0.0.1:18765/index.html")
+    );
     assert_eq!(ok.response.status, ResponseStatus::Http(200));
     assert_eq!(ok.response.status_text.as_deref(), Some("OK"));
     assert_eq!(ok.response.headers, Some(python_headers("text/html", "32")));
@@ -269,4 +275,70 @@ fn failure_verdict() {
 
     let failures: Vec<&str> = report.failures().map(|r| r.name.as_str()).collect();
     assert_eq!(failures, ["down", "ok", "json"]);
+}
+
+const PRE_REQUEST_ERROR: &str = include_str!("fixtures/reports/pre-request-error.json");
+
+fn pre_request_error() -> Report {
+    serde_json::from_str(PRE_REQUEST_ERROR).expect("pre-request-error.json doit se désérialiser")
+}
+
+#[test]
+fn request_failed_before_sending() {
+    let report = pre_request_error();
+    assert_eq!(report.iterations().len(), 1);
+    let iteration = &report.iterations()[0];
+    assert_eq!(iteration.iteration_index, 0);
+    assert_eq!(
+        iteration.summary,
+        Summary {
+            total_requests: 1,
+            passed_requests: 0,
+            failed_requests: 0,
+            error_requests: 1,
+            skipped_requests: 0,
+            total_assertions: 0,
+            passed_assertions: 0,
+            failed_assertions: 0,
+            total_tests: 0,
+            passed_tests: 0,
+            failed_tests: 0,
+            total_pre_request_tests: 0,
+            passed_pre_request_tests: 0,
+            failed_pre_request_tests: 0,
+            total_post_response_tests: 0,
+            passed_post_response_tests: 0,
+            failed_post_response_tests: 0,
+        }
+    );
+
+    let boom = result(&report, "boom");
+    assert_eq!(boom.path, "boom");
+    assert_eq!(
+        boom.test,
+        RequestFile {
+            filename: "boom.bru".into()
+        }
+    );
+    // Requête jamais envoyée : `bru` rapporte méthode, URL et en-têtes à `null`.
+    assert_eq!(boom.request.method, None);
+    assert_eq!(boom.request.url, None);
+    assert_eq!(boom.request.headers, None);
+    assert_eq!(boom.response.status, ResponseStatus::Error);
+    assert_eq!(boom.response.status_text, None);
+    assert_eq!(boom.response.headers, None);
+    assert_eq!(boom.response.data, Value::Null);
+    assert_eq!(boom.response.url, None);
+    assert_eq!(boom.response.response_time, 0);
+    assert_eq!(boom.error.as_deref(), Some("pre-request failure (fixture)"));
+    assert_eq!(boom.status, ResultStatus::Error);
+    assert!(!boom.skipped);
+    assert!(boom.assertion_results.is_empty());
+    assert!(boom.test_results.is_empty());
+    assert!(boom.pre_request_test_results.is_empty());
+    assert!(boom.post_response_test_results.is_empty());
+    assert!(!boom.should_stop_runner_execution);
+    assert_eq!(boom.run_duration, 0.043209747);
+    assert_eq!(boom.iteration_index, 0);
+    assert!(boom.is_failure());
 }

@@ -1536,9 +1536,9 @@ mod tests {
                 filename: filename.to_owned(),
             },
             request: RequestInfo {
-                method: "GET".into(),
-                url: "http://x".into(),
-                headers: Default::default(),
+                method: Some("GET".into()),
+                url: Some("http://x".into()),
+                headers: Some(Default::default()),
             },
             response: ResponseInfo {
                 status: ResponseStatus::Http(200),

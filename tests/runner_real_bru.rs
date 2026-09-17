@@ -21,6 +21,11 @@ fn collection() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/runner-probe")
 }
 
+/// Collection dont l'unique requête échoue avant envoi.
+fn errored_collection() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/runner-probe-errored")
+}
+
 /// Serveur HTTP local servant `www/`, arrêté à la destruction.
 struct HttpServer(Child);
 
@@ -120,4 +125,32 @@ async fn real_bru_run_on_fixture_collection() {
     // Aucun fichier de rapport créé, ni dans la collection ni dans le cwd.
     assert_eq!(regular_files(&collection(), true), collection_before);
     assert_eq!(regular_files(&cwd, false), cwd_before);
+}
+
+#[tokio::test]
+#[ignore = "nécessite bru"]
+async fn real_bru_run_with_request_failed_before_sending() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let runner = BruRunner::new(tx);
+    let handle = runner.start(RunRequest::collection(errored_collection()));
+
+    let event = timeout(Duration::from_secs(60), rx.recv())
+        .await
+        .expect("bru doit terminer en moins de 60 s")
+        .expect("canal ouvert");
+    assert_eq!(event.id, handle.id());
+
+    // Le rapport doit rester lisible malgré la requête jamais envoyée.
+    let RunOutcome::Completed { report, exit_code } = event.outcome else {
+        panic!("issue inattendue : {:?}", event.outcome);
+    };
+    assert_eq!(exit_code, Some(1));
+    let results = &report.iterations()[0].results;
+    assert_eq!(results.len(), 1);
+    let boom = &results[0];
+    assert_eq!(boom.name, "boom");
+    assert_eq!(boom.status, ResultStatus::Error);
+    assert_eq!(boom.request.url, None);
+    assert_eq!(boom.error.as_deref(), Some("pre-request failure (fixture)"));
+    assert!(boom.is_failure());
 }

@@ -1,0 +1,15 @@
+meta {
+  name: boom
+  type: http
+  seq: 1
+}
+
+get {
+  url: http://127.0.0.1:18799/nope
+  body: none
+  auth: none
+}
+
+script:pre-request {
+  throw new Error("pre-request failure (fixture)");
+}
