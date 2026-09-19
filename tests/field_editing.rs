@@ -484,3 +484,79 @@ async fn add_delete_rename_then_save_matches_expected_after_file() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn environment_editing_flow_saves_to_disk_and_secrets_never_appear() {
+    let dir = workdir("env-editing-flow");
+    fs::create_dir_all(dir.join("environments")).expect("dir");
+    fs::write(
+        dir.join("bruno.json"),
+        r#"{"name": "test-env", "type": "collection", "version": "1"}"#,
+    )
+    .expect("bruno.json");
+    let initial_content = "vars {\n  host: https://staging.example.com\n  port: 8080\n}\n\nvars:secret [\n  apiKey,\n  jwtToken\n]\n";
+    fs::write(dir.join("environments/staging.bru"), initial_content).expect("staging.bru");
+
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let (clipboard, _rx) = SpyClipboard::new();
+    let handle = spawn_run(
+        dir.clone(),
+        sender.clone(),
+        events,
+        Arc::new(BruWriter),
+        clipboard,
+    );
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Ouvrir le panneau Environnement ('E')
+    sender.send(key(KeyCode::Char('E'))).await.expect("send");
+    // 2. Descendre sur 'staging'
+    sender.send(key(KeyCode::Down)).await.expect("send");
+    // 3. Entrée pour ouvrir les variables
+    sender.send(key(KeyCode::Enter)).await.expect("send");
+
+    // 4. Entrée pour éditer la variable 'host'
+    sender.send(key(KeyCode::Enter)).await.expect("send");
+    // Effacer et taper une nouvelle valeur
+    for _ in 0..30 {
+        sender.send(key(KeyCode::Backspace)).await.expect("send");
+    }
+    for c in "https://prod.example.com".chars() {
+        sender.send(key(KeyCode::Char(c))).await.expect("send");
+    }
+    // Valider la saisie avec Entrée
+    sender.send(key(KeyCode::Enter)).await.expect("send");
+
+    // 5. Sauvegarder avec Ctrl+S
+    sender.send(ctrl('s')).await.expect("send");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // 6. Quitter avec 'q'
+    sender.send(key(KeyCode::Char('q'))).await.expect("send");
+
+    let (terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("fermeture normale")
+        .expect("join handle");
+    assert!(matches!(exit, Exit::Normal));
+
+    let screen_str = screen(&terminal).join("\n");
+    // Confirmer qu'une variable secrète n'apparaît jamais dans cette vue
+    assert!(!screen_str.contains("apiKey"), "{screen_str}");
+    assert!(!screen_str.contains("jwtToken"), "{screen_str}");
+
+    // 7. Relire le fichier sur disque pour confirmer l'écriture
+    let written = fs::read_to_string(dir.join("environments/staging.bru")).expect("lecture");
+    assert!(
+        written.contains("host: https://prod.example.com"),
+        "{written}"
+    );
+    assert!(written.contains("port: 8080"), "{written}");
+    assert!(
+        written.contains("vars:secret [\n  apiKey,\n  jwtToken\n]"),
+        "{written}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -468,6 +468,32 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
     }
 }
 
+/// Barre d'aide d'une session d'édition d'environnement : état, variable,
+/// indicateur de modification non enregistrée et touches utiles à l'état.
+fn environment_session_help_line(session: &crate::app::model::EnvironmentEditSession) -> String {
+    use crate::app::model::EnvironmentEditState;
+
+    let unsaved = if session.has_unsaved() {
+        " ● non enregistré"
+    } else {
+        ""
+    };
+    match &session.state {
+        EnvironmentEditState::Select => {
+            let var_name = session.current_variable().map_or("", |v| v.key.as_str());
+            format!(
+                "Sélection · {var_name}{unsaved} — ↑↓ variable  Entrée éditer  Ctrl+S sauvegarder  Échap retour"
+            )
+        }
+        EnvironmentEditState::Input(_) => {
+            let var_name = session.current_variable().map_or("", |v| v.key.as_str());
+            format!(
+                "Saisie · {var_name}{unsaved} — Entrée valider  Échap annuler  Ctrl+S sauvegarder"
+            )
+        }
+    }
+}
+
 fn status_line(model: &Model) -> String {
     if let Some(confirm) = model.confirm {
         return match confirm {
@@ -494,6 +520,11 @@ fn status_line(model: &Model) -> String {
     }
     if let Some(session) = &model.editing {
         return session_help_line(session);
+    }
+    if model.focus == Focus::EnvironmentPicker
+        && let Some(session) = &model.environment_editing
+    {
+        return environment_session_help_line(session);
     }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
@@ -612,7 +643,7 @@ fn render_response(model: &Model, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::message::Message;
+    use crate::app::message::{InputKey, Message};
     use crate::app::model::{HistoryEntry, HistoryOutcome};
     use crate::app::test_support::{fixture, loaded_model, render, select};
     use crate::app::update::update;
@@ -1919,5 +1950,66 @@ mod tests {
             line.contains("Saisie · Renommage · En-tête Accept"),
             "{line}"
         );
+    }
+
+    #[test]
+    fn environment_variables_view_rendering_and_cursor() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1;
+        update(&mut model, Message::Enter);
+        assert!(model.environment_editing.is_some());
+
+        // Rendu en mode sélection
+        let lines = render(&model, 100, 30);
+        let content = lines.join("\n");
+        assert!(content.contains("host: localhost:3000"), "{content}");
+        assert!(content.contains("debug: true (désactivé)"), "{content}");
+
+        // Passer en mode saisie
+        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::InputKey(InputKey::Char('!')));
+
+        let lines = render(&model, 100, 30);
+        let content = lines.join("\n");
+        assert!(content.contains("localhost:3000!"), "{content}");
+
+        // Vérification de la position du curseur
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let cursor = terminal.get_cursor_position().expect("curseur");
+        // Le panneau Environnement prend tout le corps (areas.body)
+        // La ligne 0 du corps a y = 1 (sous le titre)
+        // La première variable est sur y = 2 (dans le bloc)
+        assert_eq!(cursor.y, 2);
+        // Prefix "  host: " a une largeur de 8, "localhost:3000!" a une longueur de 15 -> x = 1 + 8 + 15 = 24
+        assert_eq!(cursor.x, 1 + 8 + 15);
+    }
+
+    #[test]
+    fn environment_variables_help_line() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1;
+        update(&mut model, Message::Enter);
+
+        // En mode sélection
+        let line = status_line(&model);
+        assert!(line.contains("Sélection · host"), "{line}");
+        assert!(line.contains("Entrée éditer"), "{line}");
+        assert!(line.contains("Ctrl+S sauvegarder"), "{line}");
+        assert!(line.contains("Échap retour"), "{line}");
+        assert!(!line.contains("● non enregistré"), "{line}");
+
+        // En mode saisie
+        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::InputKey(InputKey::Char('x')));
+        let line = status_line(&model);
+        assert!(line.contains("Saisie · host"), "{line}");
+        assert!(line.contains("Entrée valider"), "{line}");
+        assert!(line.contains("Échap annuler"), "{line}");
+        assert!(line.contains("Ctrl+S sauvegarder"), "{line}");
+        assert!(line.contains("● non enregistré"), "{line}");
     }
 }

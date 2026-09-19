@@ -187,6 +187,11 @@ pub enum Message {
         path: PathBuf,
         result: Result<super::model::SavedEdit, crate::writer::WriteError>,
     },
+    /// Renvoyé par la boucle après `Command::SaveEnvironment`.
+    EnvironmentSaved {
+        path: PathBuf,
+        result: Result<super::model::SavedEnvironment, crate::writer::WriteError>,
+    },
     /// Réponse 'oui' à un `PendingConfirm`.
     ConfirmYes,
     /// Réponse 'non' à un `PendingConfirm`.
@@ -252,6 +257,9 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
             Some(Message::ClipboardResult { token, result })
         }
         AppEvent::EditSaved { path, result } => Some(Message::EditSaved { path, result }),
+        AppEvent::EnvironmentSaved { path, result } => {
+            Some(Message::EnvironmentSaved { path, result })
+        }
         AppEvent::SecretsResolved { root, resolved } => {
             Some(Message::SecretsResolved { root, resolved })
         }
@@ -314,6 +322,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('H') => Message::ToggleHistory,
         KeyCode::Char('E') => Message::ToggleEnvironmentPicker,
         KeyCode::Char('S') => Message::ToggleSecrets,
+        KeyCode::Char('s') => Message::SaveEdit,
         KeyCode::Char('a') => Message::Add,
         KeyCode::Char('d') => Message::Delete,
         KeyCode::Char('c') => Message::Rename,
@@ -487,6 +496,7 @@ mod tests {
             (KeyCode::Char('e'), none, "StartEdit"),
             (KeyCode::Char(' '), none, "ToggleField"),
             (KeyCode::Char('s'), KeyModifiers::CONTROL, "SaveEdit"),
+            (KeyCode::Char('s'), none, "SaveEdit"),
             (KeyCode::Char('S'), none, "ToggleSecrets"),
             (KeyCode::Char('S'), KeyModifiers::SHIFT, "ToggleSecrets"),
             (KeyCode::Char('a'), none, "Add"),

@@ -8,10 +8,11 @@ use std::ops::RangeInclusive;
 use super::filter::{FilterState, evaluate};
 use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
-    CollectionState, DetailSelection, Drag, DragPanel, EditSession, EditState, EditableField, Exit,
-    Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, ResponseTab, SecretError, SecretInput,
-    StatusMessage, environment_name_at, field_enabled, field_value, field_value_committed,
-    secret_env_vars, secret_lookups, secret_rows, section_entries, tree_node_at, visible_rows,
+    CollectionState, DetailSelection, Drag, DragPanel, EditSession, EditState, EditableField,
+    EnvironmentEditSession, EnvironmentEditState, Exit, Focus, HistoryEntry, HistoryOutcome,
+    InputTarget, Model, ResponseTab, SecretError, SecretInput, StatusMessage, environment_name_at,
+    field_enabled, field_value, field_value_committed, secret_env_vars, secret_lookups,
+    secret_rows, section_entries, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::text_input::TextInput;
@@ -56,6 +57,15 @@ pub enum Command {
         ast: crate::collection::BruFile,
         stamp: crate::writer::FileStamp,
         edits: Vec<crate::writer::FieldEdit>,
+    },
+    /// Sauvegarder les modifications d'un environnement sur disque ; la boucle
+    /// l'exécute dans `spawn_blocking` via `writer::write_environment` et renvoie
+    /// le résultat à `update` via `Message::EnvironmentSaved`.
+    SaveEnvironment {
+        path: std::path::PathBuf,
+        ast: crate::collection::BruFile,
+        stamp: crate::writer::FileStamp,
+        edits: Vec<crate::writer::EnvironmentVarEdit>,
     },
     /// Résoudre les variables secrètes depuis `<root>/.env` et le shell ;
     /// la boucle l'exécute dans `spawn_blocking` et renvoie le résultat à
@@ -241,6 +251,12 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             close_secrets(model);
             Command::None
         }
+        Message::FocusTree
+            if model.focus == Focus::EnvironmentPicker && model.environment_editing.is_some() =>
+        {
+            model.environment_editing = None;
+            Command::None
+        }
         Message::FocusTree => {
             if let Some(session) = &model.editing {
                 model.last_status = None;
@@ -395,12 +411,21 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::StartEdit => {
-            start_edit(model);
+            if model.focus == Focus::Detail {
+                start_edit(model);
+            } else if model.focus == Focus::EnvironmentPicker
+                && let Some(session) = &mut model.environment_editing
+            {
+                session.begin_input();
+            }
             Command::None
         }
         Message::Enter => {
             if model.focus == Focus::Detail {
                 enter_in_detail(model);
+                Command::None
+            } else if model.focus == Focus::EnvironmentPicker {
+                navigate_environment_picker(model, Message::Enter);
                 Command::None
             } else {
                 update(model, Message::Right)
@@ -419,19 +444,38 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::ValidateInput => {
-            validate_input(model, false);
+            if let Some(session) = &mut model.environment_editing {
+                session.commit_input();
+            } else {
+                validate_input(model, false);
+            }
             Command::None
         }
         Message::CancelInput => {
             cancel_input(model);
             Command::None
         }
-        Message::SaveEdit => match validate_input(model, true) {
-            Validation::Done => save_edit(model),
-            Validation::Continued | Validation::Refused => Command::None,
-        },
+        Message::SaveEdit => {
+            if model.focus == Focus::EnvironmentPicker
+                || (model.environment_editing.is_some() && model.editing.is_none())
+            {
+                if let Some(session) = &mut model.environment_editing {
+                    session.commit_input();
+                }
+                save_environment(model)
+            } else {
+                match validate_input(model, true) {
+                    Validation::Done => save_edit(model),
+                    Validation::Continued | Validation::Refused => Command::None,
+                }
+            }
+        }
         Message::EditSaved { path, result } => {
             edit_saved(model, path, result);
+            Command::None
+        }
+        Message::EnvironmentSaved { path, result } => {
+            environment_saved(model, path, result);
             Command::None
         }
         Message::Mouse(input) => {
@@ -1253,6 +1297,11 @@ fn value_edit(field: EditableField, value: String) -> Option<FieldEdit> {
 /// reprend la valeur qu'il avait au début de la saisie ; un ajout est
 /// abandonné en entier et le curseur revient d'où il était parti.
 fn cancel_input(model: &mut Model) {
+    if let Some(session) = &mut model.environment_editing {
+        session.cancel_input();
+        model.last_status = None;
+        return;
+    }
     let Some(session) = &mut model.editing else {
         return;
     };
@@ -1273,6 +1322,27 @@ fn cancel_input(model: &mut Model) {
 
 /// Touche d'édition du tampon pendant une saisie.
 fn input_key(model: &mut Model, key: InputKey) {
+    if let Some(session) = &mut model.environment_editing {
+        let EnvironmentEditState::Input(input) = &mut session.state else {
+            return;
+        };
+        match key {
+            InputKey::Char(c) => input.insert(c),
+            InputKey::Backspace => input.backspace(),
+            InputKey::Delete => input.delete(),
+            InputKey::Left => input.left(),
+            InputKey::Right => input.right(),
+            InputKey::Up => input.up(),
+            InputKey::Down => input.down(),
+            InputKey::Home => input.home(),
+            InputKey::End => input.end(),
+            InputKey::Enter => {
+                session.commit_input();
+            }
+        }
+        model.last_status = None;
+        return;
+    }
     let Some(session) = &mut model.editing else {
         return;
     };
@@ -1483,6 +1553,102 @@ fn edit_saved(
         }
         Err(error) => {
             model.last_status = Some(super::model::StatusMessage::SaveError(error.to_string()));
+        }
+    }
+}
+
+/// Déclenche la sauvegarde des modifications de l'environnement si la session est modifiée.
+fn save_environment(model: &mut Model) -> Command {
+    let Some(session) = &model.environment_editing else {
+        return Command::None;
+    };
+    if !session.dirty {
+        return Command::None;
+    }
+    let session_path = session.path.clone();
+    let session_stamp = session.stamp;
+    let session_vars = session.variables.clone();
+
+    let Some(collection) = model.loaded() else {
+        return Command::None;
+    };
+    let env = collection.environments.iter().find_map(|e| match e {
+        Ok(env) if env.path == session_path => Some(env),
+        _ => None,
+    });
+    let Some(env) = env else {
+        return Command::None;
+    };
+    let Some(ast) = &env.ast else {
+        return Command::None;
+    };
+    let Some(entries) = ast.dictionary("vars") else {
+        return Command::None;
+    };
+    let mut edits = Vec::new();
+    for (index, kv) in session_vars.iter().enumerate() {
+        if let Some(entry) = entries.get(index)
+            && entry.value != kv.value
+        {
+            edits.push(crate::writer::EnvironmentVarEdit {
+                index,
+                value: kv.value.clone(),
+            });
+        }
+    }
+    if edits.is_empty() {
+        if let Some(session) = &mut model.environment_editing {
+            session.dirty = false;
+        }
+        return Command::None;
+    }
+    Command::SaveEnvironment {
+        path: session_path,
+        ast: ast.clone(),
+        stamp: session_stamp,
+        edits,
+    }
+}
+
+/// Applique le résultat d'une sauvegarde d'environnement.
+fn environment_saved(
+    model: &mut Model,
+    path: std::path::PathBuf,
+    result: Result<super::model::SavedEnvironment, crate::writer::WriteError>,
+) {
+    let new_data = match result {
+        Ok(saved) => {
+            let Some(session) = &mut model.environment_editing else {
+                return;
+            };
+            if session.path != path {
+                return;
+            }
+            session.stamp = saved.stamp;
+            session.dirty = false;
+            Some((saved.ast, session.variables.clone()))
+        }
+        Err(error) => {
+            let Some(session) = &model.environment_editing else {
+                return;
+            };
+            if session.path != path {
+                return;
+            }
+            model.last_status = Some(super::model::StatusMessage::SaveError(error.to_string()));
+            None
+        }
+    };
+
+    if let Some((ast, variables)) = new_data
+        && let Some(collection) = model.loaded_mut()
+    {
+        for env in collection.environments.iter_mut().flatten() {
+            if env.path == path {
+                env.variables = variables;
+                env.ast = Some(ast);
+                break;
+            }
         }
     }
 }
@@ -1777,9 +1943,26 @@ fn environment_index_for(
         .map_or(0, |i| i + 1)
 }
 
-/// `↑`/`↓`/`Début`/`Fin`/`Entrée` dans le panneau de sélection
-/// d'environnement.
+/// `↑`/`↓`/`Début`/`Fin`/`Entrée`/`→` dans le panneau de sélection
+/// d'environnement ou dans la vue des variables.
 fn navigate_environment_picker(model: &mut Model, message: Message) {
+    if let Some(session) = &mut model.environment_editing {
+        match message {
+            Message::Up => session.cursor = session.cursor.saturating_sub(1),
+            Message::Down => {
+                session.cursor =
+                    (session.cursor + 1).min(session.variables.len().saturating_sub(1));
+            }
+            Message::Home => session.cursor = 0,
+            Message::End => session.cursor = session.variables.len().saturating_sub(1),
+            Message::Enter => {
+                session.begin_input();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     let Some(collection) = model.loaded() else {
         return;
     };
@@ -1791,8 +1974,34 @@ fn navigate_environment_picker(model: &mut Model, message: Message) {
         Message::Home => model.environment_selected = 0,
         Message::End => model.environment_selected = count - 1,
         Message::Right => select_environment_picker(model, before),
+        Message::Enter => open_environment_editing(model, before),
         _ => {}
     }
+}
+
+/// `Entrée` sur une entrée valide de la liste : ouvre la session d'édition
+/// des variables de l'environnement, sans effet sur « Aucun » ni sur une
+/// entrée en erreur.
+fn open_environment_editing(model: &mut Model, index: usize) {
+    if index == 0 {
+        return;
+    }
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    let Some(Ok(env)) = collection.environments.get(index - 1) else {
+        return;
+    };
+    let full_path = collection.root.join(&env.path);
+    let Ok(stamp) = FileStamp::capture(&full_path) else {
+        return;
+    };
+    model.environment_editing = Some(EnvironmentEditSession::new(
+        env.name.clone(),
+        env.path.clone(),
+        stamp,
+        env.variables.clone(),
+    ));
 }
 
 /// `Entrée` sur l'entrée courante du panneau : devient l'environnement
@@ -2955,6 +3164,295 @@ mod tests {
         update(&mut model, Message::FocusTree);
         assert_eq!(model.focus, Focus::Tree);
         assert_eq!(model.current_environment.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn enter_on_valid_environment_opens_edit_session_and_none_or_error_does_nothing() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+
+        // Indice 0 (« Aucun ») : Entrée ne fait rien
+        model.environment_selected = 0;
+        update(&mut model, Message::Enter);
+        assert!(model.environment_editing.is_none());
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
+
+        // Indice 2 (malformed, en erreur) : Entrée ne fait rien
+        model.environment_selected = 2;
+        update(&mut model, Message::Enter);
+        assert!(model.environment_editing.is_none());
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
+
+        // Indice 1 (local, valide) : Entrée ouvre la session
+        model.environment_selected = 1;
+        update(&mut model, Message::Enter);
+        assert!(model.environment_editing.is_some());
+        let session = model.environment_editing.as_ref().unwrap();
+        assert_eq!(session.name, "local");
+        assert_eq!(session.variables.len(), 2);
+        assert_eq!(session.cursor, 0);
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
+        assert_eq!(
+            model.current_environment, None,
+            "l'environnement actif ne doit pas changer"
+        );
+    }
+
+    #[test]
+    fn escape_cancels_input_if_active_or_closes_environment_editing_to_picker() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1;
+        update(&mut model, Message::Enter);
+        assert!(model.environment_editing.is_some());
+
+        // 1. Commencer la saisie sur la variable 0 ('host')
+        update(&mut model, Message::StartEdit);
+        assert!(matches!(
+            model.environment_editing.as_ref().map(|s| &s.state),
+            Some(EnvironmentEditState::Input(_))
+        ));
+
+        // Taper un caractère
+        update(&mut model, Message::InputKey(InputKey::Char('z')));
+
+        // Échap pendant la saisie annule la saisie (CancelInput via capture de texte)
+        update(&mut model, Message::CancelInput);
+        assert!(matches!(
+            model.environment_editing.as_ref().map(|s| &s.state),
+            Some(EnvironmentEditState::Select)
+        ));
+        assert!(model.environment_editing.is_some());
+        assert_eq!(
+            model.environment_editing.as_ref().unwrap().variables[0].value,
+            "localhost:3000"
+        );
+
+        // Échap sans saisie en cours (FocusTree) referme la vue variables et revient à la liste
+        update(&mut model, Message::FocusTree);
+        assert!(model.environment_editing.is_none());
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
+        assert_eq!(
+            model.environment_selected, 1,
+            "sélection conservée sur l'environnement ouvert"
+        );
+
+        // Un nouvel Échap ferme le panneau vers Focus::Tree
+        update(&mut model, Message::FocusTree);
+        assert_eq!(model.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn save_environment_when_clean_returns_none_when_dirty_returns_command() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::Enter);
+        assert!(model.environment_editing.is_some());
+
+        // 1. Session propre -> SaveEdit retourne Command::None
+        assert!(matches!(
+            update(&mut model, Message::SaveEdit),
+            Command::None
+        ));
+
+        // 2. Modification de la première variable
+        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::InputKey(InputKey::Char('!')));
+        update(&mut model, Message::ValidateInput);
+
+        assert!(model.environment_editing.as_ref().unwrap().dirty);
+
+        // 3. Session modifiée -> Command::SaveEnvironment avec path, ast, stamp, edits
+        match update(&mut model, Message::SaveEdit) {
+            Command::SaveEnvironment {
+                path,
+                ast,
+                stamp,
+                edits,
+            } => {
+                let session = model.environment_editing.as_ref().unwrap();
+                assert_eq!(path, session.path);
+                assert_eq!(stamp, session.stamp);
+                assert_eq!(edits.len(), 1);
+                assert_eq!(edits[0].index, 0);
+                assert_eq!(edits[0].value, "localhost:3000!");
+                let env = model
+                    .loaded()
+                    .unwrap()
+                    .environments
+                    .iter()
+                    .find_map(|e| match e {
+                        Ok(env) if env.path == path => Some(env),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(Some(&ast), env.ast.as_ref());
+            }
+            _ => panic!("Command::SaveEnvironment attendu"),
+        }
+
+        // L'émission de Command::SaveEnvironment ne vide PAS dirty
+        assert!(model.environment_editing.as_ref().unwrap().dirty);
+    }
+
+    #[test]
+    fn save_environment_from_input_commits_then_saves() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::Enter);
+
+        // Saisie en cours (sans ValidateInput)
+        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::InputKey(InputKey::Char('x')));
+
+        // Ctrl+S pendant la saisie valide la saisie et sauvegarde
+        match update(&mut model, Message::SaveEdit) {
+            Command::SaveEnvironment { edits, .. } => {
+                assert_eq!(edits.len(), 1);
+                assert_eq!(edits[0].value, "localhost:3000x");
+            }
+            _ => panic!("Command::SaveEnvironment attendu"),
+        }
+
+        let session = model.environment_editing.as_ref().unwrap();
+        assert_eq!(session.state, EnvironmentEditState::Select);
+        assert!(session.dirty);
+        assert_eq!(session.variables[0].value, "localhost:3000x");
+    }
+
+    #[test]
+    fn environment_saved_success_updates_collection_and_resets_dirty() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::Enter);
+
+        // Modifier
+        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::InputKey(InputKey::Char('z')));
+        update(&mut model, Message::ValidateInput);
+
+        let initial_stamp = model.environment_editing.as_ref().unwrap().stamp;
+        let env_path = model.environment_editing.as_ref().unwrap().path.clone();
+
+        let new_stamp = {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/writer-cases/headers.bru");
+            crate::writer::FileStamp::capture(&path).expect("stamp")
+        };
+        let new_source = "vars {\n  host: localhost:3000z\n  token: secret\n}\n";
+        let new_ast = crate::collection::BruFile::parse(new_source.to_string()).expect("parse");
+
+        let saved = crate::app::model::SavedEnvironment {
+            stamp: new_stamp,
+            ast: new_ast.clone(),
+        };
+
+        update(
+            &mut model,
+            Message::EnvironmentSaved {
+                path: env_path.clone(),
+                result: Ok(saved),
+            },
+        );
+
+        let session = model.environment_editing.as_ref().unwrap();
+        assert!(!session.dirty);
+        assert!(!session.has_unsaved());
+        assert_eq!(session.stamp, new_stamp);
+        assert_ne!(session.stamp, initial_stamp);
+        assert_eq!(session.variables[0].value, "localhost:3000z");
+
+        // Dans collection.environments, les variables et l'AST sont mis à jour
+        let env = model
+            .loaded()
+            .unwrap()
+            .environments
+            .iter()
+            .find_map(|e| match e {
+                Ok(env) if env.path == env_path => Some(env),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(env.variables[0].value, "localhost:3000z");
+        assert_eq!(env.ast.as_ref(), Some(&new_ast));
+    }
+
+    #[test]
+    fn environment_saved_failure_retains_modifications_and_sets_status() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::Enter);
+
+        // Modifier
+        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::InputKey(InputKey::Char('z')));
+        update(&mut model, Message::ValidateInput);
+
+        let env_path = model.environment_editing.as_ref().unwrap().path.clone();
+        let error = crate::writer::WriteError::Stale {
+            path: env_path.clone(),
+        };
+
+        update(
+            &mut model,
+            Message::EnvironmentSaved {
+                path: env_path.clone(),
+                result: Err(error),
+            },
+        );
+
+        let session = model.environment_editing.as_ref().unwrap();
+        assert!(session.dirty);
+        assert_eq!(session.variables[0].value, "localhost:3000z");
+
+        // Message d'erreur dans last_status
+        match &model.last_status {
+            Some(StatusMessage::SaveError(msg)) => {
+                assert!(msg.contains("modifié depuis son chargement"));
+            }
+            _ => panic!("StatusMessage::SaveError attendu"),
+        }
+    }
+
+    #[test]
+    fn environment_saved_stale_event_ignored() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::Enter);
+
+        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::InputKey(InputKey::Char('z')));
+        update(&mut model, Message::ValidateInput);
+
+        let other_path = PathBuf::from("environments/other.bru");
+        let new_stamp = {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/writer-cases/headers.bru");
+            crate::writer::FileStamp::capture(&path).expect("stamp")
+        };
+        let new_source = "vars {\n  host: other\n}\n";
+        let new_ast = crate::collection::BruFile::parse(new_source.to_string()).expect("parse");
+
+        update(
+            &mut model,
+            Message::EnvironmentSaved {
+                path: other_path,
+                result: Ok(crate::app::model::SavedEnvironment {
+                    stamp: new_stamp,
+                    ast: new_ast,
+                }),
+            },
+        );
+
+        // La session active n'a pas été touchée
+        let session = model.environment_editing.as_ref().unwrap();
+        assert!(session.dirty);
+        assert_ne!(session.stamp, new_stamp);
     }
 
     #[test]
@@ -4710,12 +5208,12 @@ mod tests {
         update(&mut model, Message::Enter);
         assert!(model.tree.expanded.contains(Path::new("grp")));
 
-        // Sélecteur d'environnement : valide l'entrée, comme `→`.
+        // Sélecteur d'environnement : `→` valide l'entrée (Entrée ouvre les variables).
         let mut model = loaded_model((100, 30));
         model.current_environment = Some("local".into());
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 0;
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::Right);
         assert_eq!(model.focus, Focus::Tree);
         assert_eq!(model.current_environment, None);
 

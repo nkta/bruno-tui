@@ -185,6 +185,51 @@ pub async fn run<B: Backend>(
                         let _ = sender.blocking_send(AppEvent::EditSaved { path, result });
                     });
                 }
+                Command::SaveEnvironment {
+                    path,
+                    ast,
+                    stamp,
+                    edits,
+                } => {
+                    let root = model
+                        .loaded()
+                        .map(|c| c.root.clone())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    let full_path = root.join(&path);
+                    let sender = sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = writer::write_environment(&full_path, &ast, &stamp, &edits)
+                            .and_then(|new_stamp| {
+                                let bytes = std::fs::read(&full_path).map_err(|source| {
+                                    writer::WriteError::Io {
+                                        path: full_path.clone(),
+                                        source,
+                                    }
+                                })?;
+                                let text = String::from_utf8(bytes).map_err(|source| {
+                                    writer::WriteError::Io {
+                                        path: full_path.clone(),
+                                        source: io::Error::new(io::ErrorKind::InvalidData, source),
+                                    }
+                                })?;
+                                let ast =
+                                    crate::collection::BruFile::parse(text).map_err(|source| {
+                                        writer::WriteError::Io {
+                                            path: full_path.clone(),
+                                            source: io::Error::new(
+                                                io::ErrorKind::InvalidData,
+                                                source,
+                                            ),
+                                        }
+                                    })?;
+                                Ok(model::SavedEnvironment {
+                                    stamp: new_stamp,
+                                    ast,
+                                })
+                            });
+                        let _ = sender.blocking_send(AppEvent::EnvironmentSaved { path, result });
+                    });
+                }
                 Command::SetMouseCapture(enabled) => {
                     let result = mouse
                         .capture

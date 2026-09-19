@@ -400,7 +400,7 @@ fn secret_probe() -> PathBuf {
 
 /// Choisit l'environnement `CI`, seul environnement de `secret-probe`.
 async fn choose_ci(sender: &mpsc::Sender<AppEvent>) {
-    for code in [KeyCode::Char('E'), KeyCode::Down, KeyCode::Enter] {
+    for code in [KeyCode::Char('E'), KeyCode::Down, KeyCode::Right] {
         sender.send(key(code)).await.expect("envoi");
     }
 }
