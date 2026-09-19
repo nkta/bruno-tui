@@ -260,7 +260,7 @@ impl EditSession {
     pub fn has_unsaved(&self) -> bool {
         self.dirty
             || match &self.state {
-                EditState::FieldSelect => false,
+                EditState::FieldSelect | EditState::MethodPicker { .. } => false,
                 EditState::Input(input) => {
                     input.is_modified() || matches!(self.target, InputTarget::NewValue { .. })
                 }
@@ -281,11 +281,17 @@ impl EditSession {
     }
 }
 
-/// État d'une session : choix du champ, ou saisie de sa valeur.
+/// État d'une session : choix du champ, saisie de sa valeur, ou sélecteur
+/// de méthode ouvert (`add-method-editing`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditState {
     FieldSelect,
     Input(TextInput),
+    /// Sélecteur de méthode ouvert, `selected` est l'indice présélectionné
+    /// dans `crate::collection::ast::METHODS`.
+    MethodPicker {
+        selected: usize,
+    },
 }
 
 /// Ce que produit la validation de la saisie en cours.
@@ -311,6 +317,8 @@ pub enum InputTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditableField {
+    /// Nom du bloc de méthode HTTP (`add-method-editing`).
+    Method,
     Url,
     HeaderValue(usize),
     QueryParamValue(usize),
@@ -321,10 +329,11 @@ pub enum EditableField {
 }
 
 impl EditableField {
-    /// Positions du curseur pour une vue de requête : URL, chaque section
-    /// suivie de sa ligne d'ajout, puis le corps s'il est éditable.
+    /// Positions du curseur pour une vue de requête : la méthode, l'URL,
+    /// chaque section suivie de sa ligne d'ajout, puis le corps s'il est
+    /// éditable.
     pub fn list_for(view: &RequestView) -> Vec<Self> {
-        let mut fields = vec![Self::Url];
+        let mut fields = vec![Self::Method, Self::Url];
         for index in 0..view.headers.len() {
             fields.push(Self::HeaderValue(index));
         }
@@ -358,7 +367,7 @@ impl EditableField {
             Self::HeaderValue(index) => Some((EntrySection::Headers, *index)),
             Self::QueryParamValue(index) => Some((EntrySection::QueryParams, *index)),
             Self::PathParamValue(index) => Some((EntrySection::PathParams, *index)),
-            Self::Url | Self::AddRow(_) | Self::BodyText => None,
+            Self::Method | Self::Url | Self::AddRow(_) | Self::BodyText => None,
         }
     }
 
@@ -373,6 +382,7 @@ impl EditableField {
     /// Nom du champ pour l'affichage.
     pub fn display_name(&self, view: &RequestView) -> String {
         match self {
+            Self::Method => "Méthode".to_owned(),
             Self::Url => "Url".to_owned(),
             Self::HeaderValue(index) => format!(
                 "En-tête {}",
@@ -461,6 +471,7 @@ pub fn field_value<'a>(session: &'a EditSession, field: &EditableField) -> &'a s
 pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField) -> &'a str {
     let view = &session.preview;
     match field {
+        EditableField::Method => &view.method,
         EditableField::Url => &view.url,
         EditableField::AddRow(_) => "",
         EditableField::BodyText => match &view.body {
@@ -689,6 +700,13 @@ impl Model {
             .is_some_and(|s| matches!(s.state, EditState::Input(_)))
         {
             return Some(TextCapture::Input);
+        }
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|s| matches!(s.state, EditState::MethodPicker { .. }))
+        {
+            return Some(TextCapture::MethodPicker);
         }
         if self.search.as_ref().is_some_and(SearchState::is_editing) {
             return Some(TextCapture::Search);
@@ -1060,11 +1078,12 @@ mod tests {
     fn editable_field_list_for_request_view() {
         use crate::writer::EntrySection::{Headers, PathParams, QueryParams};
 
-        // URL + 2 en-têtes + corps json -> 7 positions dans l'ordre
+        // Méthode + URL + 2 en-têtes + corps json -> 8 positions dans l'ordre
         let fields = EditableField::list_for(&make_view(Some(BodyKind::Json), 2));
         assert_eq!(
             fields,
             vec![
+                EditableField::Method,
                 EditableField::Url,
                 EditableField::HeaderValue(0),
                 EditableField::HeaderValue(1),
@@ -1080,6 +1099,7 @@ mod tests {
         assert_eq!(
             fields_form,
             vec![
+                EditableField::Method,
                 EditableField::Url,
                 EditableField::AddRow(Headers),
                 EditableField::AddRow(QueryParams),
@@ -1143,7 +1163,11 @@ mod tests {
         );
 
         // En saisie sur un champ : le tampon est affiché pour ce champ seul.
-        session.cursor = 0;
+        session.cursor = session
+            .fields
+            .iter()
+            .position(|f| *f == EditableField::Url)
+            .expect("URL présente");
         session.state = EditState::Input(TextInput::new("https://typed", false));
         assert_eq!(field_value(&session, &EditableField::Url), "https://typed");
         assert_eq!(

@@ -52,6 +52,10 @@ pub const LABEL: Style = Style::new().add_modifier(Modifier::DIM);
 /// Message unique d'un panneau plein corps sans entrée à lister (ex.
 /// « aucune erreur »).
 pub const EMPTY_MESSAGE: Style = Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC));
+/// Zone de corps éditable, dans le panneau de détail : fond légèrement
+/// plus clair que [`BACKGROUND`] pour la distinguer comme zone de saisie,
+/// sans dépendre d'une bordure de widget (`improve-edit-field-legibility`).
+pub const EDITABLE_BODY: Style = Style::new().bg(Color::Rgb(28, 34, 56));
 
 /// Style du badge de statut du panneau Statut : texte gras de la couleur
 /// du fond sur fond de la couleur de catégorie ; style neutre sans fond
@@ -123,6 +127,11 @@ mod tests {
     #[test]
     fn background_has_a_color() {
         assert!(BACKGROUND.bg.is_some());
+    }
+
+    #[test]
+    fn editable_body_background_is_distinct_from_app_background() {
+        assert_ne!(EDITABLE_BODY.bg, BACKGROUND.bg);
     }
 
     #[test]

@@ -9,7 +9,9 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use super::detail::{detail_text, response_text};
+use super::detail::{
+    SectionBox, detail_section_boxes, detail_text, is_box_border, line_width, response_text,
+};
 use super::{detail_wraps, inner, layout_for};
 use crate::app::model::{DragPanel, Model};
 
@@ -70,7 +72,7 @@ pub fn hit_test(model: &Model, column: u16, row: u16) -> Option<Hit> {
 pub fn drag_row(model: &Model, panel: DragPanel, row: u16) -> Option<DragRow> {
     let areas = layout_for(model.size)?;
     let area = inner(panel_area(&areas, panel));
-    let (lines, wraps, scroll) = panel_content(model, panel);
+    let (lines, wraps, scroll, boxes) = panel_content(model, panel);
     let last = u16::try_from(lines.len().checked_sub(1)?).unwrap_or(u16::MAX);
     if row < area.y {
         return Some(DragRow::Above);
@@ -78,7 +80,7 @@ pub fn drag_row(model: &Model, panel: DragPanel, row: u16) -> Option<DragRow> {
     if row >= area.bottom() {
         return Some(DragRow::Below);
     }
-    let line = line_at_row(&lines, wraps, area.width, scroll, row - area.y).unwrap_or(last);
+    let line = line_at_row(&lines, &boxes, wraps, area.width, scroll, row - area.y).unwrap_or(last);
     Some(DragRow::Line(line))
 }
 
@@ -89,16 +91,26 @@ fn panel_area(areas: &super::Areas, panel: DragPanel) -> Rect {
     }
 }
 
-/// Lignes du panneau, présence du retour à la ligne et défilement, tels
-/// que `view` les utilise.
-fn panel_content(model: &Model, panel: DragPanel) -> (Vec<Line<'static>>, bool, u16) {
+/// Lignes du panneau, présence du retour à la ligne, défilement et
+/// boîtes de section (vide pour la réponse, qui n'en a pas), tels que
+/// `view` les utilise (`add-boxed-detail-sections`).
+fn panel_content(
+    model: &Model,
+    panel: DragPanel,
+) -> (Vec<Line<'static>>, bool, u16, Vec<SectionBox>) {
     match panel {
         DragPanel::Detail => (
             detail_text(model).lines,
             detail_wraps(model),
             model.detail_scroll,
+            detail_section_boxes(model),
         ),
-        DragPanel::Response => (response_text(model).lines, true, model.response_scroll),
+        DragPanel::Response => (
+            response_text(model).lines,
+            true,
+            model.response_scroll,
+            Vec::new(),
+        ),
     }
 }
 
@@ -107,17 +119,27 @@ fn content_line(model: &Model, panel: DragPanel, area: Rect, position: Position)
     if !area.contains(position) {
         return None;
     }
-    let (lines, wraps, scroll) = panel_content(model, panel);
-    line_at_row(&lines, wraps, area.width, scroll, position.y - area.y)
+    let (lines, wraps, scroll, boxes) = panel_content(model, panel);
+    line_at_row(
+        &lines,
+        &boxes,
+        wraps,
+        area.width,
+        scroll,
+        position.y - area.y,
+    )
 }
 
 /// Ligne logique affichée à la ligne `row` de l'intérieur d'un panneau de
 /// largeur `width`, défilé de `scroll`. Avec retour à la ligne,
 /// `Paragraph` saute `scroll` lignes **rendues** : le calcul suit le rendu,
 /// chaque ligne logique occupant le nombre de lignes que `Paragraph` lui
-/// donne à cette largeur.
+/// donne à cette largeur — réduite de 2 colonnes pour une ligne d'une
+/// boîte de section (`add-boxed-detail-sections`, [`line_width`]), pour
+/// ne jamais laisser diverger l'endroit affiché de l'endroit cliqué.
 fn line_at_row(
     lines: &[Line<'static>],
+    boxes: &[SectionBox],
     wraps: bool,
     width: u16,
     scroll: u16,
@@ -129,10 +151,14 @@ fn line_at_row(
     }
     let mut start = 0;
     for (index, line) in lines.iter().enumerate() {
-        let height = Paragraph::new(Text::from(line.clone()))
-            .wrap(Wrap { trim: false })
-            .line_count(width)
-            .max(1);
+        let height = if is_box_border(boxes, index) {
+            1
+        } else {
+            Paragraph::new(Text::from(line.clone()))
+                .wrap(Wrap { trim: false })
+                .line_count(line_width(boxes, index, width))
+                .max(1)
+        };
         if target < start + height {
             return u16::try_from(index).ok();
         }
@@ -162,6 +188,7 @@ mod tests {
         model: &Model,
         area: impl Fn(&Areas) -> Rect,
         lines: &[String],
+        boxes: &[SectionBox],
         hit_line: impl Fn(Hit) -> Option<u16>,
     ) -> usize {
         let (width, height) = model.size;
@@ -178,11 +205,33 @@ mod tests {
             let hit = hit_test(model, panel.x, y).expect("dans le panneau");
             match hit_line(hit) {
                 Some(line) => {
-                    let logical = compact(&lines[usize::from(line)]);
-                    assert!(
-                        logical.contains(&compact(&shown)),
-                        "ligne écran {y} `{shown}` hors de la ligne {line} `{logical}`"
-                    );
+                    let in_box = boxes.iter().any(|b| b.contains(usize::from(line)));
+                    // Une bordure de boîte de section est dessinée par un
+                    // vrai `Block` au rendu : son texte à l'écran n'a plus
+                    // de rapport avec le texte logique de décor qu'elle
+                    // remplace (`add-boxed-detail-sections`, design.md) ;
+                    // seule la correspondance de ligne compte pour elle.
+                    let is_border = is_box_border(boxes, usize::from(line));
+                    if !is_border {
+                        // Une ligne de contenu à l'intérieur d'une boîte
+                        // porte les colonnes de bordure gauche et droite de
+                        // la boîte de part et d'autre du contenu affiché.
+                        let content: String = if in_box {
+                            let chars: Vec<char> = shown.chars().collect();
+                            if chars.len() >= 2 {
+                                chars[1..chars.len() - 1].iter().collect()
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            shown.clone()
+                        };
+                        let logical = compact(&lines[usize::from(line)]);
+                        assert!(
+                            logical.contains(&compact(&content)),
+                            "ligne écran {y} `{shown}` hors de la ligne {line} `{logical}`"
+                        );
+                    }
                     checked += 1;
                 }
                 None => assert!(shown.trim().is_empty(), "ligne {y} : `{shown}`"),
@@ -213,9 +262,10 @@ mod tests {
             let mut model = loaded_model(size);
             select(&mut model, "scripted.bru");
             let lines = plain_lines(&model);
+            let boxes = detail_section_boxes(&model);
             for scroll in [0, 3] {
                 model.detail_scroll = scroll;
-                let checked = assert_rows_match(&model, |a| a.detail, &lines, detail_line);
+                let checked = assert_rows_match(&model, |a| a.detail, &lines, &boxes, detail_line);
                 assert!(checked > 0, "{size:?} {scroll}");
             }
         }
@@ -257,7 +307,7 @@ mod tests {
         select(&mut model, "green.bru");
         let lines = response_plain_lines(&model);
         assert!(!lines.is_empty());
-        let checked = assert_rows_match(&model, |a| a.response, &lines, response_line);
+        let checked = assert_rows_match(&model, |a| a.response, &lines, &[], response_line);
         assert!(checked > 0);
     }
 

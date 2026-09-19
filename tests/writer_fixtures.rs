@@ -85,6 +85,63 @@ fn simple_url_edit_matches_after_fixture() {
 }
 
 #[test]
+fn method_edit_matches_after_fixture() {
+    let dir = workdir("method");
+    let path = copy_case("method.bru", &dir);
+    let (ast, stamp) = load(&path);
+
+    let new_stamp = BruWriter
+        .write_request(&path, &ast, &stamp, &[FieldEdit::Method("post".into())])
+        .expect("écriture");
+
+    let expected = fs::read(cases().join("method.after.bru")).expect("fixture after");
+    assert_eq!(fs::read(&path).expect("relecture"), expected);
+    assert_eq!(new_stamp, FileStamp::capture(&path).expect("instantané"));
+    assert_eq!(dir_entries(&dir), ["method.bru"]);
+
+    // Round-trip : la méthode modifiée se relit à l'identique, le reste du
+    // bloc (URL, body, auth) est inchangé.
+    let reloaded = BruFile::parse(fs::read_to_string(&path).expect("relecture")).expect("AST");
+    let view = RequestView::from_ast(&reloaded).expect("vue");
+    assert_eq!(view.method, "POST");
+    assert_eq!(view.url, "https://{{host}}/items");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unknown_method_is_refused_without_writing() {
+    let dir = workdir("method-unknown");
+    let path = copy_case("method.bru", &dir);
+    let original = fs::read(&path).expect("lecture");
+    let (ast, stamp) = load(&path);
+
+    let error = BruWriter
+        .write_request(&path, &ast, &stamp, &[FieldEdit::Method("fetch".into())])
+        .expect_err("refus attendu");
+    assert!(matches!(error, WriteError::Edit(EditError::UnknownMethod)));
+    assert!(!error.to_string().contains("fetch"));
+    assert_eq!(fs::read(&path).expect("relecture"), original);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unchanged_method_does_not_rewrite_the_block_keyword() {
+    let dir = workdir("method-unchanged");
+    let path = copy_case("method.bru", &dir);
+    let original = fs::read(&path).expect("lecture");
+    let (ast, stamp) = load(&path);
+
+    BruWriter
+        .write_request(&path, &ast, &stamp, &[FieldEdit::Method("get".into())])
+        .expect("écriture");
+    assert_eq!(fs::read(&path).expect("relecture"), original);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn headers_edit_preserves_untouched_headers_byte_for_byte() {
     let dir = workdir("headers");
     let path = copy_case("headers.bru", &dir);

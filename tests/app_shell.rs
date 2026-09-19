@@ -158,7 +158,8 @@ async fn loaded_collection_is_rendered_and_navigable() {
     assert!(lines[2].contains("▾ Groupe"), "{}", lines[2]);
     assert!(lines[3].contains("GET    x"), "{}", lines[3]);
     let detail = lines.join("\n");
-    assert!(detail.contains("GET https://{{host}}/x"), "{detail}");
+    assert!(detail.contains("GET"), "{detail}");
+    assert!(detail.contains("https://{{host}}/x"), "{detail}");
 }
 
 #[tokio::test]

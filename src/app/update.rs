@@ -457,21 +457,19 @@ pub fn update(model: &mut Model, message: Message) -> Command {
         navigation => {
             match model.focus {
                 Focus::Tree => navigate_tree(model, navigation),
-                Focus::Detail => {
-                    if model
-                        .editing
-                        .as_ref()
-                        .is_some_and(|s| s.state == EditState::FieldSelect)
-                    {
-                        match navigation {
-                            Message::Up => move_field_cursor(model, -1),
-                            Message::Down => move_field_cursor(model, 1),
-                            other => scroll_detail(model, other),
-                        }
-                    } else {
-                        scroll_detail(model, navigation);
-                    }
-                }
+                Focus::Detail => match model.editing.as_ref().map(|s| &s.state) {
+                    Some(EditState::FieldSelect) => match navigation {
+                        Message::Up => move_field_cursor(model, -1),
+                        Message::Down => move_field_cursor(model, 1),
+                        other => scroll_detail(model, other),
+                    },
+                    Some(EditState::MethodPicker { .. }) => match navigation {
+                        Message::Up => move_method_picker(model, -1),
+                        Message::Down => move_method_picker(model, 1),
+                        _ => {}
+                    },
+                    _ => scroll_detail(model, navigation),
+                },
                 Focus::Response => match navigation {
                     Message::Left => previous_response_tab(model),
                     Message::Right => next_response_tab(model),
@@ -881,8 +879,47 @@ fn enter_in_detail(model: &mut Model) {
     match &model.editing {
         None => start_edit(model),
         Some(session) if session.state == EditState::FieldSelect => begin_input(model),
+        Some(session) if matches!(session.state, EditState::MethodPicker { .. }) => {
+            confirm_method_picker(model);
+        }
         Some(_) => {}
     }
+}
+
+/// Déplace la présélection du sélecteur de méthode, bornée aux
+/// extrémités de `ast::METHODS` (`add-method-editing`).
+fn move_method_picker(model: &mut Model, delta: i8) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let EditState::MethodPicker { selected } = &mut session.state else {
+        return;
+    };
+    let count = crate::collection::ast::METHODS.len();
+    if delta < 0 {
+        *selected = selected.saturating_sub(1);
+    } else if delta > 0 {
+        *selected = (*selected + 1).min(count - 1);
+    }
+}
+
+/// Valide la présélection du sélecteur de méthode : applique le
+/// changement si elle diffère de la méthode courante, puis referme le
+/// sélecteur vers l'état Sélection de champ (`add-method-editing`).
+fn confirm_method_picker(model: &mut Model) {
+    let Some(session) = &model.editing else {
+        return;
+    };
+    let EditState::MethodPicker { selected } = session.state else {
+        return;
+    };
+    let Some(&method) = crate::collection::ast::METHODS.get(selected) else {
+        return;
+    };
+    if !method.eq_ignore_ascii_case(&session.preview.method) {
+        try_commit(model, FieldEdit::Method(method.to_owned()));
+    }
+    close_input(model);
 }
 
 /// Déplace le curseur de champ en sélection de champ.
@@ -922,7 +959,10 @@ fn toggle_field(model: &mut Model) {
         EditableField::HeaderValue(index) => FieldEdit::HeaderEnabled { index, enabled },
         EditableField::QueryParamValue(index) => FieldEdit::QueryParamEnabled { index, enabled },
         EditableField::PathParamValue(index) => FieldEdit::PathParamEnabled { index, enabled },
-        EditableField::Url | EditableField::AddRow(_) | EditableField::BodyText => return,
+        EditableField::Method
+        | EditableField::Url
+        | EditableField::AddRow(_)
+        | EditableField::BodyText => return,
     };
     try_commit(model, edit);
 }
@@ -943,6 +983,10 @@ fn begin_input(model: &mut Model) {
         start_add(model, section);
         return;
     }
+    if field == EditableField::Method {
+        open_method_picker(model);
+        return;
+    }
     let input = TextInput::new(
         field_value(session, &field),
         field == EditableField::BodyText,
@@ -957,6 +1001,22 @@ fn open_input(model: &mut Model, input: TextInput, target: InputTarget) {
         session.target = target;
         session.hscroll = 0;
     }
+    model.last_status = None;
+    scroll_edit_into_view(model);
+}
+
+/// Ouvre le sélecteur de méthode, la méthode courante de la session
+/// présélectionnée (`add-method-editing`).
+fn open_method_picker(model: &mut Model) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let current = session.preview.method.as_str();
+    let selected = crate::collection::ast::METHODS
+        .iter()
+        .position(|candidate| current.eq_ignore_ascii_case(candidate))
+        .unwrap_or(0);
+    session.state = EditState::MethodPicker { selected };
     model.last_status = None;
     scroll_edit_into_view(model);
 }
@@ -1185,7 +1245,7 @@ fn value_edit(field: EditableField, value: String) -> Option<FieldEdit> {
         EditableField::QueryParamValue(index) => FieldEdit::QueryParamValue { index, value },
         EditableField::PathParamValue(index) => FieldEdit::PathParamValue { index, value },
         EditableField::BodyText => FieldEdit::BodyText(value),
-        EditableField::AddRow(_) => return None,
+        EditableField::Method | EditableField::AddRow(_) => return None,
     })
 }
 
@@ -1196,13 +1256,16 @@ fn cancel_input(model: &mut Model) {
     let Some(session) = &mut model.editing else {
         return;
     };
-    if !matches!(session.state, EditState::Input(_)) {
-        return;
-    }
-    if let InputTarget::NewKey { return_cursor, .. } | InputTarget::NewValue { return_cursor, .. } =
-        session.target
-    {
-        session.cursor = return_cursor.min(session.fields.len().saturating_sub(1));
+    match session.state {
+        EditState::Input(_) => {
+            if let InputTarget::NewKey { return_cursor, .. }
+            | InputTarget::NewValue { return_cursor, .. } = session.target
+            {
+                session.cursor = return_cursor.min(session.fields.len().saturating_sub(1));
+            }
+        }
+        EditState::MethodPicker { .. } => {}
+        EditState::FieldSelect => return,
     }
     model.last_status = None;
     close_input(model);
@@ -1331,12 +1394,12 @@ fn scroll_edit_into_view(model: &mut Model) {
     let Some(field) = session.current_field() else {
         return;
     };
-    let (_, field_lines) = request_text_and_fields(request, Some(session));
+    let (_, field_lines, _) = request_text_and_fields(request, Some(session));
     let Some(location) = field_lines.iter().find(|l| l.field == field) else {
         return;
     };
     let (target_line, hscroll) = match &session.state {
-        EditState::FieldSelect => (location.line, 0),
+        EditState::FieldSelect | EditState::MethodPicker { .. } => (location.line, 0),
         EditState::Input(input) => {
             let (line, _) = input.cursor_line_col();
             let column = u16::try_from(Line::raw(input.text_before_cursor_on_line()).width())
@@ -2027,7 +2090,10 @@ fn mouse(model: &mut Model, input: MouseInput) {
 fn mouse_accepted(model: &Model) -> bool {
     model.mouse.capture
         && model.confirm.is_none()
-        && matches!(model.text_capture(), None | Some(TextCapture::Input))
+        && matches!(
+            model.text_capture(),
+            None | Some(TextCapture::Input) | Some(TextCapture::MethodPicker)
+        )
         && matches!(model.focus, Focus::Tree | Focus::Detail | Focus::Response)
         && model.loaded().is_some()
         && layout_for(model.size).is_some()
@@ -2046,12 +2112,28 @@ fn input_field_lines(model: &Model) -> Option<std::ops::Range<usize>> {
         return None;
     }
     let field = session.current_field()?;
-    let (_, fields) = request_text_and_fields(request, Some(session));
+    let (_, fields, _) = request_text_and_fields(request, Some(session));
     let location = fields.into_iter().find(|l| l.field == field)?;
     Some(location.line..location.line + location.count)
 }
 
 fn mouse_press(model: &mut Model, input: MouseInput) {
+    // Le sélecteur de méthode se pilote au clavier seulement (aucune
+    // entrée n'y est cliquable) : un clic ailleurs le referme sans rien
+    // changer, comme `Échap`, plutôt que de rendre la souris inerte
+    // jusqu'à une touche (`add-method-editing`). Le clic s'arrête là,
+    // sans agir sur une nouvelle cible dans le même geste : la boîte du
+    // sélecteur occupe des lignes qui disparaissent de la séquence une
+    // fois refermée, ce qui rendrait la position cliquée incohérente
+    // avec ce que l'utilisateur voyait.
+    if model
+        .editing
+        .as_ref()
+        .is_some_and(|s| matches!(s.state, EditState::MethodPicker { .. }))
+    {
+        cancel_input(model);
+        return;
+    }
     // Cible calculée avant toute validation : elle correspond à l'écran
     // que l'utilisateur voyait (sans retour à la ligne pendant la saisie).
     let Some(hit) = hit_test(model, input.column, input.row) else {
@@ -4054,21 +4136,23 @@ mod tests {
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
 
-        // Champ 0 : URL -> ToggleField sans effet
+        // Champ 0 : Méthode -> ToggleField sans effet
         assert_eq!(model.editing.as_ref().unwrap().cursor, 0);
         assert!(matches!(
             model.editing.as_ref().unwrap().fields[0],
-            EditableField::Url
+            EditableField::Method
         ));
         update(&mut model, Message::ToggleField);
         assert!(model.editing.as_ref().unwrap().pending.is_empty());
         assert!(!model.editing.as_ref().unwrap().dirty);
 
-        // Champ 1 : En-tête Accept (initialement activé dans scripted.bru)
+        // Champ 2 : En-tête Accept (initialement activé dans scripted.bru) ;
+        // Méthode puis URL précèdent les en-têtes.
         update(&mut model, Message::Down);
-        assert_eq!(model.editing.as_ref().unwrap().cursor, 1);
+        update(&mut model, Message::Down);
+        assert_eq!(model.editing.as_ref().unwrap().cursor, 2);
         assert!(matches!(
-            model.editing.as_ref().unwrap().fields[1],
+            model.editing.as_ref().unwrap().fields[2],
             EditableField::HeaderValue(0)
         ));
 
@@ -4144,8 +4228,10 @@ mod tests {
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
 
-        // Curseur sur URL
+        // Curseur sur Méthode par défaut ; on se place sur URL.
         assert_eq!(model.editing.as_ref().unwrap().cursor, 0);
+        update(&mut model, Message::Down);
+        assert_eq!(model.editing.as_ref().unwrap().cursor, 1);
         let initial_url =
             { field_value(model.editing.as_ref().unwrap(), &EditableField::Url).to_string() };
         let expected_len = initial_url.chars().count();
@@ -4157,7 +4243,7 @@ mod tests {
                 assert_eq!(input.cursor(), expected_len);
                 assert_eq!(input.text(), initial_url);
             }
-            EditState::FieldSelect => panic!("saisie attendue"),
+            EditState::FieldSelect | EditState::MethodPicker { .. } => panic!("saisie attendue"),
         }
 
         // Validation sans frappe (Tab) : valeur conservée, pas de dirty
@@ -4190,6 +4276,7 @@ mod tests {
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
+        update(&mut model, Message::Down); // Méthode -> URL
 
         // 1. Aller-retour sans modification de valeur mais avec déplacement curseur : dirty inchangé
         update(&mut model, Message::Enter);
@@ -4252,7 +4339,9 @@ mod tests {
             EditState::Input(input) => {
                 assert!(input.text().ends_with('\n'), "saut de ligne inséré");
             }
-            EditState::FieldSelect => panic!("devrait rester en saisie sur le corps"),
+            EditState::FieldSelect | EditState::MethodPicker { .. } => {
+                panic!("devrait rester en saisie sur le corps")
+            }
         }
 
         // Validation par Tab
@@ -4271,6 +4360,7 @@ mod tests {
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
+        update(&mut model, Message::Down); // Méthode -> URL
 
         // 1. Session propre -> Command::None
         let cmd = update(&mut model, Message::SaveEdit);
@@ -4370,6 +4460,7 @@ mod tests {
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
+        update(&mut model, Message::Down); // Méthode -> URL
 
         // Modification
         update(&mut model, Message::Enter);
@@ -4408,6 +4499,7 @@ mod tests {
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
+        update(&mut model, Message::Down); // Méthode -> URL
 
         // Modification
         update(&mut model, Message::Enter);
@@ -4460,6 +4552,7 @@ mod tests {
 
         // 2. Session modifiée (dirty) -> Échap (FocusTree) demande confirmation DiscardEdit
         update(&mut model, Message::StartEdit);
+        update(&mut model, Message::Down); // Méthode -> URL
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('a')));
         update(&mut model, Message::ValidateInput);
@@ -4508,6 +4601,7 @@ mod tests {
         model.exit = None;
 
         // 3. Session modifiée (dirty) : Quit demande confirmation QuitWithUnsavedEdit
+        update(&mut model, Message::Down); // Méthode -> URL
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('a')));
         update(&mut model, Message::ValidateInput);
@@ -4571,7 +4665,7 @@ mod tests {
     fn input_of(model: &Model) -> &TextInput {
         match &model.editing.as_ref().expect("session").state {
             EditState::Input(input) => input,
-            EditState::FieldSelect => panic!("saisie attendue"),
+            EditState::FieldSelect | EditState::MethodPicker { .. } => panic!("saisie attendue"),
         }
     }
 
@@ -4638,6 +4732,8 @@ mod tests {
     #[test]
     fn validated_url_edit_marks_the_session_modified() {
         let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::Url);
+        let url_cursor = session(&model).cursor;
         update(&mut model, Message::Enter);
         assert_eq!(
             input_of(&model).cursor(),
@@ -4653,7 +4749,77 @@ mod tests {
             "https://{{host}}/ping/v2"
         );
         assert!(session(&model).dirty);
-        assert_eq!(session(&model).cursor, 0, "même champ");
+        assert_eq!(session(&model).cursor, url_cursor, "même champ");
+    }
+
+    /// Ouverture avec présélection, extrémité haute, navigation, validation,
+    /// réouverture avec la nouvelle présélection, annulation sans effet
+    /// (`add-method-editing`).
+    #[test]
+    fn method_picker_opens_navigates_confirms_and_cancels() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        assert_eq!(session(&model).cursor, 0);
+        assert!(matches!(session(&model).fields[0], EditableField::Method));
+
+        // Ouverture : présélection sur la méthode courante (GET, indice 0).
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            session(&model).state,
+            EditState::MethodPicker { selected: 0 }
+        );
+        assert!(!session(&model).has_unsaved());
+
+        // Raccourci global sans effet pendant le sélecteur.
+        update(&mut model, Message::RunSelected);
+        assert!(model.run.active.is_none());
+        assert_eq!(
+            session(&model).state,
+            EditState::MethodPicker { selected: 0 }
+        );
+
+        // Extrémité haute : Up ne bouge pas depuis la première entrée.
+        update(&mut model, Message::Up);
+        assert_eq!(
+            session(&model).state,
+            EditState::MethodPicker { selected: 0 }
+        );
+
+        // Navigation vers POST (indice 1) puis validation.
+        update(&mut model, Message::Down);
+        assert_eq!(
+            session(&model).state,
+            EditState::MethodPicker { selected: 1 }
+        );
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(shown_value(&model, EditableField::Method), "POST");
+        assert!(session(&model).dirty);
+
+        // Réouverture : la nouvelle méthode est présélectionnée.
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            session(&model).state,
+            EditState::MethodPicker { selected: 1 }
+        );
+
+        // Annulation : le sélecteur se ferme sans changer la méthode, quelle
+        // que soit la présélection au moment de la fermeture.
+        update(&mut model, Message::Down);
+        update(&mut model, Message::CancelInput);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(shown_value(&model, EditableField::Method), "POST");
+    }
+
+    /// Valider la présélection déjà en place ne marque pas la session
+    /// modifiée (`add-method-editing`).
+    #[test]
+    fn method_picker_validation_without_change_does_not_mark_modified() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(!session(&model).dirty);
+        assert!(!session(&model).has_unsaved());
     }
 
     #[test]
@@ -4676,6 +4842,7 @@ mod tests {
     #[test]
     fn cancel_after_a_previous_validation_restores_the_validated_value() {
         let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         type_input(&mut model, "b");
         update(&mut model, Message::ValidateInput);
@@ -4717,6 +4884,7 @@ mod tests {
     #[test]
     fn has_unsaved_covers_validated_and_in_progress_edits() {
         let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         assert!(!session(&model).has_unsaved(), "saisie inchangée");
         type_input(&mut model, "x");
@@ -4729,6 +4897,7 @@ mod tests {
     #[test]
     fn free_text_cursor_through_update() {
         let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
 
         // Insertion au milieu : après « https://{{host}} ».
@@ -4799,6 +4968,7 @@ mod tests {
             update(&mut model, Message::SaveEdit),
             Command::None
         ));
+        move_to_field(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         type_input(&mut model, "!");
         match update(&mut model, Message::SaveEdit) {
@@ -4819,6 +4989,7 @@ mod tests {
     #[test]
     fn quitting_during_a_modified_input_asks_and_keeps_the_input() {
         let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         type_input(&mut model, "abc");
         press(&mut model, InputKey::Left, 1);
@@ -4847,6 +5018,7 @@ mod tests {
     #[test]
     fn selection_change_is_refused_while_the_session_is_modified() {
         let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         type_input(&mut model, "!");
         update(&mut model, Message::ValidateInput);
@@ -4913,7 +5085,7 @@ mod tests {
         let Some(TreeNode::Request(request)) = model.selected_node() else {
             panic!("requête attendue");
         };
-        let (_, lines) = request_text_and_fields(request, model.editing.as_ref());
+        let (_, lines, _) = request_text_and_fields(request, model.editing.as_ref());
         let body = lines
             .iter()
             .find(|l| l.field == EditableField::BodyText)
@@ -4937,6 +5109,7 @@ mod tests {
         let width = layout_for(model.size)
             .map(|a| inner(a.detail).width)
             .expect("layout");
+        move_to_field(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         type_input(&mut model, &"a".repeat(usize::from(width) * 2));
         let hscroll = session(&model).hscroll;
@@ -5982,7 +6155,7 @@ mod mouse_tests {
             panic!("requête attendue");
         };
         let session = model.editing.as_ref().filter(|s| s.path == request.path);
-        let (_, fields) = request_text_and_fields(request, session);
+        let (_, fields, _) = request_text_and_fields(request, session);
         let location = fields
             .into_iter()
             .find(|l| l.field == field)
@@ -5997,7 +6170,7 @@ mod mouse_tests {
     fn input_text(model: &Model) -> Option<String> {
         match &model.editing.as_ref()?.state {
             EditState::Input(input) => Some(input.text().to_owned()),
-            EditState::FieldSelect => None,
+            EditState::FieldSelect | EditState::MethodPicker { .. } => None,
         }
     }
 
@@ -6202,6 +6375,7 @@ mod mouse_tests {
     #[test]
     fn modified_session_refuses_the_clicked_node() {
         let mut model = session_on_post_json();
+        move_to(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('!')));
         update(&mut model, Message::ValidateInput);
@@ -6216,6 +6390,7 @@ mod mouse_tests {
     #[test]
     fn input_is_validated_before_a_click_in_the_tree() {
         let mut model = session_on_post_json();
+        move_to(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('!')));
         let point = tree_point(&model, "simple-get.bru");
@@ -6244,6 +6419,7 @@ mod mouse_tests {
     #[test]
     fn click_on_the_field_being_edited_changes_nothing() {
         let mut model = session_on_post_json();
+        move_to(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Left));
         let before = model.editing.clone().map(|s| s.state);
@@ -6420,6 +6596,45 @@ mod mouse_tests {
         assert_eq!(input.cursor(), "https://{{host}}/items".chars().count());
     }
 
+    /// Un clic ailleurs referme le sélecteur de méthode sans rien changer,
+    /// comme `Échap`, sans laisser la souris inerte tant qu'il est ouvert :
+    /// un clic suivant agit normalement sur sa cible (`add-method-editing`).
+    #[test]
+    fn click_elsewhere_closes_the_method_picker_without_leaving_the_mouse_inert() {
+        let mut model = model_on("post-json.bru", (140, 40));
+        let method_point = field_point(&model, EditableField::Method);
+        click(&mut model, method_point);
+        assert!(matches!(
+            model.editing.as_ref().expect("session").state,
+            EditState::MethodPicker { .. }
+        ));
+
+        // Premier clic (même sur la ligne Méthode) : referme le sélecteur,
+        // rien d'autre.
+        click(&mut model, method_point);
+        assert_eq!(
+            model.editing.as_ref().expect("session").state,
+            EditState::FieldSelect
+        );
+        assert_eq!(
+            field_value(
+                model.editing.as_ref().expect("session"),
+                &EditableField::Method
+            ),
+            "POST",
+            "méthode inchangée par le clic de fermeture"
+        );
+
+        // Second clic, sur l'URL : la souris n'est pas restée bloquée.
+        let url_point = field_point(&model, EditableField::Url);
+        click(&mut model, url_point);
+        assert_eq!(current_field(&model), Some(EditableField::Url));
+        assert_eq!(
+            input_text(&model).as_deref(),
+            Some("https://{{host}}/items")
+        );
+    }
+
     #[test]
     fn click_on_a_field_from_field_select_and_from_another_input() {
         let mut model = session_on_post_json();
@@ -6430,6 +6645,7 @@ mod mouse_tests {
 
         // Saisie de l'URL modifiée, puis clic sur l'en-tête.
         let mut model = session_on_post_json();
+        move_to(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('!')));
         let point = field_point(&model, EditableField::HeaderValue(0));
@@ -6482,7 +6698,7 @@ mod mouse_tests {
         let lines = plain_lines(&model);
         let body = lines
             .iter()
-            .position(|l| l.starts_with("Corps"))
+            .position(|l| l.contains("Corps"))
             .expect("corps");
         assert!(lines[body + 1].trim_start().contains(':'), "{lines:?}");
         let point = line_point(&model, true, u16::try_from(body + 1).expect("petit"));

@@ -6,8 +6,11 @@
 
 use std::ops::Range;
 
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 use serde_json::Value;
 
 use super::theme;
@@ -63,6 +66,17 @@ pub fn detail_text(model: &Model) -> Text<'static> {
     }
 }
 
+/// Boîtes de section du détail de la requête sélectionnée ; vide hors
+/// sélection d'une requête, comme pour un dossier ou un nœud en erreur
+/// (`add-boxed-detail-sections`).
+pub fn detail_section_boxes(model: &Model) -> Vec<SectionBox> {
+    let Some(TreeNode::Request(request)) = model.selected_node() else {
+        return Vec::new();
+    };
+    let session = model.editing.as_ref().filter(|s| s.path == request.path);
+    request_text_and_fields(request, session).2
+}
+
 /// Texte de la réponse du nœud sélectionné : le résultat de la dernière
 /// exécution de la requête sélectionnée, ou vide quand la sélection n'a
 /// aucun résultat exploitable (pas de sélection, nœud non-requête, ou
@@ -105,19 +119,26 @@ fn yes_no(value: bool) -> &'static str {
     if value { "oui" } else { "non" }
 }
 
+/// Style d'une entrée désactivée : atténué comme [`theme::LABEL`], mais en
+/// italique en plus pour rester distinct du style de la clé qui précède
+/// (les deux seraient sinon indiscernables, `theme::LABEL` n'étant que
+/// [`Modifier::DIM`]).
+const DISABLED_ENTRY_VALUE: Style =
+    Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC));
+
 fn entries(lines: &mut Vec<Line<'static>>, values: &[KeyValue]) {
     if values.is_empty() {
         lines.push(Line::raw("  aucun"));
     }
     for entry in values {
-        let text = format!("  {}: {}", entry.key, entry.value);
+        let key = Span::styled(format!("  {}: ", entry.key), theme::LABEL);
         if entry.enabled {
-            lines.push(Line::raw(text));
+            lines.push(Line::from(vec![key, Span::raw(entry.value.clone())]));
         } else {
-            lines.push(Line::styled(
-                format!("{text} (désactivé)"),
-                Style::new().add_modifier(Modifier::DIM),
-            ));
+            lines.push(Line::from(vec![
+                key,
+                Span::styled(format!("{} (désactivé)", entry.value), DISABLED_ENTRY_VALUE),
+            ]));
         }
     }
 }
@@ -166,6 +187,230 @@ pub struct FieldLine {
     pub count: usize,
     /// Largeur d'affichage du préfixe qui précède la valeur sur la ligne.
     pub prefix_width: usize,
+}
+
+/// Boîte encadrée d'une section du détail d'une requête (En-têtes,
+/// Paramètres de requête, Paramètres de chemin, Corps) : nom affiché
+/// dans la bordure du cadre, construite en même temps que les lignes et
+/// que [`FieldLine`], pour ne jamais recalculer une position à part
+/// (`add-boxed-detail-sections`, design.md « Rendu par tampon virtuel »).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionBox {
+    pub title: String,
+    /// Première ligne logique de la boîte (sa bordure du haut).
+    pub first_line: usize,
+    /// Nombre total de lignes qu'elle occupe, bordures comprises.
+    pub line_count: usize,
+}
+
+impl SectionBox {
+    pub(crate) fn contains(&self, line: usize) -> bool {
+        (self.first_line..self.first_line + self.line_count).contains(&line)
+    }
+}
+
+/// Largeur utile pour le calcul de retour à la ligne d'une ligne logique
+/// du détail : la largeur du panneau, réduite de 2 colonnes (bordure
+/// gauche et droite) quand la ligne appartient à une boîte de section.
+/// Partagée par le rendu et par `hit.rs::line_at_row`, pour ne jamais
+/// laisser diverger l'endroit affiché de l'endroit cliqué (design.md,
+/// « Largeur utile calculée une seule fois »).
+pub(crate) fn line_width(boxes: &[SectionBox], line: usize, panel_width: u16) -> u16 {
+    if boxes.iter().any(|b| b.contains(line)) {
+        panel_width.saturating_sub(2)
+    } else {
+        panel_width
+    }
+}
+
+/// Vrai si `line` est la bordure du haut ou du bas d'une boîte de
+/// section : au rendu, `Block::bordered()` la dessine toujours sur une
+/// seule ligne d'écran, quelle que soit sa largeur — son titre n'est
+/// jamais retourné à la ligne, contrairement au contenu qu'elle entoure
+/// (`add-boxed-detail-sections`).
+pub(crate) fn is_box_border(boxes: &[SectionBox], line: usize) -> bool {
+    boxes
+        .iter()
+        .any(|b| line == b.first_line || line == b.first_line + b.line_count - 1)
+}
+
+/// Ligne de bordure du haut d'une boîte de section : texte simple, sans
+/// rapport avec la largeur réelle du panneau (le vrai cadre est dessiné
+/// par `Block::bordered()` au rendu) — sert seulement à occuper une
+/// ligne logique dans la séquence (recherche, copie, défilement).
+fn section_box_top(title: &str) -> Line<'static> {
+    Line::styled(format!("── {title} "), theme::SECTION)
+}
+
+/// Ligne de bordure du bas d'une boîte de section, même principe que
+/// [`section_box_top`].
+/// Un seul espace, jamais une chaîne vide : `Line::raw("")` produit une
+/// ligne sans aucun span (`str::lines()` sur une chaîne vide n'en donne
+/// aucun), qui ne peut alors jamais porter de teinte de sélection ou de
+/// surbrillance de recherche (`tint_line`/`highlight_match` n'ont rien à
+/// styler).
+fn section_box_bottom() -> Line<'static> {
+    Line::raw(" ")
+}
+
+/// Construit une section encadrée : pousse la bordure du haut, le
+/// contenu produit par `build`, la bordure du bas, puis enregistre la
+/// boîte correspondante.
+fn boxed_section(
+    lines: &mut Vec<Line<'static>>,
+    field_lines: &mut Vec<FieldLine>,
+    boxes: &mut Vec<SectionBox>,
+    title: String,
+    build: impl FnOnce(&mut Vec<Line<'static>>, &mut Vec<FieldLine>),
+) {
+    let first_line = lines.len();
+    lines.push(section_box_top(&title));
+    build(lines, field_lines);
+    lines.push(section_box_bottom());
+    boxes.push(SectionBox {
+        title,
+        first_line,
+        line_count: lines.len() - first_line,
+    });
+}
+
+/// Hauteur totale (en lignes d'écran) qu'occuperait `lines` à la largeur
+/// `panel_width`, boîtes de section comprises. Même calcul de retour à la
+/// ligne que `hit.rs::line_at_row`, largeur par ligne partagée via
+/// [`line_width`] (design.md, « Largeur utile calculée une seule fois »).
+/// Sans retour à la ligne (`wraps: false`, pendant la saisie d'un champ),
+/// chaque ligne logique occupe exactement une ligne d'écran, comme
+/// `line_at_row`.
+pub(crate) fn content_height(
+    lines: &[Line<'static>],
+    boxes: &[SectionBox],
+    panel_width: u16,
+    wraps: bool,
+) -> u16 {
+    let mut total: u32 = 0;
+    let mut index = 0;
+    while index < lines.len() {
+        if let Some(section) = boxes.iter().find(|b| b.first_line == index) {
+            let inner = &lines[index + 1..index + section.line_count - 1];
+            let inner_height = wrapped_height(inner, panel_width.saturating_sub(2), wraps);
+            total += u32::from(inner_height) + 2;
+            index += section.line_count;
+        } else {
+            let start = index;
+            while index < lines.len() && !boxes.iter().any(|b| b.first_line == index) {
+                index += 1;
+            }
+            total += u32::from(wrapped_height(&lines[start..index], panel_width, wraps));
+        }
+    }
+    u16::try_from(total).unwrap_or(u16::MAX)
+}
+
+/// Hauteur d'écran d'une suite de lignes à une largeur donnée : somme des
+/// hauteurs individuelles avec retour à la ligne, ou une ligne d'écran par
+/// ligne logique sans retour à la ligne.
+fn wrapped_height(lines: &[Line<'static>], width: u16, wraps: bool) -> u16 {
+    if !wraps {
+        return u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    }
+    let mut total: u32 = 0;
+    for line in lines {
+        let height = Paragraph::new(Text::from(line.clone()))
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .max(1);
+        total += height as u32;
+    }
+    u16::try_from(total).unwrap_or(u16::MAX)
+}
+
+/// Rend `lines` (méta, lignes libres, ou contenu d'une section) dans
+/// `rect` de `buf`, avec le même bascule de retour à la ligne que le
+/// reste du panneau Détail (`detail_wraps`).
+fn render_plain(lines: &[Line<'static>], wraps: bool, rect: Rect, buf: &mut Buffer) {
+    let mut paragraph = Paragraph::new(Text::from(lines.to_vec()));
+    if wraps {
+        paragraph = paragraph.wrap(Wrap { trim: false });
+    }
+    paragraph.render(rect, buf);
+}
+
+/// Rend une boîte de section : bordure `Block` avec le nom dans le titre,
+/// puis son contenu à l'intérieur.
+fn render_section_box(
+    top: &Line<'static>,
+    title: &str,
+    content: &[Line<'static>],
+    bottom: &Line<'static>,
+    wraps: bool,
+    rect: Rect,
+    buf: &mut Buffer,
+) {
+    let block = Block::bordered()
+        .title(format!(" {title} "))
+        .border_style(theme::BORDER);
+    let inner_rect = block.inner(rect);
+    block.render(rect, buf);
+    render_plain(content, wraps, inner_rect, buf);
+    apply_border_tint(top, rect.y, rect, buf);
+    if rect.height > 0 {
+        apply_border_tint(bottom, rect.y + rect.height - 1, rect, buf);
+    }
+}
+
+/// Applique, sur toute la ligne d'écran `y`, le fond (surbrillance de
+/// recherche ou sélection visuelle, `search-and-yank`) porté par la
+/// ligne logique de bordure `line`, si elle en a un. La bordure est un
+/// cadre décoratif dessiné par `Block`, pas du texte : la teinte
+/// s'applique à la ligne entière plutôt qu'à une plage de colonnes,
+/// faute de correspondance entre son texte de décor et son rendu réel
+/// (`add-boxed-detail-sections`).
+fn apply_border_tint(line: &Line<'static>, y: u16, rect: Rect, buf: &mut Buffer) {
+    let Some(bg) = line.spans.iter().find_map(|s| s.style.bg) else {
+        return;
+    };
+    for x in rect.x..rect.x + rect.width {
+        buf[(x, y)].bg = bg;
+    }
+}
+
+/// Compose le détail d'une requête (lignes libres et boîtes de section)
+/// dans un tampon virtuel `buf`, à sa largeur pleine (`buf.area.width`) et
+/// sur toute la hauteur nécessaire (`buf.area.height`, dimensionnée par
+/// [`content_height`]). Ne dessine rien hors de `buf` : le découpage vers
+/// la fenêtre visible du panneau est fait par l'appelant (`view/mod.rs`,
+/// design.md « Rendu par tampon virtuel composé »).
+pub(crate) fn compose(
+    lines: &[Line<'static>],
+    boxes: &[SectionBox],
+    wraps: bool,
+    buf: &mut Buffer,
+) {
+    let width = buf.area.width;
+    let mut y: u16 = 0;
+    let mut index = 0;
+    while index < lines.len() {
+        if let Some(section) = boxes.iter().find(|b| b.first_line == index) {
+            let top = &lines[index];
+            let bottom = &lines[index + section.line_count - 1];
+            let inner = &lines[index + 1..index + section.line_count - 1];
+            let inner_height = wrapped_height(inner, width.saturating_sub(2), wraps);
+            let rect = Rect::new(0, y, width, inner_height + 2);
+            render_section_box(top, &section.title, inner, bottom, wraps, rect, buf);
+            y += inner_height + 2;
+            index += section.line_count;
+        } else {
+            let start = index;
+            while index < lines.len() && !boxes.iter().any(|b| b.first_line == index) {
+                index += 1;
+            }
+            let run = &lines[start..index];
+            let height = wrapped_height(run, width, wraps);
+            let rect = Rect::new(0, y, width, height);
+            render_plain(run, wraps, rect, buf);
+            y += height;
+        }
+    }
 }
 
 /// Retire de `text` les premières colonnes d'affichage, sans jamais couper
@@ -229,17 +474,17 @@ fn editable_entries(
         let renamed = input_for(session, |target| {
             *target == InputTarget::RenameKey { section, index: i }
         });
-        let (text, prefix_width) = match renamed {
+        let (key_text, value_text, prefix_width) = match renamed {
             Some(key) => {
                 let (key, _) = skip_columns(key, hscroll);
-                (format!("  {key}: {}", entry.value), 2)
+                (format!("  {key}: "), entry.value.clone(), 2)
             }
             None => {
                 let val = session.map_or(entry.value.as_str(), |s| field_value(s, &field));
                 let (val, _) = skip_columns(val, hscroll);
                 let prefix = format!("  {}: ", entry.key);
                 let width = Line::raw(prefix.as_str()).width();
-                (format!("{prefix}{val}"), width)
+                (prefix, val.to_owned(), width)
             }
         };
         field_lines.push(FieldLine {
@@ -250,12 +495,15 @@ fn editable_entries(
         });
         let enabled = session.map_or(entry.enabled, |s| field_enabled(s, &field));
         let mut line = if enabled {
-            Line::raw(text)
+            Line::from(vec![
+                Span::styled(key_text, theme::LABEL),
+                Span::raw(value_text),
+            ])
         } else {
-            Line::styled(
-                format!("{text} (désactivé)"),
-                Style::new().add_modifier(Modifier::DIM),
-            )
+            Line::from(vec![
+                Span::styled(key_text, theme::LABEL),
+                Span::styled(format!("{value_text} (désactivé)"), DISABLED_ENTRY_VALUE),
+            ])
         };
         if is_field_cursor(session, &field) {
             line = tint_line(line, FIELD_CURSOR_STYLE);
@@ -277,14 +525,33 @@ fn editable_entries(
         } if *s == section => input_for(Some(session), |_| true).map(|value| (key.as_str(), value)),
         _ => None,
     };
-    let (text, prefix_width) = match (new_key, new_value) {
-        (Some(key), _) => (format!("  {}", skip_columns(key, hscroll).0), 2),
+    let (mut line, prefix_width) = match (new_key, new_value) {
+        (Some(key), _) => {
+            let (key, _) = skip_columns(key, hscroll);
+            (
+                Line::from(vec![Span::styled(format!("  {key}"), theme::LABEL)]),
+                2,
+            )
+        }
         (None, Some((key, value))) => {
             let prefix = format!("  {key}: ");
             let width = Line::raw(prefix.as_str()).width();
-            (format!("{prefix}{}", skip_columns(value, hscroll).0), width)
+            let (value, _) = skip_columns(value, hscroll);
+            (
+                Line::from(vec![
+                    Span::styled(prefix, theme::LABEL),
+                    Span::raw(value.to_owned()),
+                ]),
+                width,
+            )
         }
-        (None, None) => (format!("  {}", add_row_label(section)), 2),
+        (None, None) => (
+            Line::styled(
+                format!("  {}", add_row_label(section)),
+                Style::new().add_modifier(Modifier::DIM),
+            ),
+            2,
+        ),
     };
     field_lines.push(FieldLine {
         field,
@@ -292,11 +559,6 @@ fn editable_entries(
         count: 1,
         prefix_width,
     });
-    let mut line = if new_key.is_some() || new_value.is_some() {
-        Line::raw(text)
-    } else {
-        Line::styled(text, Style::new().add_modifier(Modifier::DIM))
-    };
     if is_field_cursor(Some(session), &field) {
         line = tint_line(line, FIELD_CURSOR_STYLE);
     }
@@ -311,17 +573,19 @@ pub fn request_text_with_session(
     request_text_and_fields(request, session).0
 }
 
-/// Texte de détail d'une requête et emplacement de chacun de ses champs
-/// éditables (`improve-direct-editing`, D7).
+/// Texte de détail d'une requête, emplacement de chacun de ses champs
+/// éditables (`improve-direct-editing`, D7) et boîtes de section
+/// (`add-boxed-detail-sections`).
 pub fn request_text_and_fields(
     request: &RequestNode,
     session: Option<&EditSession>,
-) -> (Text<'static>, Vec<FieldLine>) {
+) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     let view = &request.view;
     // En session, URL, en-têtes et paramètres viennent de l'aperçu des
     // modifications validées (`add-entry-management`, D8).
     let shown = session.map_or(view, |s| &s.preview);
     let mut field_lines = Vec::new();
+    let mut boxes = Vec::new();
     let node_name = view.name.clone().unwrap_or_else(|| {
         request
             .path
@@ -335,20 +599,57 @@ pub fn request_text_and_fields(
         Line::default(),
     ];
 
+    // Champ Méthode sur sa propre ligne (`add-method-editing`) : partager
+    // la ligne avec l'URL empêcherait de résoudre un clic entre les deux
+    // champs, `field_at_line` (mouse-support) ne connaissant que la ligne,
+    // jamais la colonne.
+    let method_field = EditableField::Method;
+    let method_val = session.map_or(view.method.as_str(), |s| field_value(s, &method_field));
+    field_lines.push(FieldLine {
+        field: method_field,
+        line: lines.len(),
+        count: 1,
+        prefix_width: 0,
+    });
+    let mut method_line = Line::styled(
+        method_val.to_owned(),
+        Style::new().add_modifier(Modifier::BOLD),
+    );
+    if is_field_cursor(session, &method_field) {
+        method_line = tint_line(method_line, FIELD_CURSOR_STYLE);
+    }
+    lines.push(method_line);
+
+    if let Some(session) = session
+        && let EditState::MethodPicker { selected } = &session.state
+    {
+        boxed_section(
+            &mut lines,
+            &mut field_lines,
+            &mut boxes,
+            "Méthode".to_owned(),
+            |lines, _| {
+                for (index, name) in crate::collection::ast::METHODS.iter().enumerate() {
+                    let mut line = Line::raw(format!("  {}", name.to_ascii_uppercase()));
+                    if index == *selected {
+                        line = tint_line(line, FIELD_CURSOR_STYLE);
+                    }
+                    lines.push(line);
+                }
+            },
+        );
+    }
+
     let url_field = EditableField::Url;
     let url_val = session.map_or(view.url.as_str(), |s| field_value(s, &url_field));
     let (url_val, _) = skip_columns(url_val, value_hscroll(session, &url_field));
-    let method = format!("{} ", view.method);
     field_lines.push(FieldLine {
         field: url_field,
         line: lines.len(),
         count: 1,
-        prefix_width: Line::raw(method.as_str()).width(),
+        prefix_width: 0,
     });
-    let mut url_line = Line::from(vec![
-        Span::styled(method, Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(url_val.to_owned()),
-    ]);
+    let mut url_line = Line::raw(url_val.to_owned());
     if is_field_cursor(session, &url_field) {
         url_line = tint_line(url_line, FIELD_CURSOR_STYLE);
     }
@@ -363,54 +664,86 @@ pub fn request_text_and_fields(
     ));
     lines.push(Line::default());
 
-    lines.push(section("En-têtes"));
-    editable_entries(
+    boxed_section(
         &mut lines,
         &mut field_lines,
-        &shown.headers,
-        session,
-        EntrySection::Headers,
+        &mut boxes,
+        "En-têtes".to_owned(),
+        |lines, field_lines| {
+            editable_entries(
+                lines,
+                field_lines,
+                &shown.headers,
+                session,
+                EntrySection::Headers,
+            );
+        },
     );
 
-    lines.push(section("Paramètres de requête"));
-    editable_entries(
+    boxed_section(
         &mut lines,
         &mut field_lines,
-        &shown.query_params,
-        session,
-        EntrySection::QueryParams,
+        &mut boxes,
+        "Paramètres de requête".to_owned(),
+        |lines, field_lines| {
+            editable_entries(
+                lines,
+                field_lines,
+                &shown.query_params,
+                session,
+                EntrySection::QueryParams,
+            );
+        },
     );
 
-    lines.push(section("Paramètres de chemin"));
-    editable_entries(
+    boxed_section(
         &mut lines,
         &mut field_lines,
-        &shown.path_params,
-        session,
-        EntrySection::PathParams,
+        &mut boxes,
+        "Paramètres de chemin".to_owned(),
+        |lines, field_lines| {
+            editable_entries(
+                lines,
+                field_lines,
+                &shown.path_params,
+                session,
+                EntrySection::PathParams,
+            );
+        },
     );
 
     lines.push(Line::default());
-    match &view.body {
-        None => lines.push(field("Corps", "aucun")),
-        Some(body) => {
-            lines.push(field("Corps", body_label(&body.kind).to_owned()));
-            match &body.content {
+    let corps_title = match &view.body {
+        Some(body) => format!("Corps ({})", body_label(&body.kind)),
+        None => "Corps".to_owned(),
+    };
+    boxed_section(
+        &mut lines,
+        &mut field_lines,
+        &mut boxes,
+        corps_title,
+        |lines, field_lines| match &view.body {
+            None => lines.push(Line::raw("  aucun")),
+            Some(body) => match &body.content {
                 BodyContent::Text(text) => {
                     let field = EditableField::BodyText;
                     let is_cursor = is_field_cursor(session, &field);
+                    let is_editable = EditableField::list_for(view).contains(&field);
                     let val = session.map_or(text.as_str(), |s| field_value(s, &field));
                     let hscroll = value_hscroll(session, &field);
                     let first = lines.len();
                     for l in val.split('\n') {
                         let (l, _) = skip_columns(l, hscroll);
                         let mut line = Line::raw(format!("  {l}"));
+                        if is_editable {
+                            line = tint_line(line, theme::EDITABLE_BODY);
+                        }
                         if is_cursor {
                             line = tint_line(line, FIELD_CURSOR_STYLE);
                         }
                         lines.push(line);
                     }
-                    if EditableField::list_for(view).contains(&field) {
+                    if is_editable {
                         field_lines.push(FieldLine {
                             field,
                             line: first,
@@ -419,11 +752,11 @@ pub fn request_text_and_fields(
                         });
                     }
                 }
-                BodyContent::Entries(values) => entries(&mut lines, values),
+                BodyContent::Entries(values) => entries(lines, values),
                 BodyContent::Missing => lines.push(Line::raw("  bloc absent")),
-            }
-        }
-    }
+            },
+        },
+    );
 
     lines.push(Line::default());
     lines.push(field(
@@ -439,7 +772,7 @@ pub fn request_text_and_fields(
     if !view.assertions.is_empty() {
         entries(&mut lines, &view.assertions);
     }
-    (Text::from(lines), field_lines)
+    (Text::from(lines), field_lines, boxes)
 }
 
 /// Champ éditable affiché à la ligne logique `line` du détail de la
@@ -450,7 +783,7 @@ pub fn field_at_line(model: &Model, line: u16) -> Option<EditableField> {
         return None;
     };
     let session = model.editing.as_ref().filter(|s| s.path == request.path);
-    let (_, fields) = request_text_and_fields(request, session);
+    let (_, fields, _) = request_text_and_fields(request, session);
     let line = usize::from(line);
     fields
         .into_iter()
@@ -469,7 +802,7 @@ pub fn cursor_position_in_detail(
         return None;
     };
     let field = session.current_field()?;
-    let (_, field_lines) = request_text_and_fields(request, Some(session));
+    let (_, field_lines, _) = request_text_and_fields(request, Some(session));
     let location = field_lines.iter().find(|l| l.field == field)?;
     let (line, _) = input.cursor_line_col();
     let before = input.text_before_cursor_on_line();
@@ -842,41 +1175,66 @@ mod tests {
         plain(&detail_text(&model))
     }
 
-    /// Les trois niveaux de hiérarchie du détail (titre, section, libellé)
-    /// portent des styles distincts (`visual-theme`).
+    /// Colonne du premier caractère de `needle` sur la ligne d'écran `y`,
+    /// en comptant les cellules (pas les octets, pour rester correct avec
+    /// un accent comme dans « En-têtes »).
+    fn find_col_on_row(buffer: &ratatui::buffer::Buffer, y: u16, needle: &str) -> Option<u16> {
+        let target: Vec<String> = needle.chars().map(String::from).collect();
+        let width = buffer.area.width;
+        (0..width).find(|&x| {
+            target.iter().enumerate().all(|(i, ch)| {
+                let Some(x_i) = x.checked_add(u16::try_from(i).unwrap_or(u16::MAX)) else {
+                    return false;
+                };
+                x_i < width && buffer[(x_i, y)].symbol() == ch
+            })
+        })
+    }
+
+    fn find_cell<'b>(
+        buffer: &'b ratatui::buffer::Buffer,
+        needle: &str,
+    ) -> &'b ratatui::buffer::Cell {
+        for y in 0..buffer.area.height {
+            if let Some(x) = find_col_on_row(buffer, y, needle) {
+                return &buffer[(x, y)];
+            }
+        }
+        panic!("« {needle} » introuvable à l'écran");
+    }
+
+    /// Les trois niveaux de hiérarchie du détail (titre du nœud, cadre de
+    /// section, libellé de champ) portent des styles distincts à l'écran
+    /// (`visual-theme`, `add-boxed-detail-sections`). Le cadre d'une
+    /// section n'a de style qu'au rendu (`Block::border_style`), pas sur
+    /// le texte logique : ce test lit donc l'écran plutôt que `Text`.
     #[test]
-    fn title_section_and_label_styles_are_all_distinct() {
+    fn title_border_and_label_styles_are_all_distinct() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
-        let text = detail_text(&model);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal
+            .draw(|frame| crate::app::view::view(&model, frame))
+            .expect("rendu");
+        let buffer = terminal.backend().buffer();
 
-        let title_style = text.lines[0].spans[0].style;
+        let title_cell = find_cell(buffer, "post-json");
+        let border_cell = find_cell(buffer, "En-têtes");
+        let label_cell = find_cell(buffer, "Content-Type");
 
-        let section_style = text
-            .lines
-            .iter()
-            .find_map(|line| {
-                line.spans
-                    .iter()
-                    .find(|s| s.content.as_ref() == "En-têtes")
-                    .map(|s| s.style)
-            })
-            .expect("section En-têtes");
-
-        let label_style = text
-            .lines
-            .iter()
-            .find_map(|line| {
-                line.spans
-                    .iter()
-                    .find(|s| s.content.as_ref() == "Chemin : ")
-                    .map(|s| s.style)
-            })
-            .expect("libellé Chemin");
-
-        assert_ne!(title_style, section_style, "titre vs section");
-        assert_ne!(title_style, label_style, "titre vs libellé");
-        assert_ne!(section_style, label_style, "section vs libellé");
+        let style = |c: &ratatui::buffer::Cell| (c.fg, c.modifier);
+        assert_ne!(
+            style(title_cell),
+            style(border_cell),
+            "titre vs cadre de section"
+        );
+        assert_ne!(style(title_cell), style(label_cell), "titre vs libellé");
+        assert_ne!(
+            style(border_cell),
+            style(label_cell),
+            "cadre de section vs libellé"
+        );
     }
 
     /// Garde-fou sur le nombre de lignes du détail d'une requête ; la
@@ -924,17 +1282,21 @@ mod tests {
         let text_line = |text: &Text<'_>, needle: &str| {
             text.lines
                 .iter()
-                .position(|l| l.spans.iter().any(|s| s.content.contains(needle)))
-                .expect("ligne")
+                .position(|l| {
+                    let concatenated: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                    concatenated.contains(needle)
+                })
+                .unwrap_or_else(|| panic!("ligne introuvable pour {needle:?}"))
         };
 
         let mut model = loaded_model((300, 40));
         session_on(&mut model, "post-json.bru");
         let text = detail_text(&model);
-        // URL : après « POST ».
+        // URL : sur sa propre ligne (`add-method-editing`), curseur en
+        // colonne 0.
         let (line, col) = cursor_for(&mut model, EditableField::Url, &[InputKey::Home]);
         assert_eq!(line, text_line(&text, "https://{{host}}/items"));
-        assert_eq!(col, "POST ".len());
+        assert_eq!(col, 0);
         // En-tête : après « Content-Type: », curseur en fin de valeur.
         let (line, col) = cursor_for(&mut model, EditableField::HeaderValue(0), &[]);
         assert_eq!(line, text_line(&text, "Content-Type: "));
@@ -973,20 +1335,153 @@ mod tests {
         assert_eq!(col, "  page: ".len());
     }
 
+    /// Clé d'en-tête stylée comme un libellé, distincte de sa valeur, hors
+    /// session (`improve-edit-field-legibility`).
+    #[test]
+    fn header_key_style_differs_from_value_style_without_session() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+        let text = detail_text(&model);
+        let line = text
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .first()
+                    .is_some_and(|s| s.content.as_ref() == "  Content-Type: ")
+            })
+            .expect("ligne d'en-tête Content-Type");
+        assert_eq!(line.spans[0].style, theme::LABEL);
+        assert_eq!(line.spans[1].content.as_ref(), "application/json");
+        assert_ne!(line.spans[0].style, line.spans[1].style);
+    }
+
+    /// Même distinction pour un en-tête désactivé pendant une session
+    /// d'édition, en plus de l'indication « (désactivé) »
+    /// (`improve-edit-field-legibility`).
+    #[test]
+    fn disabled_header_key_style_differs_from_value_style_in_session() {
+        let mut model = loaded_model((100, 30));
+        session_on(&mut model, "scripted.bru");
+        let text = detail_text(&model);
+        let line = text
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .first()
+                    .is_some_and(|s| s.content.as_ref() == "  X-Debug: ")
+            })
+            .expect("ligne d'en-tête désactivé X-Debug");
+        assert_eq!(line.spans[0].style, theme::LABEL);
+        assert_eq!(line.spans[1].content.as_ref(), "1 (désactivé)");
+        assert_ne!(line.spans[0].style, line.spans[1].style);
+    }
+
+    /// Pendant l'ajout d'un en-tête, la clé déjà validée porte le même
+    /// style de libellé que les entrées existantes, distinct de la valeur
+    /// en cours de saisie (`improve-edit-field-legibility`).
+    #[test]
+    fn provisional_header_key_style_matches_existing_entries() {
+        use crate::app::message::{InputKey, Message};
+        use crate::app::update::update;
+
+        let mut model = loaded_model((100, 30));
+        session_on(&mut model, "post-json.bru");
+        let add_row = EditableField::AddRow(EntrySection::Headers);
+        let index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == add_row))
+            .expect("ligne d'ajout d'en-tête");
+        model.editing.as_mut().expect("session").cursor = index;
+        update(&mut model, Message::Enter);
+        for c in "X-Trace".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+        update(&mut model, Message::ValidateInput);
+        for c in "abc".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+
+        let text = detail_text(&model);
+        let line = text
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .first()
+                    .is_some_and(|s| s.content.as_ref() == "  X-Trace: ")
+            })
+            .expect("ligne provisoire X-Trace");
+        assert_eq!(line.spans[1].content.as_ref(), "abc");
+        assert_ne!(
+            line.spans[0].style, line.spans[1].style,
+            "clé vs valeur en cours de saisie"
+        );
+    }
+
+    fn concatenated(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// Le corps d'un type éditable (`json`, ici) reçoit le fond distinct de
+    /// `theme::EDITABLE_BODY`, même hors session (`improve-edit-field-legibility`).
+    #[test]
+    fn editable_body_lines_get_the_editable_body_background() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+        let text = detail_text(&model);
+        let line = text
+            .lines
+            .iter()
+            .find(|l| concatenated(l).contains("\"a\": {"))
+            .expect("ligne du corps");
+        assert_eq!(line.spans[0].style.bg, theme::EDITABLE_BODY.bg);
+    }
+
+    /// Une requête sans corps n'a pas de zone de saisie à styler : le
+    /// détail reste identique à avant ce changement
+    /// (`improve-edit-field-legibility`).
+    #[test]
+    fn request_without_body_has_no_editable_body_background() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        let text = detail_text(&model);
+        assert!(
+            text.lines.iter().all(|l| l
+                .spans
+                .iter()
+                .all(|s| s.style.bg != theme::EDITABLE_BODY.bg)),
+            "aucune ligne ne doit porter le fond du corps éditable"
+        );
+        let corps_index = text
+            .lines
+            .iter()
+            .position(|l| concatenated(l).contains("Corps"))
+            .expect("ligne « Corps »");
+        assert_eq!(concatenated(&text.lines[corps_index + 1]), "  aucun");
+    }
+
+    /// Garde-fou : chaque boîte de section ajoute 2 lignes de bordure par
+    /// rapport à l'ancienne ligne de titre unique
+    /// (`add-boxed-detail-sections`) ; +1 pour la ligne Méthode, désormais
+    /// séparée de l'URL (`add-method-editing`).
     #[test]
     fn request_detail_line_count_is_unchanged() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
-        assert_eq!(detail_text(&model).lines.len(), 27);
+        assert_eq!(detail_text(&model).lines.len(), 32);
     }
 
     #[test]
     fn post_json_request() {
         let text = detail_of("post-json.bru");
         for expected in [
-            "POST https://{{host}}/items",
+            "POST",
+            "https://{{host}}/items",
             "Content-Type: application/json",
-            "Corps : json",
+            "Corps (json)",
             "\"s\": \"}\"",
             "Chemin : post-json.bru",
         ] {
@@ -1049,15 +1544,68 @@ mod tests {
         assert!(detail_of("misc").contains("folder.bru : absent"));
     }
 
+    /// Un dossier ou un nœud en erreur n'a pas de section à encadrer : son
+    /// détail ne contient aucun cadre (`visual-theme`,
+    /// `add-boxed-detail-sections`).
+    #[test]
+    fn folder_and_error_node_have_no_section_box() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "grp");
+        assert!(detail_section_boxes(&model).is_empty(), "dossier");
+
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "broken.bru");
+        assert!(detail_section_boxes(&model).is_empty(), "nœud en erreur");
+    }
+
+    /// La boîte du sélecteur de méthode n'existe dans la séquence de
+    /// lignes que pendant qu'il est ouvert, avec les 9 méthodes plus ses
+    /// deux lignes de bordure (`add-method-editing`).
+    #[test]
+    fn method_picker_box_exists_only_while_open() {
+        use crate::app::message::Message;
+        use crate::app::update::update;
+
+        let mut model = loaded_model((100, 30));
+        session_on(&mut model, "simple-get.bru");
+        assert!(
+            !detail_section_boxes(&model)
+                .iter()
+                .any(|b| b.title == "Méthode"),
+            "pas de sélecteur avant ouverture"
+        );
+
+        // Le curseur de champ par défaut est sur la Méthode : Entrée ouvre
+        // le sélecteur plutôt qu'une saisie.
+        update(&mut model, Message::Enter);
+        let boxes = detail_section_boxes(&model);
+        let picker = boxes
+            .iter()
+            .find(|b| b.title == "Méthode")
+            .expect("boîte du sélecteur");
+        assert_eq!(picker.line_count, 9 + 2);
+
+        update(&mut model, Message::CancelInput);
+        assert!(
+            !detail_section_boxes(&model)
+                .iter()
+                .any(|b| b.title == "Méthode"),
+            "sélecteur refermé"
+        );
+    }
+
     #[test]
     fn simple_get_without_body() {
         let text = detail_of("simple-get.bru");
-        assert!(text.contains("GET https://{{host}}/ping"), "{text}");
+        assert!(text.contains("GET\nhttps://{{host}}/ping"), "{text}");
         assert!(
-            text.contains("Corps : aucun") && text.contains("Auth : none"),
+            text.contains("Corps") && text.contains("Auth : none"),
             "{text}"
         );
-        assert!(text.contains("En-têtes\n  aucun"), "{text}");
+        assert!(
+            text.contains("En-têtes") && text.contains("\n  aucun"),
+            "{text}"
+        );
     }
 
     use crate::runner::report::{

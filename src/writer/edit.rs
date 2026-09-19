@@ -47,10 +47,13 @@ impl EntrySection {
 /// désigne la position dans `RequestView.headers` / `.query_params` /
 /// `.path_params` telle qu'elle résulte des modifications précédentes de la
 /// même liste. Sans ajout ni suppression, il coïncide avec l'indice exposé
-/// par `bru-parser`. `Url` et `BodyText` sont singletons.
+/// par `bru-parser`. `Url`, `Method` et `BodyText` sont singletons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldEdit {
     Url(String),
+    /// Nom du bloc de méthode, en minuscules, l'une des 9 valeurs de
+    /// `crate::collection::ast::METHODS` (`add-method-editing`).
+    Method(String),
     HeaderValue {
         index: usize,
         value: String,

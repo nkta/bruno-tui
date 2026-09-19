@@ -39,6 +39,9 @@ pub enum TextCapture {
     SecretName,
     /// Valeur d'une variable secrète, masquée.
     SecretValue,
+    /// Sélecteur de méthode ouvert (`add-method-editing`) : seules la
+    /// navigation, la validation et l'annulation ont un sens.
+    MethodPicker,
 }
 
 /// Touche d'édition du tampon pendant la saisie d'un champ
@@ -336,6 +339,20 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::Input => input_capture_message(key),
         TextCapture::Filter => filter_capture_message(key),
         TextCapture::SecretName | TextCapture::SecretValue => secret_capture_message(key),
+        TextCapture::MethodPicker => method_picker_capture_message(key),
+    }
+}
+
+/// Capture pendant le sélecteur de méthode : navigation, validation par
+/// `Entrée`, annulation par `Échap` ; le reste est ignoré. `Ctrl+C` est
+/// traité en amont par `key_message` (`add-method-editing`).
+fn method_picker_capture_message(key: KeyEvent) -> Option<Message> {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => Some(Message::Up),
+        KeyCode::Down | KeyCode::Char('j') => Some(Message::Down),
+        KeyCode::Enter => Some(Message::Enter),
+        KeyCode::Esc => Some(Message::CancelInput),
+        _ => None,
     }
 }
 

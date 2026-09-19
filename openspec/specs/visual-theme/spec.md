@@ -57,10 +57,54 @@ champ (par exemple « Chemin », « Méthode », « Auth ») avec un style
 distinct de celui de la valeur qui le suit, pour que l'œil distingue
 immédiatement la structure de l'information de son contenu.
 
+Cette distinction SHALL aussi s'appliquer à la clé de chaque entrée
+clé/valeur (en-tête, paramètre de requête, paramètre de chemin) : la clé
+porte le même style de libellé que les champs simples, la valeur le
+style normal. Elle s'applique que l'entrée soit affichée hors session
+(lecture seule) ou pendant une session d'édition (`field-editing`), y
+compris une entrée désactivée, une clé en cours de renommage, ou une
+entrée provisoire affichée pendant un ajout.
+
+Quand le corps d'une requête est d'un type éditable par `field-editing`
+(`json`, `text`, `xml`, `sparql`, `graphql`), l'interface SHALL le
+présenter avec une bordure ou un fond qui le distingue visuellement du
+texte de détail environnant, qu'une session d'édition soit ouverte ou
+non. Un corps d'un type non éditable (absence de corps, formulaire) MUST
+NOT recevoir cette présentation.
+
 #### Scenario: Champ du détail d'un dossier
 - **WHEN** le détail d'un dossier affiche son chemin relatif
 - **THEN** le style du libellé « Chemin » diffère de celui de la valeur
   affichée
+
+#### Scenario: En-tête affiché hors session
+- **WHEN** le détail d'une requête ayant un en-tête `Content-Type` est
+  affiché sans session d'édition ouverte
+- **THEN** le style de la clé `Content-Type` diffère de celui de sa
+  valeur
+
+#### Scenario: En-tête désactivé pendant une session d'édition
+- **WHEN** une session d'édition est ouverte et le curseur de champ est
+  sur un en-tête désactivé
+- **THEN** la clé de cet en-tête porte le style de libellé, distinct de
+  celui de sa valeur, en plus de l'indication « (désactivé) »
+
+#### Scenario: Entrée provisoire pendant un ajout
+- **WHEN** une session d'édition est en train d'ajouter un en-tête et
+  que la saisie de la valeur est en cours
+- **THEN** la clé déjà validée de cette entrée provisoire porte le même
+  style de libellé que les entrées existantes
+
+#### Scenario: Corps éditable distingué du texte de détail
+- **WHEN** une requête dont le corps est de type `json` est sélectionnée,
+  avec ou sans session d'édition ouverte
+- **THEN** la zone du corps est présentée avec une bordure ou un fond qui
+  la distingue visuellement du reste du texte de détail
+
+#### Scenario: Corps sans type éditable non affecté
+- **WHEN** une requête dont le corps est `none` est sélectionnée
+- **THEN** aucune zone de saisie n'est présentée pour un corps absent, et
+  le détail reste inchangé par rapport à avant ce changement
 
 ### Requirement: Présentation du détail en fiche lisible
 Le panneau de détail SHALL distinguer visuellement trois niveaux de
@@ -71,10 +115,47 @@ valeur des trois niveaux. Cette hiérarchie SHALL s'appliquer identiquement
 à une requête, un dossier, et un nœud en erreur, sans changer les
 informations déjà spécifiées par `tui-shell` pour chacun.
 
+Pour une requête, les sections « En-têtes », « Paramètres de requête »,
+« Paramètres de chemin » et « Corps » SHALL être présentées chacune dans
+un cadre qui les entoure, avec le nom de la section affiché dans la
+bordure du cadre plutôt qu'en ligne de titre séparée. Le contenu de
+chaque section (entrée clé/valeur, lignes du corps, mention « aucun »
+quand la section est vide) reste affiché à l'intérieur de ce cadre, sans
+perte ni ajout d'information par rapport à la présentation non encadrée.
+Les autres champs du détail d'une requête (nom, chemin, méthode, URL,
+auth, indicateurs de scripts/tests/assertions) et le détail d'un dossier
+ou d'un nœud en erreur MUST NOT être encadrés par cette exigence : ils
+gardent la présentation en ligne simple déjà définie par `tui-shell`.
+
+Cette présentation encadrée MUST NOT changer la séquence logique de
+lignes que consomment `field-editing`, `mouse-support` et
+`search-and-yank` : chaque ligne de bordure du cadre est une ligne
+supplémentaire dans cette séquence, au même titre que l'étaient les
+lignes de titre de section qu'elle remplace, et ne porte aucun champ
+éditable.
+
 #### Scenario: Trois niveaux distincts sur une requête
 - **WHEN** le détail d'une requête avec au moins un en-tête est affiché
-- **THEN** le titre du nœud, le titre de la section « En-têtes », et la
-  ligne de l'en-tête lui-même portent chacun un style distinct
+- **THEN** le titre du nœud, le cadre de la section « En-têtes » avec son
+  nom dans la bordure, et la ligne de l'en-tête lui-même portent chacun
+  un style distinct
+
+#### Scenario: Section encadrée sans perte de contenu
+- **WHEN** le détail de `post-json` (fixture `parser-cases`) est affiché
+  avant et après ce changement
+- **THEN** le texte brut de chaque champ (en-tête, corps) affiché dans la
+  séquence de lignes du détail est identique dans les deux cas ; seule sa
+  mise en forme (cadre, style) diffère
+
+#### Scenario: Section vide toujours encadrée
+- **WHEN** une requête sans paramètre de chemin est sélectionnée
+- **THEN** le cadre de la section « Paramètres de chemin » est affiché
+  avec la mention « aucun » à l'intérieur, plutôt que d'être omis
+
+#### Scenario: Dossier et nœud en erreur non affectés
+- **WHEN** un dossier ou un nœud en erreur est sélectionné
+- **THEN** son détail ne contient aucun cadre de section, inchangé par
+  rapport à avant ce changement
 
 ### Requirement: Présentation intentionnelle des panneaux à message unique
 Un panneau plein corps dont tout le contenu est un unique message de

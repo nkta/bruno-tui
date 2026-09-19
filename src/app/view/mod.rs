@@ -12,6 +12,7 @@ pub mod theme;
 pub mod tree;
 
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -166,17 +167,25 @@ pub fn view(model: &Model, frame: &mut Frame) {
             }
             Focus::Tree | Focus::Detail | Focus::Response => {
                 render_tree(model, frame, areas.tree);
-                // Pendant une saisie, pas de retour à la ligne : une ligne
-                // logique = une ligne affichée, pour que le curseur de texte
-                // et le décalage horizontal tombent exactement
-                // (`improve-direct-editing`, D7).
-                let mut detail = Paragraph::new(detail::render_text(model))
-                    .scroll((model.detail_scroll, 0))
-                    .block(panel(" Détail ", model.focus == Focus::Detail));
-                if detail_wraps(model) {
-                    detail = detail.wrap(Wrap { trim: false });
+                let detail_block = panel(" Détail ", model.focus == Focus::Detail);
+                match model.selected_node() {
+                    Some(TreeNode::Request(_)) => {
+                        render_boxed_detail(model, frame, areas.detail, detail_block);
+                    }
+                    _ => {
+                        // Pendant une saisie, pas de retour à la ligne : une
+                        // ligne logique = une ligne affichée, pour que le
+                        // curseur de texte et le décalage horizontal tombent
+                        // exactement (`improve-direct-editing`, D7).
+                        let mut detail = Paragraph::new(detail::render_text(model))
+                            .scroll((model.detail_scroll, 0))
+                            .block(detail_block);
+                        if detail_wraps(model) {
+                            detail = detail.wrap(Wrap { trim: false });
+                        }
+                        frame.render_widget(detail, areas.detail);
+                    }
                 }
-                frame.render_widget(detail, areas.detail);
                 render_insert_cursor(model, frame, areas.detail);
                 render_status_panel(model, frame, &areas);
                 render_response(model, frame, areas.response);
@@ -203,6 +212,44 @@ fn input_in_progress(model: &Model) -> bool {
             request.path == session.path && matches!(session.state, EditState::Input(_))
         }
         _ => false,
+    }
+}
+
+/// Rend le détail d'une requête sélectionnée : chaque section (En-têtes,
+/// Paramètres de requête, Paramètres de chemin, Corps) dans sa propre
+/// boîte bordée, le reste en lignes simples (`add-boxed-detail-sections`).
+/// Compose dans un tampon virtuel de la hauteur totale du contenu, puis
+/// copie la tranche visible dans le tampon réel de la frame (design.md,
+/// « Rendu par tampon virtuel composé ») : un `Paragraph::scroll` seul ne
+/// peut pas dessiner un `Block` bordé autour d'un sous-ensemble de ses
+/// lignes.
+fn render_boxed_detail(model: &Model, frame: &mut Frame, area: Rect, block: Block<'static>) {
+    frame.render_widget(block, area);
+    let inner_area = inner(area);
+    if inner_area.width == 0 || inner_area.height == 0 {
+        return;
+    }
+    let text = detail::render_text(model);
+    let boxes = detail::detail_section_boxes(model);
+    let wraps = detail_wraps(model);
+    let total_height = detail::content_height(&text.lines, &boxes, inner_area.width, wraps);
+    let virtual_area = Rect::new(0, 0, inner_area.width, total_height.max(1));
+    let mut virtual_buf = Buffer::empty(virtual_area);
+    detail::compose(&text.lines, &boxes, wraps, &mut virtual_buf);
+
+    let scroll = model.detail_scroll;
+    let frame_buf = frame.buffer_mut();
+    for y in 0..inner_area.height {
+        let Some(src_y) = scroll.checked_add(y) else {
+            break;
+        };
+        if src_y >= total_height {
+            break;
+        }
+        for x in 0..inner_area.width {
+            let cell = virtual_buf[(x, src_y)].clone();
+            frame_buf[(inner_area.x + x, inner_area.y + y)] = cell;
+        }
     }
 }
 
@@ -234,9 +281,20 @@ fn render_insert_cursor(model: &Model, frame: &mut Frame, detail_area: Rect) {
     if rel_y >= inner_area.height as usize {
         return;
     }
+    // Une colonne de bordure gauche en plus quand la ligne appartient à
+    // une boîte de section (`add-boxed-detail-sections`) : le modèle
+    // logique de position ne change pas, seul son placement à l'écran
+    // tient compte du cadre (design.md, « Position du curseur de texte »).
+    let boxes = detail::detail_section_boxes(model);
+    let border_offset: u16 = if boxes.iter().any(|b| b.contains(line_index)) {
+        1
+    } else {
+        0
+    };
     let cursor_y = inner_area.y + rel_y as u16;
     let col_index = u16::try_from(col_index).unwrap_or(u16::MAX);
-    let cursor_x = inner_area.x + col_index.min(inner_area.width.saturating_sub(1));
+    let max_col = inner_area.width.saturating_sub(1 + border_offset);
+    let cursor_x = inner_area.x + border_offset + col_index.min(max_col);
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
@@ -403,6 +461,9 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
                 "Entrée valider  Tab valider  Échap annuler  Ctrl+S enregistrer"
             };
             format!("Saisie · {label}{unsaved} — {keys}")
+        }
+        EditState::MethodPicker { .. } => {
+            format!("Méthode · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler")
         }
     }
 }
@@ -862,6 +923,7 @@ mod tests {
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
+        update(&mut model, Message::Down); // Méthode -> URL
 
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
@@ -871,8 +933,9 @@ mod tests {
         let inner_area = inner(detail_area);
         let buffer = terminal.backend().buffer();
 
-        // Ligne 3 du détail = ligne URL (inner_area.y + 3)
-        let url_row = inner_area.y + 3;
+        // Ligne 4 du détail = ligne URL, la méthode ayant sa propre ligne
+        // avant elle (`add-method-editing`).
+        let url_row = inner_area.y + 4;
         let url_cell = &buffer[(inner_area.x, url_row)];
         assert!(
             url_cell.modifier.contains(Modifier::REVERSED),
@@ -912,6 +975,7 @@ mod tests {
         update(&mut model, Message::NextFocus);
         assert!(status_line(&model).contains("Entrée éditer"));
         update(&mut model, Message::StartEdit);
+        update(&mut model, Message::Down); // Méthode -> URL
         let line = status_line(&model);
         assert!(line.contains("Sélection · Url"), "{line}");
         assert!(line.contains("Entrée modifier"), "{line}");
@@ -993,8 +1057,9 @@ mod tests {
         let mut model = loaded_model((60, 20));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::Enter);
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::Enter); // ouvre la session
+        update(&mut model, Message::Down); // Méthode -> URL
+        update(&mut model, Message::Enter); // commence la saisie de l'URL
         for _ in 0..80 {
             update(
                 &mut model,
@@ -1017,10 +1082,6 @@ mod tests {
         // de l'URL qui n'est pas repliée.
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(cursor.x - 1, cursor.y)].symbol(), "Z");
-        let row: String = (inner_area.x..inner_area.x + inner_area.width)
-            .map(|x| buffer[(x, cursor.y)].symbol())
-            .collect();
-        assert!(row.starts_with("GET "), "préfixe conservé : {row}");
         let next: String = (inner_area.x..inner_area.x + inner_area.width)
             .map(|x| buffer[(x, cursor.y + 1)].symbol())
             .collect();
@@ -1033,6 +1094,7 @@ mod tests {
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
+        update(&mut model, Message::Down); // Méthode -> URL
 
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
@@ -1047,7 +1109,7 @@ mod tests {
 
         let detail_area = layout_for((100, 30)).expect("layout").detail;
         let inner_area = inner(detail_area);
-        assert_eq!(cursor.y, inner_area.y + 3);
+        assert_eq!(cursor.y, inner_area.y + 4);
         assert!(cursor.x >= inner_area.x);
         assert!(cursor.x < inner_area.x + inner_area.width);
 
@@ -1771,10 +1833,8 @@ mod tests {
         update(&mut model, Message::ValidateInput);
 
         let screen = render(&model, 240, 40).join("\n");
-        assert!(
-            screen.contains("GET https://{{host}}/ping?page=2"),
-            "{screen}"
-        );
+        assert!(screen.contains("GET"), "{screen}");
+        assert!(screen.contains("https://{{host}}/ping?page=2"), "{screen}");
         assert!(screen.contains("page: 2"), "{screen}");
         assert!(model.editing.as_ref().is_some_and(|s| s.dirty));
     }
@@ -1799,19 +1859,23 @@ mod tests {
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("curseur");
         let inner_area = inner(layout_for((100, 40)).expect("layout").detail);
-        assert_eq!(cursor.x, inner_area.x + 2 + 3);
+        // +1 pour la bordure gauche de la boîte de section « En-têtes »
+        // (`add-boxed-detail-sections`), en plus de l'indentation « 2 » et
+        // des 3 caractères tapés.
+        assert_eq!(cursor.x, inner_area.x + 1 + 2 + 3);
         let buffer = terminal.backend().buffer();
         let row: String = (inner_area.x..inner_area.x + inner_area.width)
             .map(|x| buffer[(x, cursor.y)].symbol())
             .collect();
-        assert!(row.starts_with("  X-T"), "{row}");
+        let content: String = row.chars().skip(1).collect();
+        assert!(content.starts_with("  X-T"), "{row}");
 
         // Étape de la valeur : le curseur suit la valeur après `clé: `.
         update(&mut model, Message::ValidateInput);
         key(&mut model, 'v');
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("curseur");
-        assert_eq!(cursor.x, inner_area.x + "  X-T: v".len() as u16);
+        assert_eq!(cursor.x, inner_area.x + 1 + "  X-T: v".len() as u16);
     }
 
     #[test]

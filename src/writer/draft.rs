@@ -53,6 +53,16 @@ struct UrlState {
     current: String,
 }
 
+/// Nom du bloc de méthode (ex. `"get"`), tranche de ce seul mot-clé dans
+/// le source (`add-method-editing`) : le bloc de méthode s'écrit toujours
+/// en colonne 0, donc cette tranche est
+/// `node.span.start..node.span.start + block.name.len()`.
+struct MethodState {
+    span: Range<usize>,
+    original: String,
+    current: String,
+}
+
 /// Contenu d'un bloc de corps texte ciblé.
 struct BodyState {
     span: Range<usize>,
@@ -71,6 +81,7 @@ struct Section {
 pub(crate) struct Draft<'a> {
     ast: &'a BruFile,
     url: Result<UrlState, EditError>,
+    method: Result<MethodState, EditError>,
     sections: [Section; 3],
     body: Option<BodyState>,
 }
@@ -93,6 +104,7 @@ impl<'a> Draft<'a> {
         Self {
             ast,
             url: url_state(ast),
+            method: method_state(ast),
             sections: EntrySection::ALL.map(section),
             body: None,
         }
@@ -107,6 +119,13 @@ impl<'a> Draft<'a> {
                 let url = self.url.as_mut().map_err(|error| error.clone())?;
                 url.current = value.clone();
                 self.sync_params_from_url()?;
+            }
+            FieldEdit::Method(value) => {
+                if !METHODS.contains(&value.as_str()) {
+                    return Err(EditError::UnknownMethod);
+                }
+                let method = self.method.as_mut().map_err(|error| error.clone())?;
+                method.current = value.clone();
             }
             FieldEdit::HeaderValue { index, value } => {
                 self.entry_mut(Headers, *index)?.value = value.clone();
@@ -280,6 +299,14 @@ impl<'a> Draft<'a> {
             replacements.push(Replacement {
                 span: url.span.clone(),
                 bytes: format::format_entry(&url.key, &url.current, url.disabled, eol),
+            });
+        }
+        if let Ok(method) = &self.method
+            && method.current != method.original
+        {
+            replacements.push(Replacement {
+                span: method.span.clone(),
+                bytes: method.current.clone(),
             });
         }
         if let Some(body) = &self.body {
@@ -501,6 +528,25 @@ fn url_state(ast: &BruFile) -> Result<UrlState, EditError> {
     })
 }
 
+fn method_state(ast: &BruFile) -> Result<MethodState, EditError> {
+    let (name, start) = ast
+        .nodes()
+        .iter()
+        .find_map(|node| match &node.kind {
+            NodeKind::Block(block) if METHODS.contains(&block.name.as_str()) => {
+                Some((block.name.clone(), node.span.start))
+            }
+            _ => None,
+        })
+        .ok_or(EditError::MissingField { field: "method" })?;
+    let span = start..start + name.len();
+    Ok(MethodState {
+        span,
+        original: name.clone(),
+        current: name,
+    })
+}
+
 fn body_state(ast: &BruFile) -> Result<BodyState, EditError> {
     let method = ast
         .blocks()
@@ -562,6 +608,28 @@ mod tests {
     }
 
     const GET: &str = "get {\n  url: https://h/items\n}\n";
+
+    #[test]
+    fn method_rename_keeps_the_rest_of_the_block_untouched() {
+        let source = "get {\n  url: https://h/items\n  auth: none\n}\n";
+        let out = apply(source, &[FieldEdit::Method("post".into())]);
+        assert_eq!(out, "post {\n  url: https://h/items\n  auth: none\n}\n");
+    }
+
+    #[test]
+    fn unknown_method_is_refused() {
+        let file = parse(GET);
+        let error = resolve(&file, &[FieldEdit::Method("fetch".into())]).unwrap_err();
+        assert_eq!(error, EditError::UnknownMethod);
+    }
+
+    #[test]
+    fn method_state_span_covers_only_the_block_keyword() {
+        let file = parse(GET);
+        let state = method_state(&file).expect("état de méthode");
+        assert_eq!(state.original, "get");
+        assert_eq!(&file.raw()[state.span.clone()], "get");
+    }
 
     #[test]
     fn remove_then_edit_targets_the_former_next_entry() {

@@ -62,6 +62,11 @@ pub enum EditError {
     #[error("corps de forme formulaire : seul un corps `{expected}` est éditable")]
     WrongBodyForm { expected: &'static str },
 
+    /// Nom de bloc de méthode hors des 9 valeurs reconnues
+    /// (`add-method-editing`) ; ne cite jamais la valeur refusée.
+    #[error("méthode inconnue")]
+    UnknownMethod,
+
     #[error("bloc `{block}`{} : {problem}", at_index(.index))]
     InvalidEntry {
         block: &'static str,
@@ -114,6 +119,7 @@ mod tests {
             EditError::WrongBodyForm {
                 expected: "body:text",
             },
+            EditError::UnknownMethod,
             EditError::Overlap,
             EditError::Unreadable,
             EditError::InvalidEntry {
