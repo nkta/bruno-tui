@@ -57,7 +57,7 @@ qu'un changement correspondant existe dans `openspec/changes/`.
 Si la demande ne rentre dans aucun changement actif, le dire et
 proposer `/opsx:propose` plutôt que de coder directement.
 
-Quand un travail peut être parallélisé (tâches indépendantes d'un
+Quand un travail peut être parallélisé (proposition openspec, tâches indépendantes d'un
 changement, exploration, tests ou revues concurrentes) :
 
 - Isoler les contextes d'exécution via des **git worktrees** dédiés.
