@@ -10,7 +10,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use crate::collection::{BodyContent, BodyKind, Collection, LoadError, RequestView, TreeNode};
+use crate::collection::{
+    BodyContent, BodyKind, Collection, KeyValue, LoadError, RequestView, TreeNode,
+};
 use crate::runner::{self, SecretString};
 use crate::secrets::{Resolved, SecretLookup, SecretMapping, SecretSource, is_valid_name};
 use crate::writer::{EntrySection, FieldEdit, FileStamp};
@@ -281,6 +283,96 @@ impl EditSession {
     }
 }
 
+/// État d'une session d'édition d'environnement : sélection de la variable,
+/// ou saisie de sa valeur.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvironmentEditState {
+    Select,
+    Input(TextInput),
+}
+
+/// Session d'édition des variables d'un environnement.
+#[derive(Debug, Clone)]
+pub struct EnvironmentEditSession {
+    /// Nom de l'environnement (ex: "local", "staging").
+    pub name: String,
+    /// Chemin du fichier `.bru` de l'environnement, relatif à la racine de la collection.
+    pub path: PathBuf,
+    pub stamp: FileStamp,
+    /// Variables en mémoire, dans l'ordre du fichier.
+    pub variables: Vec<KeyValue>,
+    /// Indice de la variable sous le curseur, dans `variables`.
+    pub cursor: usize,
+    pub state: EnvironmentEditState,
+    /// Au moins une variable a été modifiée par rapport à l'état initial.
+    pub dirty: bool,
+}
+
+impl EnvironmentEditSession {
+    /// Ouvre une session sur un environnement chargé.
+    pub fn new(name: String, path: PathBuf, stamp: FileStamp, variables: Vec<KeyValue>) -> Self {
+        Self {
+            name,
+            path,
+            stamp,
+            variables,
+            cursor: 0,
+            state: EnvironmentEditState::Select,
+            dirty: false,
+        }
+    }
+
+    /// Variable actuellement sous le curseur.
+    pub fn current_variable(&self) -> Option<&KeyValue> {
+        self.variables.get(self.cursor)
+    }
+
+    /// Démarre la saisie de la valeur de la variable sélectionnée si elle est activée.
+    /// Retourne `true` si la saisie démarre, `false` si la variable est désactivée ou inexistante.
+    pub fn begin_input(&mut self) -> bool {
+        let Some(var) = self.variables.get(self.cursor) else {
+            return false;
+        };
+        if !var.enabled {
+            return false;
+        }
+        self.state = EnvironmentEditState::Input(TextInput::new(&var.value, false));
+        true
+    }
+
+    /// Valide la saisie en cours : met à jour la valeur en mémoire et marque
+    /// la session modifiée si la valeur a changé.
+    pub fn commit_input(&mut self) -> bool {
+        let EnvironmentEditState::Input(input) = &self.state else {
+            return false;
+        };
+        let text = input.text().to_owned();
+        if let Some(var) = self.variables.get_mut(self.cursor)
+            && var.value != text
+        {
+            var.value = text;
+            self.dirty = true;
+        }
+        self.state = EnvironmentEditState::Select;
+        true
+    }
+
+    /// Annule la saisie en cours et restaure l'état de sélection sans modifier
+    /// la valeur ni changer `dirty`.
+    pub fn cancel_input(&mut self) {
+        self.state = EnvironmentEditState::Select;
+    }
+
+    /// Indique si la session a des modifications non enregistrées.
+    pub fn has_unsaved(&self) -> bool {
+        self.dirty
+            || match &self.state {
+                EnvironmentEditState::Select => false,
+                EnvironmentEditState::Input(input) => input.is_modified(),
+            }
+    }
+}
+
 /// État d'une session : choix du champ, saisie de sa valeur, ou sélecteur
 /// de méthode ouvert (`add-method-editing`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -454,6 +546,13 @@ pub struct SavedEdit {
     pub view: RequestView,
 }
 
+/// Résultat d'une sauvegarde réussie d'un environnement.
+#[derive(Debug, Clone)]
+pub struct SavedEnvironment {
+    pub stamp: FileStamp,
+    pub ast: crate::collection::BruFile,
+}
+
 /// Valeur affichée d'un champ : tampon de saisie si la valeur de ce champ
 /// est en saisie, sinon valeur de l'aperçu.
 pub fn field_value<'a>(session: &'a EditSession, field: &EditableField) -> &'a str {
@@ -553,6 +652,8 @@ pub struct Model {
     pub(crate) next_clipboard_token: u64,
     /// Session d'édition active sur la requête du focus Détail.
     pub editing: Option<EditSession>,
+    /// Session d'édition active sur l'environnement du focus Sélection d'environnement.
+    pub environment_editing: Option<EnvironmentEditSession>,
     /// Confirmation en attente avant de fermer l'édition ou l'application.
     pub confirm: Option<PendingConfirm>,
     /// Nom de l'environnement courant, `None` = « Aucun ».
@@ -672,6 +773,7 @@ impl Model {
             pending_clipboard_selection: None,
             next_clipboard_token: 0,
             editing: None,
+            environment_editing: None,
             confirm: None,
             current_environment: None,
             environment_selected: 0,
@@ -698,6 +800,10 @@ impl Model {
             .editing
             .as_ref()
             .is_some_and(|s| matches!(s.state, EditState::Input(_)))
+            || self
+                .environment_editing
+                .as_ref()
+                .is_some_and(|s| matches!(s.state, EnvironmentEditState::Input(_)))
         {
             return Some(TextCapture::Input);
         }
@@ -1356,5 +1462,149 @@ mod tests {
         let row = secret_rows(&model).remove(0);
         assert_eq!(row.source, SecretSource::Typed);
         assert_eq!(row.value.as_ref().map(SecretString::expose), Some("typed"));
+    }
+
+    #[test]
+    fn environment_edit_session_initializes_with_variables_in_order() {
+        let model = loaded_model((100, 30));
+        let collection = model.loaded().expect("collection");
+        let local_env = collection
+            .environments
+            .iter()
+            .find_map(|e| match e {
+                Ok(env) if env.name == "local" => Some(env),
+                _ => None,
+            })
+            .expect("local environment");
+
+        let stamp = FileStamp::capture(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/parser-cases/environments/local.bru"),
+        )
+        .expect("stamp");
+
+        let session = EnvironmentEditSession::new(
+            local_env.name.clone(),
+            local_env.path.clone(),
+            stamp,
+            local_env.variables.clone(),
+        );
+
+        assert_eq!(session.name, "local");
+        assert_eq!(session.cursor, 0);
+        assert_eq!(session.state, EnvironmentEditState::Select);
+        assert!(!session.dirty);
+        assert_eq!(session.variables, local_env.variables);
+        assert_eq!(session.variables.len(), 2);
+        assert_eq!(session.variables[0].key, "host");
+        assert_eq!(session.variables[0].value, "localhost:3000");
+        assert!(session.variables[0].enabled);
+        assert_eq!(session.variables[1].key, "debug");
+        assert_eq!(session.variables[1].value, "true");
+        assert!(!session.variables[1].enabled);
+    }
+
+    #[test]
+    fn environment_edit_session_input_commit_and_cancel() {
+        let stamp = FileStamp::capture(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/parser-cases/environments/local.bru"),
+        )
+        .expect("stamp");
+
+        let variables = vec![
+            KeyValue {
+                key: "host".into(),
+                value: "localhost".into(),
+                enabled: true,
+            },
+            KeyValue {
+                key: "debug".into(),
+                value: "true".into(),
+                enabled: false,
+            },
+        ];
+
+        let mut session = EnvironmentEditSession::new(
+            "local".into(),
+            PathBuf::from("environments/local.bru"),
+            stamp,
+            variables,
+        );
+
+        // Début de la saisie sur 'host'
+        assert!(session.begin_input());
+        assert!(
+            matches!(&session.state, EnvironmentEditState::Input(input) if input.text() == "localhost")
+        );
+        assert!(!session.dirty);
+
+        // Simulation de modification du texte
+        if let EnvironmentEditState::Input(input) = &mut session.state {
+            input.insert('8');
+        }
+        assert!(session.has_unsaved());
+
+        // Annulation de la saisie
+        session.cancel_input();
+        assert_eq!(session.state, EnvironmentEditState::Select);
+        assert_eq!(session.variables[0].value, "localhost");
+        assert!(!session.dirty);
+        assert!(!session.has_unsaved());
+
+        // Nouvelle saisie et validation
+        assert!(session.begin_input());
+        if let EnvironmentEditState::Input(input) = &mut session.state {
+            *input = TextInput::new("", false);
+            for c in "staging.example.com".chars() {
+                input.insert(c);
+            }
+        }
+        assert!(session.commit_input());
+        assert_eq!(session.state, EnvironmentEditState::Select);
+        assert_eq!(session.variables[0].value, "staging.example.com");
+        assert!(session.dirty);
+        assert!(session.has_unsaved());
+    }
+
+    #[test]
+    fn environment_edit_session_refuses_input_on_disabled_variable() {
+        let stamp = FileStamp::capture(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/parser-cases/environments/local.bru"),
+        )
+        .expect("stamp");
+
+        let variables = vec![
+            KeyValue {
+                key: "host".into(),
+                value: "localhost".into(),
+                enabled: true,
+            },
+            KeyValue {
+                key: "debug".into(),
+                value: "true".into(),
+                enabled: false,
+            },
+        ];
+
+        let mut session = EnvironmentEditSession::new(
+            "local".into(),
+            PathBuf::from("environments/local.bru"),
+            stamp,
+            variables,
+        );
+
+        // Curseur sur la variable désactivée 'debug'
+        session.cursor = 1;
+        assert_eq!(
+            session.current_variable().map(|v| v.key.as_str()),
+            Some("debug")
+        );
+
+        // begin_input doit refuser
+        assert!(!session.begin_input());
+        assert_eq!(session.state, EnvironmentEditState::Select);
+        assert!(!session.dirty);
     }
 }

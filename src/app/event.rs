@@ -11,7 +11,7 @@ use ratatui::crossterm::event::{self, Event};
 use tokio::sync::mpsc;
 
 use super::clipboard::ClipboardError;
-use super::model::SavedEdit;
+use super::model::{SavedEdit, SavedEnvironment};
 use crate::collection::{Collection, LoadError};
 use crate::runner;
 use crate::secrets::Resolved;
@@ -42,6 +42,11 @@ pub enum AppEvent {
     EditSaved {
         path: PathBuf,
         result: Result<SavedEdit, WriteError>,
+    },
+    /// Issue d'une écriture sur disque d'un environnement (`Command::SaveEnvironment`).
+    EnvironmentSaved {
+        path: PathBuf,
+        result: Result<SavedEnvironment, WriteError>,
     },
     /// Issue de la résolution des variables secrètes
     /// (`Command::ResolveSecrets`) pour la collection de racine `root`.

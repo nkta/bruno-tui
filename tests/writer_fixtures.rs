@@ -8,8 +8,8 @@ use std::sync::Mutex;
 
 use bruno_tui::collection::{BruFile, BruLoader, CollectionLoader, RequestView, TreeNode};
 use bruno_tui::writer::{
-    BruWriter, EditError, EntryProblem, EntrySection, FieldEdit, FileStamp, RequestWriter,
-    WriteError, preview,
+    BruWriter, EditError, EntryProblem, EntrySection, EnvironmentVarEdit, FieldEdit, FileStamp,
+    RequestWriter, WriteError, preview, write_environment,
 };
 
 fn cases() -> PathBuf {
@@ -682,6 +682,37 @@ fn one_refused_edit_cancels_the_whole_list() {
     ));
     assert_eq!(fs::read(&path).expect("relecture"), original);
     assert_eq!(dir_entries(&dir), ["duplicates.bru"]);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn environment_vars_edit_matches_after_fixture() {
+    let dir = workdir("env-vars");
+    let path = copy_case("environment-vars.bru", &dir);
+    let (ast, stamp) = load(&path);
+
+    let new_stamp = write_environment(
+        &path,
+        &ast,
+        &stamp,
+        &[EnvironmentVarEdit {
+            index: 0,
+            value: "staging.example.com:443".into(),
+        }],
+    )
+    .expect("écriture");
+
+    let expected = fs::read(cases().join("environment-vars.after.bru")).expect("fixture after");
+    let rewritten = fs::read(&path).expect("relecture");
+    assert_eq!(rewritten, expected);
+    assert_eq!(new_stamp, FileStamp::capture(&path).expect("instantané"));
+    assert_eq!(dir_entries(&dir), ["environment-vars.bru"]);
+
+    // Vérifier que la variable désactivée est préservée à l'octet près
+    let rewritten_text = String::from_utf8_lossy(&rewritten);
+    assert!(rewritten_text.contains("  ~debug: true\n"));
+    assert!(rewritten_text.contains("vars:secret [\n  token\n]\n"));
 
     let _ = fs::remove_dir_all(&dir);
 }

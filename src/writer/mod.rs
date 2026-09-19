@@ -12,11 +12,13 @@
 
 mod draft;
 mod edit;
+pub mod environment;
 mod error;
 mod format;
 mod query;
 
 pub use edit::{EntrySection, FieldEdit};
+pub use environment::{EnvironmentVarEdit, write_environment};
 pub use error::{EditError, EntryProblem, WriteError};
 
 use std::fs;
@@ -79,6 +81,45 @@ pub struct BruWriter;
 /// processus sur le même fichier.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Écrit des octets de manière atomique vers `path` si `stamp` correspond à la fraîcheur actuelle.
+pub(crate) fn write_atomic(
+    path: &Path,
+    stamp: &FileStamp,
+    bytes: &[u8],
+) -> Result<FileStamp, WriteError> {
+    let io_err = |source: io::Error| WriteError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+
+    let current = FileStamp::capture(path).map_err(io_err)?;
+    if current != *stamp {
+        return Err(WriteError::Stale {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let permissions = fs::metadata(path).map_err(io_err)?.permissions();
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_path = dir.join(format!(".{file_name}.tmp-{}-{counter}", std::process::id()));
+
+    let result = fs::write(&temp_path, bytes)
+        .and_then(|()| fs::set_permissions(&temp_path, permissions))
+        .and_then(|()| fs::rename(&temp_path, path));
+    if let Err(source) = result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(io_err(source));
+    }
+
+    FileStamp::capture(path).map_err(io_err)
+}
+
 impl RequestWriter for BruWriter {
     fn write_request(
         &self,
@@ -87,38 +128,8 @@ impl RequestWriter for BruWriter {
         stamp: &FileStamp,
         edits: &[FieldEdit],
     ) -> Result<FileStamp, WriteError> {
-        let io_err = |source: io::Error| WriteError::Io {
-            path: path.to_path_buf(),
-            source,
-        };
-
-        let current = FileStamp::capture(path).map_err(io_err)?;
-        if current != *stamp {
-            return Err(WriteError::Stale {
-                path: path.to_path_buf(),
-            });
-        }
-
         let bytes = format::serialize(ast, edits)?;
-        let permissions = fs::metadata(path).map_err(io_err)?.permissions();
-
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_path = dir.join(format!(".{file_name}.tmp-{}-{counter}", std::process::id()));
-
-        let result = fs::write(&temp_path, &bytes)
-            .and_then(|()| fs::set_permissions(&temp_path, permissions))
-            .and_then(|()| fs::rename(&temp_path, path));
-        if let Err(source) = result {
-            let _ = fs::remove_file(&temp_path);
-            return Err(io_err(source));
-        }
-
-        FileStamp::capture(path).map_err(io_err)
+        write_atomic(path, stamp, &bytes)
     }
 }
 

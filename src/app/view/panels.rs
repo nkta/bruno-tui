@@ -12,7 +12,8 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use super::{inner, panel, theme};
 use crate::app::diagnostics::diagnostics;
 use crate::app::model::{
-    Focus, HistoryEntry, HistoryOutcome, Model, SecretError, SecretInput, secret_rows,
+    EnvironmentEditSession, EnvironmentEditState, Focus, HistoryEntry, HistoryOutcome, Model,
+    SecretError, SecretInput, secret_rows,
 };
 use crate::secrets::SecretSource;
 
@@ -100,15 +101,30 @@ pub fn render_history(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
+const DISABLED_ENTRY_VALUE: Style =
+    Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC));
+
 /// Dessine le panneau plein corps de sélection d'environnement : « Aucun »
 /// puis les entrées de `Collection.environments`, une en erreur marquée
 /// et non mise en valeur comme sélectionnable.
+/// Si une session d'édition d'environnement est ouverte, affiche ses variables.
 pub fn render_environment_picker(model: &Model, frame: &mut Frame, area: Rect) {
     let block = panel(" Environnement ", model.focus == Focus::EnvironmentPicker);
     let Some(collection) = model.loaded() else {
         frame.render_widget(Paragraph::new("aucune collection").block(block), area);
         return;
     };
+
+    if let Some(session) = &model.environment_editing {
+        render_environment_variables(
+            session,
+            model.focus == Focus::EnvironmentPicker,
+            frame,
+            area,
+        );
+        return;
+    }
+
     let mut items = vec![environment_item_line(
         None,
         model.current_environment.is_none(),
@@ -132,6 +148,76 @@ pub fn render_environment_picker(model: &Model, frame: &mut Frame, area: Rect) {
         area,
         &mut list_state,
     );
+}
+
+fn render_environment_variables(
+    session: &EnvironmentEditSession,
+    has_focus: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let block = panel(" Environnement ", has_focus);
+    if session.variables.is_empty() {
+        frame.render_widget(
+            empty_state_message(area, "aucune variable").block(block),
+            area,
+        );
+        return;
+    }
+    let is_editing = matches!(session.state, EnvironmentEditState::Input(_));
+    let items: Vec<ListItem> = session
+        .variables
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let key_span = Span::styled(format!("  {}: ", entry.key), theme::LABEL);
+            let val_span = if index == session.cursor && is_editing {
+                if let EnvironmentEditState::Input(input) = &session.state {
+                    Span::raw(input.text().to_owned())
+                } else {
+                    Span::raw(entry.value.clone())
+                }
+            } else if entry.enabled {
+                Span::raw(entry.value.clone())
+            } else {
+                Span::styled(format!("{} (désactivé)", entry.value), DISABLED_ENTRY_VALUE)
+            };
+            ListItem::new(Line::from(vec![key_span, val_span]))
+        })
+        .collect();
+
+    let selected = Some(
+        session
+            .cursor
+            .min(session.variables.len().saturating_sub(1)),
+    );
+    let mut list_state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        area,
+        &mut list_state,
+    );
+
+    if let EnvironmentEditState::Input(input) = &session.state {
+        let inner_area = inner(area);
+        if inner_area.width > 0 && inner_area.height > 0 {
+            let rel_y = session.cursor as u16;
+            if rel_y < inner_area.height {
+                let cursor_y = inner_area.y + rel_y;
+                let prefix = format!("  {}: ", session.variables[session.cursor].key);
+                let prefix_width =
+                    u16::try_from(Line::raw(prefix.as_str()).width()).unwrap_or(u16::MAX);
+                let text_before = input.text_before_cursor_on_line();
+                let text_width =
+                    u16::try_from(Line::raw(text_before.as_str()).width()).unwrap_or(u16::MAX);
+                let max_col = inner_area.width.saturating_sub(1);
+                let cursor_x = inner_area.x + (prefix_width + text_width).min(max_col);
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
+        }
+    }
 }
 
 /// Dessine le panneau plein corps des variables secrètes : bandeau

@@ -1,5 +1,6 @@
 {
   "version": "1",
   "name": "writer-cases",
-  "type": "collection"
+  "type": "collection",
+  "ignore": ["environment-vars.bru", "environment-vars.after.bru"]
 }
