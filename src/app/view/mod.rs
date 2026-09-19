@@ -603,6 +603,10 @@ fn status_line(model: &Model) -> String {
             "↑↓ défiler  Début/Fin  Entrée éditer  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
                 .to_owned()
         }
+        (CollectionState::Loaded(_), Focus::Response) => {
+            "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
+                .to_owned()
+        }
         (CollectionState::Loaded(_), Focus::Diagnostics) => {
             "↑↓ naviguer  → aller au nœud  Échap arbre".to_owned()
         }
@@ -1505,6 +1509,21 @@ mod tests {
         let status = &lines[29];
         assert!(
             status.contains("↑↓ naviguer  Entrée activer  e éditer  Échap arbre"),
+            "{status}"
+        );
+
+        // Le panneau Réponse a longtemps manqué son propre rappel de
+        // touches (bug contre `tui-shell` : « une barre d'état rappelant
+        // les touches utiles au focus courant »). Ligne plus longue que
+        // 100 colonnes : rendue à une largeur qui l'accueille sans
+        // troncature.
+        model.focus = Focus::Response;
+        let lines = render(&model, 130, 30);
+        let status = &lines[29];
+        assert!(
+            status.contains(
+                "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
+            ),
             "{status}"
         );
     }
