@@ -514,8 +514,9 @@ async fn environment_editing_flow_saves_to_disk_and_secrets_never_appear() {
     sender.send(key(KeyCode::Char('E'))).await.expect("send");
     // 2. Descendre sur 'staging'
     sender.send(key(KeyCode::Down)).await.expect("send");
-    // 3. Entrée pour ouvrir les variables
-    sender.send(key(KeyCode::Enter)).await.expect("send");
+    // 3. 'e' pour ouvrir le popup d'édition
+    // (`add-environment-panel-and-edit-popup`).
+    sender.send(key(KeyCode::Char('e'))).await.expect("send");
 
     // 4. Entrée pour éditer la variable 'host'
     sender.send(key(KeyCode::Enter)).await.expect("send");

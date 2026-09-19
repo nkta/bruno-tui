@@ -205,6 +205,10 @@ pub struct MouseState {
     /// Capture effectivement appliquée au terminal.
     pub capture: bool,
     pub drag: Option<Drag>,
+    /// Horodatage et indice de la dernière entrée cliquée dans le panneau
+    /// Environnement, pour détecter un double-clic
+    /// (`add-environment-panel-and-edit-popup`, design D4).
+    pub last_environment_click: Option<(std::time::Instant, usize)>,
 }
 
 /// Session d'édition d'une requête, superposée au focus Détail.

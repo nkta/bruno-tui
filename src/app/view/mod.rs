@@ -28,8 +28,11 @@ use crate::collection::TreeNode;
 /// MIN_DETAIL_WIDTH + MIN_RESPONSE_WIDTH`), pour qu'à cette taille chaque
 /// panneau soit exactement à son plancher, sans marge (`design.md`, D4).
 pub const MIN_WIDTH: u16 = 60;
-/// Hauteur minimale du terminal.
-pub const MIN_HEIGHT: u16 = 10;
+/// Hauteur minimale du terminal : assez pour que le panneau Réponse
+/// garde au moins une ligne intérieure sous les formes compactes
+/// d'Environnement et de Statut empilées au-dessus
+/// (`add-environment-panel-and-edit-popup`).
+pub const MIN_HEIGHT: u16 = 11;
 /// Largeur minimale du panneau de l'arbre.
 const MIN_TREE_WIDTH: u16 = 24;
 /// Largeur minimale du panneau de détail.
@@ -44,8 +47,16 @@ const STATUS_PANEL_COMPACT_HEIGHT: u16 = 3;
 /// Hauteur de terminal à partir de laquelle le panneau Statut prend sa
 /// forme complète (`status-panel`, `design.md` D3).
 const STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT: u16 = 20;
+/// Hauteur du panneau Environnement en forme complète (4 lignes
+/// intérieures), fixe et indépendante du nombre d'environnements —
+/// `layout()` reste une fonction de géométrie pure, indépendante du
+/// modèle (`add-environment-panel-and-edit-popup`, design D1).
+const ENV_PANEL_HEIGHT: u16 = 6;
+/// Hauteur du panneau Environnement en forme compacte (1 ligne
+/// intérieure).
+const ENV_PANEL_COMPACT_HEIGHT: u16 = 3;
 
-const TOO_SMALL: &str = "Terminal trop petit : agrandir à 60×10 au moins.";
+const TOO_SMALL: &str = "Terminal trop petit : agrandir à 60×11 au moins.";
 
 /// Zones de l'écran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +66,9 @@ pub struct Areas {
     pub body: Rect,
     pub tree: Rect,
     pub detail: Rect,
+    /// Panneau Environnement, permanent, au-dessus du panneau Statut,
+    /// même largeur (`add-environment-panel-and-edit-popup`).
+    pub environment: Rect,
     /// Panneau Statut, au-dessus de la réponse, même largeur.
     pub response_status: Rect,
     /// Panneau Réponse, sous le panneau Statut.
@@ -67,6 +81,11 @@ impl Areas {
     /// Vrai si le panneau Statut est en forme compacte.
     pub fn status_panel_compact(&self) -> bool {
         self.response_status.height < STATUS_PANEL_HEIGHT
+    }
+
+    /// Vrai si le panneau Environnement est en forme compacte.
+    pub fn environment_panel_compact(&self) -> bool {
+        self.environment.height < ENV_PANEL_HEIGHT
     }
 }
 
@@ -82,22 +101,35 @@ pub fn layout(area: Rect) -> Option<Areas> {
     let detail_width = (remaining * 50 / 100).max(MIN_DETAIL_WIDTH);
     let response_width = (remaining - detail_width).max(MIN_RESPONSE_WIDTH);
     let response_x = body.x + tree_width + detail_width;
-    let status_panel_height = if area.height >= STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT {
+    let full_size = area.height >= STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT;
+    let status_panel_height = if full_size {
         STATUS_PANEL_HEIGHT
     } else {
         STATUS_PANEL_COMPACT_HEIGHT
     };
+    let env_panel_height = if full_size {
+        ENV_PANEL_HEIGHT
+    } else {
+        ENV_PANEL_COMPACT_HEIGHT
+    };
+    let response_y = body.y + env_panel_height + status_panel_height;
     Some(Areas {
         title: Rect::new(area.x, area.y, area.width, 1),
         body,
         tree: Rect::new(body.x, body.y, tree_width, body_height),
         detail: Rect::new(body.x + tree_width, body.y, detail_width, body_height),
-        response_status: Rect::new(response_x, body.y, response_width, status_panel_height),
+        environment: Rect::new(response_x, body.y, response_width, env_panel_height),
+        response_status: Rect::new(
+            response_x,
+            body.y + env_panel_height,
+            response_width,
+            status_panel_height,
+        ),
         response: Rect::new(
             response_x,
-            body.y + status_panel_height,
+            response_y,
             response_width,
-            body_height - status_panel_height,
+            body_height.saturating_sub(env_panel_height + status_panel_height),
         ),
         status: Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     })
@@ -184,16 +216,25 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     }
                 }
                 render_insert_cursor(model, frame, areas.detail);
+                // Panneau Environnement : permanent, dans sa propre zone
+                // de la mise en page (`add-environment-panel-and-edit-popup`),
+                // plus une superposition en coin.
+                panels::render_environment_picker(model, frame, areas.environment);
                 render_status_panel(model, frame, &areas);
                 render_response(model, frame, areas.response);
 
-                // Menu déroulant Environnement : superposé en haut à droite,
-                // par-dessus le corps normal déjà dessiné ci-dessus, sans le
-                // remplacer (`redesign-environment-picker-as-dropdown`).
-                if model.focus == Focus::EnvironmentPicker {
-                    let dropdown_area = environment_dropdown_area(frame.area(), model);
-                    frame.render_widget(Clear, dropdown_area);
-                    panels::render_environment_picker(model, frame, dropdown_area);
+                // Popup d'édition d'un environnement : superposé au centre
+                // de l'écran, par-dessus tout le reste déjà dessiné
+                // ci-dessus (`add-environment-panel-and-edit-popup`).
+                if let Some(session) = &model.environment_editing {
+                    let popup_area = environment_edit_popup_area(frame.area(), session);
+                    frame.render_widget(Clear, popup_area);
+                    panels::render_environment_edit_popup(
+                        session,
+                        model.focus == Focus::EnvironmentPicker,
+                        frame,
+                        popup_area,
+                    );
                 }
             }
         },
@@ -205,32 +246,22 @@ pub fn view(model: &Model, frame: &mut Frame) {
     );
 }
 
-/// Nombre de lignes de contenu (hors bordure) qu'afficherait le menu
-/// déroulant Environnement pour l'état courant du modèle : les variables
-/// de l'environnement ouvert au drill-down, sinon « Aucun » plus une
-/// ligne par environnement de la collection.
-fn environment_dropdown_item_count(model: &Model) -> u16 {
-    let count = if let Some(session) = &model.environment_editing {
-        session.variables.len().max(1)
-    } else if let Some(collection) = model.loaded() {
-        1 + collection.environments.len()
-    } else {
-        1
-    };
-    u16::try_from(count).unwrap_or(u16::MAX)
-}
-
-/// Zone du menu déroulant Environnement : ancré en haut à droite de
-/// `screen`, sous la ligne de titre, jamais hors de l'écran
-/// (`redesign-environment-picker-as-dropdown`, design D2).
-fn environment_dropdown_area(screen: Rect, model: &Model) -> Rect {
-    let width = (screen.width / 3).clamp(28, 44).min(screen.width);
-    let max_height = screen.height.saturating_sub(4).max(3);
-    let height = environment_dropdown_item_count(model)
-        .saturating_add(2)
-        .clamp(3, max_height);
-    let x = screen.x + screen.width.saturating_sub(width);
-    let y = screen.y + 1;
+/// Zone du popup d'édition d'un environnement : centrée sur `screen`,
+/// dimensionnée au nombre de variables (largeur/hauteur bornées à
+/// l'écran), jamais hors de l'écran
+/// (`add-environment-panel-and-edit-popup`, design D3).
+pub(crate) fn environment_edit_popup_area(
+    screen: Rect,
+    session: &crate::app::model::EnvironmentEditSession,
+) -> Rect {
+    let width = (screen.width / 2).clamp(36, 60).min(screen.width);
+    let max_height = screen.height.saturating_sub(4).max(4);
+    // En-tête de colonnes (1) + une ligne par variable (au moins 1 pour
+    // « aucune variable ») + bordure (2).
+    let content_rows = u16::try_from(session.variables.len().max(1)).unwrap_or(u16::MAX);
+    let height = content_rows.saturating_add(3).clamp(4, max_height);
+    let x = screen.x + screen.width.saturating_sub(width) / 2;
+    let y = screen.y + screen.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
 }
 
@@ -579,7 +610,7 @@ fn status_line(model: &Model) -> String {
             "↑↓ naviguer  r rejouer  Échap arbre".to_owned()
         }
         (CollectionState::Loaded(_), Focus::EnvironmentPicker) => {
-            "↑↓ naviguer  Entrée choisir  Échap annuler".to_owned()
+            "↑↓ naviguer  Entrée activer  e éditer  Échap arbre".to_owned()
         }
         (CollectionState::Loaded(_), Focus::Secrets) => secrets_hint(model).to_owned(),
         _ => "q quitter".to_owned(),
@@ -784,8 +815,8 @@ mod tests {
     #[test]
     fn layout_respects_minimums() {
         assert_eq!(layout_for((59, 30)), None);
-        assert_eq!(layout_for((100, 9)), None);
-        let areas = layout_for((60, 10)).expect("taille minimale");
+        assert_eq!(layout_for((100, 10)), None);
+        let areas = layout_for((60, 11)).expect("taille minimale");
         assert_eq!(areas.tree.width, MIN_TREE_WIDTH);
         assert_eq!(areas.detail.width, MIN_DETAIL_WIDTH);
         assert_eq!(areas.response.width, MIN_RESPONSE_WIDTH);
@@ -793,36 +824,51 @@ mod tests {
             areas.tree.width + areas.detail.width + areas.response.width,
             60
         );
-        assert_eq!(areas.tree.height, 8);
-        // Panneau Statut compact au-dessus d'une réponse qui garde au
-        // moins une ligne intérieure (`status-panel`).
+        assert_eq!(areas.tree.height, 9);
+        // Environnement et Statut compacts, empilés au-dessus d'une
+        // réponse qui garde au moins une ligne intérieure
+        // (`status-panel`, `add-environment-panel-and-edit-popup`).
+        assert_eq!(areas.environment.height, 3);
         assert_eq!(areas.response_status.height, 3);
-        assert_eq!(areas.response.height, 5);
+        assert_eq!(areas.response.height, 3);
         assert!(inner(areas.response).height >= 1);
         assert!(areas.status_panel_compact());
+        assert!(areas.environment_panel_compact());
     }
 
     #[test]
     fn status_panel_is_stacked_above_the_response() {
-        for (size, status_height) in [
-            ((60, 10), 3),
-            ((100, 19), 3),
-            ((100, 20), 5),
-            ((100, 30), 5),
+        for (size, env_height, status_height) in [
+            ((60, 11), 3, 3),
+            ((100, 19), 3, 3),
+            ((100, 20), 6, 5),
+            ((100, 30), 6, 5),
         ] {
             let areas = layout_for(size).expect("taille suffisante");
-            let (status, response) = (areas.response_status, areas.response);
+            let (env, status, response) =
+                (areas.environment, areas.response_status, areas.response);
+            assert_eq!(env.height, env_height, "{size:?}");
             assert_eq!(status.height, status_height, "{size:?}");
             assert_eq!(status.height == 3, areas.status_panel_compact(), "{size:?}");
+            assert_eq!(
+                env.height == 3,
+                areas.environment_panel_compact(),
+                "{size:?}"
+            );
+            assert_eq!((env.x, env.width), (status.x, status.width), "{size:?}");
             assert_eq!(
                 (status.x, status.width),
                 (response.x, response.width),
                 "{size:?}"
             );
-            assert_eq!(status.y, areas.body.y, "{size:?}");
+            // Environnement, en haut de la colonne, puis Statut, puis
+            // Réponse, empilés sans recouvrement
+            // (`add-environment-panel-and-edit-popup`).
+            assert_eq!(env.y, areas.body.y, "{size:?}");
+            assert_eq!(status.y, env.bottom(), "{size:?}");
             assert_eq!(response.y, status.bottom(), "{size:?}");
             assert_eq!(
-                status.height + response.height,
+                env.height + status.height + response.height,
                 areas.body.height,
                 "{size:?}"
             );
@@ -1458,7 +1504,7 @@ mod tests {
         let lines = render(&model, 100, 30);
         let status = &lines[29];
         assert!(
-            status.contains("↑↓ naviguer  Entrée choisir  Échap annuler"),
+            status.contains("↑↓ naviguer  Entrée activer  e éditer  Échap arbre"),
             "{status}"
         );
     }
@@ -1466,83 +1512,45 @@ mod tests {
     /// La fixture `parser-cases/environments/` porte, dans l'ordre
     /// alphabétique : `local` (valide), `malformed` (en erreur),
     /// `staging` (valide).
+    /// La fixture `parser-cases/environments/` porte, dans l'ordre
+    /// alphabétique : `local` (valide), `malformed` (en erreur),
+    /// `staging` (valide).
     #[test]
-    fn environment_picker_panel_and_permanent_indicator() {
+    fn environment_panel_permanent_and_indicator() {
         let mut model = loaded_model((100, 30));
 
-        // Indicateur permanent : « Aucun » par défaut, panneau fermé
-        let screen = render(&model, 100, 30).join("\n");
-        assert!(screen.contains("Aucun environnement"), "{screen}");
-        assert!(!screen.contains("Environnement"), "{screen}");
-
-        // Panneau ouvert : menu déroulant en haut à droite, superposé au
-        // corps normal (`redesign-environment-picker-as-dropdown`) — le
-        // reste de l'écran (arbre, détail) reste visible derrière.
-        model.focus = Focus::EnvironmentPicker;
+        // Toujours visible, focus sur l'arbre : le panneau Environnement
+        // n'est plus caché tant qu'il n'a pas le focus
+        // (`add-environment-panel-and-edit-popup`).
         let lines = render(&model, 100, 30);
         let screen = lines.join("\n");
+        assert!(screen.contains("Aucun environnement"), "{screen}");
         assert!(screen.contains("Environnement"), "{screen}");
         assert!(screen.contains("Aucun"), "{screen}");
         assert!(screen.contains("local"), "{screen}");
         assert!(screen.contains("staging"), "{screen}");
-        // Le menu est étroit (largeur bornée à 44 colonnes) : l'entrée en
-        // erreur, plus longue, est tronquée mais reste reconnaissable.
         assert!(
             screen.contains("malformed.bru"),
             "entrée en erreur non marquée : {screen}"
         );
+        // L'arbre et le détail restent visibles, dans la même zone.
         assert!(
             lines[1].contains("Collection") && lines[1].contains("Détail"),
-            "l'arbre et le détail doivent rester visibles derrière le menu : {}",
+            "{}",
             lines[1]
         );
+        let areas = layout_for((100, 30)).expect("layout");
+        assert!(
+            areas.environment.y < areas.response_status.y
+                && areas.response_status.y < areas.response.y,
+            "{areas:?}"
+        );
 
-        // Le coin du menu est bien dessiné à la position calculée : le
-        // corps dessiné dessous ne transparaît pas à travers (`Clear`).
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
-        terminal.draw(|frame| view(&model, frame)).expect("rendu");
-        let dropdown = environment_dropdown_area(Rect::new(0, 0, 100, 30), &model);
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(dropdown.x, dropdown.y)].symbol(), "┌");
-
-        // Indicateur mis à jour après sélection
+        // Indicateur mis à jour après sélection, panneau toujours affiché.
         model.current_environment = Some("staging".into());
-        model.focus = Focus::Tree;
         let screen = render(&model, 100, 30).join("\n");
         assert!(screen.contains("staging"), "{screen}");
         assert!(!screen.contains("Aucun environnement"), "{screen}");
-    }
-
-    /// La zone du menu déroulant Environnement reste toujours dans les
-    /// limites de l'écran, y compris au plancher `MIN_WIDTH`/`MIN_HEIGHT`
-    /// (`redesign-environment-picker-as-dropdown`, design D2).
-    #[test]
-    fn environment_dropdown_area_stays_within_screen_bounds() {
-        let mut model = loaded_model((100, 30));
-
-        for (width, height) in [(MIN_WIDTH, MIN_HEIGHT), (100, 30), (240, 60)] {
-            let screen = Rect::new(0, 0, width, height);
-
-            // Liste des environnements (pas de drill-down).
-            let area = environment_dropdown_area(screen, &model);
-            assert!(
-                area.x + area.width <= screen.width && area.y + area.height <= screen.height,
-                "liste hors écran à {width}x{height} : {area:?}"
-            );
-            assert!(area.width > 0 && area.height > 0, "{area:?}");
-
-            // Vue des variables (davantage de lignes potentielles).
-            model.focus = Focus::EnvironmentPicker;
-            model.environment_selected = 1;
-            update(&mut model, Message::Enter);
-            let area = environment_dropdown_area(screen, &model);
-            assert!(
-                area.x + area.width <= screen.width && area.y + area.height <= screen.height,
-                "variables hors écran à {width}x{height} : {area:?}"
-            );
-            model.environment_editing = None;
-        }
     }
 
     /// La bordure d'un panneau porte `theme::BORDER` sans focus,
@@ -1786,16 +1794,17 @@ mod tests {
 
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
-        for focus in [
-            Focus::History,
-            Focus::Diagnostics,
-            Focus::EnvironmentPicker,
-            Focus::Secrets,
-        ] {
+        for focus in [Focus::History, Focus::Diagnostics, Focus::Secrets] {
             model.focus = focus;
             let screen = render(&model, 100, 30).join("\n");
             assert!(!screen.contains(" Statut "), "{focus:?} :\n{screen}");
         }
+
+        // Le panneau Environnement étant permanent, il ne masque plus
+        // Statut (`add-environment-panel-and-edit-popup`).
+        model.focus = Focus::EnvironmentPicker;
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains(" Statut "), "{screen}");
 
         let loading = Model::new(fixture(), (100, 30));
         let screen = render(&loading, 100, 30).join("\n");
@@ -1830,9 +1839,9 @@ mod tests {
 
         let mut model = runner_probe_model();
         select(&mut model, "json.bru");
-        model.size = (60, 10);
-        let lines = render(&model, 60, 10);
-        let areas = layout_for((60, 10)).expect("layout");
+        model.size = (60, 11);
+        let lines = render(&model, 60, 11);
+        let areas = layout_for((60, 11)).expect("layout");
         let status = region(&lines, areas.response_status);
         assert!(status[1].contains(" 200 "), "{status:?}");
         let response = region(&lines, areas.response);
@@ -2068,40 +2077,52 @@ mod tests {
     }
 
     #[test]
-    fn environment_variables_view_rendering_and_cursor() {
+    fn environment_edit_popup_rendering_and_cursor() {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 1;
-        update(&mut model, Message::Enter);
-        assert!(model.environment_editing.is_some());
+        // `e` (StartEdit) ouvre désormais le popup — `Entrée` active
+        // l'environnement (`add-environment-panel-and-edit-popup`).
+        update(&mut model, Message::StartEdit);
+        let session = model.environment_editing.as_ref().expect("popup ouvert");
+        assert_eq!(session.name, "local");
 
-        // Rendu en mode sélection
+        // Rendu en tableau à deux colonnes : en-tête, puis une ligne par
+        // variable, désactivée marquée.
         let lines = render(&model, 100, 30);
         let content = lines.join("\n");
-        assert!(content.contains("host: localhost:3000"), "{content}");
-        assert!(content.contains("debug: true (désactivé)"), "{content}");
+        assert!(content.contains("Clé"), "{content}");
+        assert!(content.contains("Valeur"), "{content}");
+        assert!(
+            content.contains("host") && content.contains("localhost:3000"),
+            "{content}"
+        );
+        assert!(
+            content.contains("debug") && content.contains("true (désactivé)"),
+            "{content}"
+        );
 
-        // Passer en mode saisie
-        update(&mut model, Message::StartEdit);
+        // Passer en mode saisie (Entrée, sur la variable sous le curseur).
+        update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('!')));
 
         let lines = render(&model, 100, 30);
         let content = lines.join("\n");
         assert!(content.contains("localhost:3000!"), "{content}");
 
-        // Vérification de la position du curseur, relative au menu
-        // déroulant (`redesign-environment-picker-as-dropdown`) : ancré en
-        // haut à droite, pas à l'origine de l'écran.
+        // Vérification de la position du curseur, relative au popup
+        // centré (`add-environment-panel-and-edit-popup`, design D3).
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("curseur");
-        let dropdown = environment_dropdown_area(Rect::new(0, 0, 100, 30), &model);
-        // Bordure du menu (+1), puis la première variable sur la ligne 0
-        // de son contenu (+0).
-        assert_eq!(cursor.y, dropdown.y + 1);
-        // Préfixe "  host: " (largeur 8) puis "localhost:3000!" (largeur 15).
-        assert_eq!(cursor.x, dropdown.x + 1 + 8 + 15);
+        let session = model.environment_editing.as_ref().expect("popup ouvert");
+        let popup = environment_edit_popup_area(Rect::new(0, 0, 100, 30), session);
+        // Bordure (+1) puis l'en-tête (+1) puis `host`, premier de la liste.
+        assert_eq!(cursor.y, popup.y + 2);
+        // Clé la plus longue « debug » (5) détermine la largeur de colonne,
+        // suivie de « │ » (3) puis « localhost:3000! » (15).
+        assert_eq!(cursor.x, popup.x + 1 + 5 + 3 + 15);
     }
 
     #[test]
@@ -2109,7 +2130,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 1;
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
 
         // En mode sélection
         let line = status_line(&model);

@@ -4,6 +4,7 @@
 //! aucune I/O : le chargement et le rendu sont pilotés par la boucle.
 
 use std::ops::RangeInclusive;
+use std::time::{Duration, Instant};
 
 use super::filter::{FilterState, evaluate};
 use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
@@ -22,13 +23,14 @@ use super::view::detail::{
 use super::view::hit::{DragRow, Hit, drag_row, hit_test};
 use super::view::{
     detail::{detail_text, response_text},
-    inner, layout_for,
+    environment_edit_popup_area, inner, layout_for,
 };
 use crate::collection::TreeNode;
 use crate::runner::report::ResponseStatus;
 use crate::runner::{RunRequest, SecretString};
 use crate::secrets::{SecretLookup, is_valid_name};
 use crate::writer::{EntrySection, FieldEdit, FileStamp};
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 /// Effet demandé par `update`, à exécuter par la boucle `run`, qui seule
@@ -419,10 +421,12 @@ pub fn update(model: &mut Model, message: Message) -> Command {
         Message::StartEdit => {
             if model.focus == Focus::Detail {
                 start_edit(model);
-            } else if model.focus == Focus::EnvironmentPicker
-                && let Some(session) = &mut model.environment_editing
-            {
-                session.begin_input();
+            } else if model.focus == Focus::EnvironmentPicker {
+                if let Some(session) = &mut model.environment_editing {
+                    session.begin_input();
+                } else {
+                    open_environment_editing(model, model.environment_selected);
+                }
             }
             Command::None
         }
@@ -1989,15 +1993,14 @@ fn navigate_environment_picker(model: &mut Model, message: Message) {
         Message::Down => model.environment_selected = (before + 1).min(count - 1),
         Message::Home => model.environment_selected = 0,
         Message::End => model.environment_selected = count - 1,
-        Message::Right => select_environment_picker(model, before),
-        Message::Enter => open_environment_editing(model, before),
+        Message::Right | Message::Enter => select_environment_picker(model, before),
         _ => {}
     }
 }
 
-/// `Entrée` sur une entrée valide de la liste : ouvre la session d'édition
-/// des variables de l'environnement, sans effet sur « Aucun » ni sur une
-/// entrée en erreur.
+/// `e` sur une entrée valide de la liste : ouvre le popup d'édition des
+/// variables de l'environnement, sans effet sur « Aucun » ni sur une
+/// entrée en erreur (`add-environment-panel-and-edit-popup`).
 fn open_environment_editing(model: &mut Model, index: usize) {
     if index == 0 {
         return;
@@ -2020,10 +2023,11 @@ fn open_environment_editing(model: &mut Model, index: usize) {
     ));
 }
 
-/// `Entrée` sur l'entrée courante du panneau : devient l'environnement
-/// courant et referme le panneau, sauf si l'entrée est en erreur ou hors
-/// limites (sans effet, cf. spec « Environnement invalide non
-/// sélectionnable »).
+/// `Entrée` ou `Droite` sur l'entrée courante du panneau : devient
+/// l'environnement courant, sans changer le focus (le panneau est
+/// permanent — `add-environment-panel-and-edit-popup`) ; sans effet si
+/// l'entrée est en erreur ou hors limites (cf. spec « Environnement
+/// invalide non sélectionnable »).
 fn select_environment_picker(model: &mut Model, index: usize) {
     let Some(collection) = model.loaded() else {
         return;
@@ -2033,7 +2037,6 @@ fn select_environment_picker(model: &mut Model, index: usize) {
     };
     let name = name_opt.map(str::to_owned);
     model.current_environment = name;
-    model.focus = Focus::Tree;
 }
 
 /// Navigation croisée depuis le panneau de diagnostics vers l'arbre :
@@ -2319,7 +2322,10 @@ fn mouse_accepted(model: &Model) -> bool {
             model.text_capture(),
             None | Some(TextCapture::Input) | Some(TextCapture::MethodPicker)
         )
-        && matches!(model.focus, Focus::Tree | Focus::Detail | Focus::Response)
+        && matches!(
+            model.focus,
+            Focus::Tree | Focus::Detail | Focus::Response | Focus::EnvironmentPicker
+        )
         && model.loaded().is_some()
         && layout_for(model.size).is_some()
 }
@@ -2357,6 +2363,21 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
         .is_some_and(|s| matches!(s.state, EditState::MethodPicker { .. }))
     {
         cancel_input(model);
+        return;
+    }
+    // Panneau Environnement (permanent) et popup d'édition : résolution
+    // de clic auto-contenue, comme le sélecteur de méthode, plutôt
+    // qu'intégrée à `hit_test` (`add-environment-panel-and-edit-popup`,
+    // design D6). Vérifiée avant `hit_test` : un popup ouvert capture le
+    // clic même si sa zone recouvre l'arbre/le détail dessinés dessous.
+    if model.environment_editing.is_some() {
+        environment_popup_mouse_press(model, input);
+        return;
+    }
+    if let Some(areas) = layout_for(model.size)
+        && let Some(index) = environment_panel_row_at(areas.environment, input)
+    {
+        environment_panel_mouse_press(model, index);
         return;
     }
     // Cible calculée avant toute validation : elle correspond à l'écran
@@ -2401,6 +2422,86 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
             });
         }
     }
+}
+
+/// Délai maximal entre deux clics sur la même entrée du panneau
+/// Environnement pour qu'ils comptent comme un double-clic
+/// (`add-environment-panel-and-edit-popup`, design D4).
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
+
+/// Ligne de la liste du panneau Environnement sous `row`, ou `None` hors
+/// de la zone intérieure (résolution par position, sans tenir compte
+/// d'un éventuel défilement interne — design D6).
+fn environment_panel_row_at(area: Rect, input: MouseInput) -> Option<usize> {
+    let inner_area = inner(area);
+    if input.column < inner_area.x
+        || input.column >= inner_area.x + inner_area.width
+        || input.row < inner_area.y
+        || input.row >= inner_area.y + inner_area.height
+    {
+        return None;
+    }
+    Some(usize::from(input.row - inner_area.y))
+}
+
+/// Clic gauche sur la ligne `index` du panneau Environnement (aucun
+/// popup ouvert) : donne le focus au panneau, active l'entrée comme le
+/// ferait `Entrée`, et ouvre en plus le popup d'édition si c'est un
+/// double-clic sur la même entrée (`add-environment-panel-and-edit-popup`,
+/// design D4).
+fn environment_panel_mouse_press(model: &mut Model, index: usize) {
+    model.focus = Focus::EnvironmentPicker;
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    let count = 1 + collection.environments.len();
+    if index >= count {
+        return;
+    }
+    model.environment_selected = index;
+    select_environment_picker(model, index);
+
+    let now = Instant::now();
+    let is_double_click = model
+        .mouse
+        .last_environment_click
+        .is_some_and(|(time, clicked)| {
+            clicked == index && now.saturating_duration_since(time) < DOUBLE_CLICK_WINDOW
+        });
+    model.mouse.last_environment_click = Some((now, index));
+    if is_double_click {
+        open_environment_editing(model, index);
+    }
+}
+
+/// Clic gauche dans le popup d'édition d'un environnement : démarre la
+/// saisie de la valeur cliquée si elle est activée, comme le clic sur un
+/// en-tête de requête (`mouse-support`). Une saisie déjà en cours sur une
+/// autre variable est d'abord validée, y compris si le clic ne démarre
+/// pas de nouvelle saisie (hors du tableau, sur l'en-tête, ou sur une
+/// variable désactivée) — même règle que « Clic pendant une session
+/// d'édition » pour une requête.
+fn environment_popup_mouse_press(model: &mut Model, input: MouseInput) {
+    let Some(session) = &mut model.environment_editing else {
+        return;
+    };
+    if matches!(session.state, EnvironmentEditState::Input(_)) {
+        session.commit_input();
+    }
+    let popup = environment_edit_popup_area(Rect::new(0, 0, model.size.0, model.size.1), session);
+    let Some(row) = environment_panel_row_at(popup, input) else {
+        return;
+    };
+    // La première ligne intérieure est l'en-tête de colonnes, jamais
+    // sélectionnable.
+    let Some(index) = row.checked_sub(1) else {
+        return;
+    };
+    if !session.variables.get(index).is_some_and(|v| v.enabled) {
+        return;
+    }
+    session.cursor = index;
+    session.begin_input();
 }
 
 /// Clic sur une ligne de l'arbre : sélection, ou dépliage/repli du dossier
@@ -3266,26 +3367,41 @@ mod tests {
     fn selecting_none_valid_or_invalid_environment_entry() {
         let mut model = loaded_model((100, 30));
 
-        // « Aucun » (indice 0) : ferme le panneau, environnement courant None
+        // « Aucun » (indice 0) : environnement courant None, le focus ne
+        // change pas — le panneau est permanent
+        // (`add-environment-panel-and-edit-popup`).
         model.current_environment = Some("local".into());
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 0;
         update(&mut model, Message::Right);
-        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
         assert_eq!(model.current_environment, None);
 
         // Environnement valide (indice 1 : local)
-        model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 1;
         update(&mut model, Message::Right);
-        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
         assert_eq!(model.current_environment.as_deref(), Some("local"));
 
         // Entrée en erreur (indice 2 : malformed) : sans effet
-        model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 2;
         update(&mut model, Message::Right);
-        assert_eq!(model.focus, Focus::EnvironmentPicker, "reste ouvert");
+        assert_eq!(
+            model.current_environment.as_deref(),
+            Some("local"),
+            "inchangé"
+        );
+
+        // `Entrée` produit le même effet que `Droite`
+        // (`add-environment-panel-and-edit-popup`, design D2).
+        model.environment_selected = 0;
+        update(&mut model, Message::Enter);
+        assert_eq!(model.current_environment, None);
+        model.environment_selected = 1;
+        update(&mut model, Message::Enter);
+        assert_eq!(model.current_environment.as_deref(), Some("local"));
+        model.environment_selected = 2;
+        update(&mut model, Message::Enter);
         assert_eq!(
             model.current_environment.as_deref(),
             Some("local"),
@@ -3306,25 +3422,26 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_valid_environment_opens_edit_session_and_none_or_error_does_nothing() {
+    fn start_edit_on_valid_environment_opens_edit_popup_and_none_or_error_does_nothing() {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;
 
-        // Indice 0 (« Aucun ») : Entrée ne fait rien
+        // Indice 0 (« Aucun ») : `e` ne fait rien
         model.environment_selected = 0;
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
         assert!(model.environment_editing.is_none());
         assert_eq!(model.focus, Focus::EnvironmentPicker);
 
-        // Indice 2 (malformed, en erreur) : Entrée ne fait rien
+        // Indice 2 (malformed, en erreur) : `e` ne fait rien
         model.environment_selected = 2;
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
         assert!(model.environment_editing.is_none());
         assert_eq!(model.focus, Focus::EnvironmentPicker);
 
-        // Indice 1 (local, valide) : Entrée ouvre la session
+        // Indice 1 (local, valide) : `e` ouvre le popup d'édition
+        // (`add-environment-panel-and-edit-popup`, design D2).
         model.environment_selected = 1;
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
         assert!(model.environment_editing.is_some());
         let session = model.environment_editing.as_ref().unwrap();
         assert_eq!(session.name, "local");
@@ -3342,7 +3459,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 1;
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
         assert!(model.environment_editing.is_some());
 
         // 1. Commencer la saisie sur la variable 0 ('host')
@@ -3386,7 +3503,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 1; // "local"
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
         assert!(model.environment_editing.is_some());
 
         // 1. Session propre -> SaveEdit retourne Command::None
@@ -3440,7 +3557,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 1; // "local"
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
 
         // Saisie en cours (sans ValidateInput)
         update(&mut model, Message::StartEdit);
@@ -3466,7 +3583,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 1; // "local"
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
 
         // Modifier
         update(&mut model, Message::StartEdit);
@@ -3524,7 +3641,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 1; // "local"
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
 
         // Modifier
         update(&mut model, Message::StartEdit);
@@ -3562,7 +3679,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 1; // "local"
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::StartEdit);
 
         update(&mut model, Message::StartEdit);
         update(&mut model, Message::InputKey(InputKey::Char('z')));
@@ -5347,13 +5464,14 @@ mod tests {
         update(&mut model, Message::Enter);
         assert!(model.tree.expanded.contains(Path::new("grp")));
 
-        // Sélecteur d'environnement : `→` valide l'entrée (Entrée ouvre les variables).
+        // Panneau Environnement : `→` active l'entrée, sans changer le
+        // focus (`add-environment-panel-and-edit-popup`).
         let mut model = loaded_model((100, 30));
         model.current_environment = Some("local".into());
         model.focus = Focus::EnvironmentPicker;
         model.environment_selected = 0;
         update(&mut model, Message::Right);
-        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
         assert_eq!(model.current_environment, None);
 
         // Réponse : onglet suivant, comme `→`.
@@ -6976,7 +7094,7 @@ mod mouse_tests {
 
     #[test]
     fn click_in_a_scrolled_tree_and_on_borders() {
-        let mut model = model_on("grp", (100, 10));
+        let mut model = model_on("grp", (100, 11));
         let area = inner(layout_for(model.size).expect("taille").tree);
         model.tree.offset = 4;
         click(&mut model, (area.x + 1, area.y));
@@ -7084,7 +7202,7 @@ mod mouse_tests {
     fn wheel_scrolls_the_hovered_panel_without_focus_change() {
         let mut model = runner_probe_model();
         model.mouse.capture = true;
-        model.size = (100, 10);
+        model.size = (100, 11);
         select(&mut model, "green.bru");
         assert!(response_max_scroll(&model) >= 3, "réponse assez longue");
         let response = inner(layout_for(model.size).expect("taille").response);
@@ -7107,7 +7225,7 @@ mod mouse_tests {
 
     #[test]
     fn wheel_in_the_tree_keeps_the_selection() {
-        let mut model = model_on("grp", (100, 10));
+        let mut model = model_on("grp", (100, 11));
         model.tree.selected = 0;
         model.tree.offset = 0;
         let area = inner(layout_for(model.size).expect("taille").tree);
@@ -7492,5 +7610,152 @@ mod mouse_tests {
             assert_eq!(with.tree.selected, without.tree.selected);
             assert_eq!(with.tree.expanded, without.tree.expanded);
         }
+    }
+
+    // --- Panneau et popup Environnement (`add-environment-panel-and-edit-popup`) --
+
+    /// Position écran de l'entrée `index` du panneau permanent Environnement.
+    fn environment_panel_point(model: &Model, index: usize) -> (u16, u16) {
+        let areas = layout_for(model.size).expect("taille");
+        let area = inner(areas.environment);
+        (area.x + 1, area.y + u16::try_from(index).expect("petit"))
+    }
+
+    /// Position écran de la ligne `row` (0 = en-tête) du popup d'édition
+    /// ouvert sur `session`.
+    fn environment_popup_point(
+        model: &Model,
+        session: &EnvironmentEditSession,
+        row: usize,
+    ) -> (u16, u16) {
+        let popup =
+            environment_edit_popup_area(Rect::new(0, 0, model.size.0, model.size.1), session);
+        let area = inner(popup);
+        (area.x + 1, area.y + u16::try_from(row).expect("petit"))
+    }
+
+    fn environment_model() -> Model {
+        let mut model = loaded_model((100, 30));
+        model.mouse.capture = true;
+        model
+    }
+
+    #[test]
+    fn click_on_environment_panel_activates_without_opening_popup() {
+        let mut model = environment_model();
+        let point = environment_panel_point(&model, 1); // "local"
+        click(&mut model, point);
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
+        assert_eq!(model.current_environment.as_deref(), Some("local"));
+        assert!(model.environment_editing.is_none());
+    }
+
+    #[test]
+    fn double_click_on_environment_panel_activates_and_opens_popup() {
+        let mut model = environment_model();
+        let point = environment_panel_point(&model, 1); // "local"
+        click(&mut model, point);
+        click(&mut model, point);
+        assert_eq!(model.current_environment.as_deref(), Some("local"));
+        let session = model.environment_editing.as_ref().expect("popup ouvert");
+        assert_eq!(session.name, "local");
+    }
+
+    #[test]
+    fn clicks_far_apart_in_time_do_not_open_the_popup() {
+        let mut model = environment_model();
+        let point = environment_panel_point(&model, 1);
+        click(&mut model, point);
+        // Simule un premier clic ancien : hors de la fenêtre de double-clic.
+        model.mouse.last_environment_click = Some((Instant::now() - Duration::from_secs(1), 1));
+        click(&mut model, point);
+        assert!(model.environment_editing.is_none());
+    }
+
+    #[test]
+    fn rapid_clicks_on_different_entries_do_not_open_the_popup() {
+        let mut model = environment_model();
+        let local = environment_panel_point(&model, 1); // "local"
+        click(&mut model, local);
+        let staging = environment_panel_point(&model, 3); // "staging"
+        click(&mut model, staging);
+        assert!(model.environment_editing.is_none());
+        assert_eq!(model.current_environment.as_deref(), Some("staging"));
+    }
+
+    #[test]
+    fn click_on_none_or_error_entry_in_the_panel() {
+        let mut model = environment_model();
+        model.current_environment = Some("local".into());
+        // « Aucun » (indice 0) : désactive l'environnement courant.
+        let none_point = environment_panel_point(&model, 0);
+        click(&mut model, none_point);
+        assert_eq!(model.current_environment, None);
+        // Entrée en erreur (indice 2 : malformed) : sans effet.
+        model.current_environment = Some("local".into());
+        let error_point = environment_panel_point(&model, 2);
+        click(&mut model, error_point);
+        assert_eq!(model.current_environment.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn click_in_the_popup_starts_editing_the_clicked_variable() {
+        let mut model = environment_model();
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::StartEdit);
+        let session = model.environment_editing.clone().expect("popup ouvert");
+        assert_eq!(session.cursor, 0);
+
+        // "debug" est la seconde variable (indice 1), sur la ligne 2 du
+        // popup (0 : en-tête, 1 : host, 2 : debug) — désactivée.
+        let point = environment_popup_point(&model, &session, 2);
+        click(&mut model, point);
+        let session = model.environment_editing.as_ref().expect("popup ouvert");
+        assert_eq!(session.state, EnvironmentEditState::Select, "désactivée");
+
+        // "host" (indice 0), sur la ligne 1 du popup : activée.
+        let point = environment_popup_point(&model, &session.clone(), 1);
+        click(&mut model, point);
+        let session = model.environment_editing.as_ref().expect("popup ouvert");
+        assert_eq!(session.cursor, 0);
+        assert!(matches!(session.state, EnvironmentEditState::Input(_)));
+    }
+
+    #[test]
+    fn click_in_the_popup_while_editing_another_variable_commits_first() {
+        let mut model = environment_model();
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::StartEdit); // démarre la saisie sur "host"
+        for c in "!!!".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+
+        let session = model.environment_editing.clone().expect("popup ouvert");
+        // "debug" est désactivée : cliquer dessus ne démarre pas de
+        // nouvelle saisie, mais valide déjà la saisie en cours sur "host".
+        let point = environment_popup_point(&model, &session, 2);
+        click(&mut model, point);
+        let session = model.environment_editing.as_ref().expect("popup ouvert");
+        assert_eq!(session.variables[0].value, "localhost:3000!!!");
+        assert_eq!(session.state, EnvironmentEditState::Select);
+    }
+
+    #[test]
+    fn click_outside_the_popup_has_no_effect() {
+        let mut model = environment_model();
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1;
+        update(&mut model, Message::StartEdit);
+
+        // Un clic sur l'arbre, dessiné dessous mais capturé par le popup
+        // modal, ne change rien (`add-environment-panel-and-edit-popup`,
+        // design D6).
+        let point = tree_point(&model, "grp");
+        click(&mut model, point);
+        assert!(model.environment_editing.is_some());
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
     }
 }
