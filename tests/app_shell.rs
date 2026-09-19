@@ -98,6 +98,7 @@ fn spawn_run_sized(
             Arc::new(bruno_tui::writer::BruWriter),
             Vec::new(),
             bruno_tui::app::mouse::MouseSetup::terminal(false),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
         let Ok(exit) = result;

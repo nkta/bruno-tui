@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod clipboard;
 pub mod diagnostics;
+pub mod editor;
 pub mod event;
 pub mod filter;
 pub mod message;
@@ -22,6 +23,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::Terminal;
 use ratatui::backend::Backend;
@@ -49,7 +51,9 @@ use update::{Command, update};
 /// injectable (`BruWriter` en usage réel). `secrets` porte les
 /// déclarations `--secret` de la ligne de commande. `mouse` porte le moyen
 /// de piloter la capture souris et l'état appliqué au démarrage
-/// (`mouse-support`), injectable comme le presse-papiers.
+/// (`mouse-support`), injectable comme le presse-papiers. `suspended` est
+/// l'indicateur partagé permettant de suspendre la lecture du terminal
+/// pendant qu'un processus externe possède le terminal.
 #[allow(clippy::too_many_arguments)]
 pub async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
@@ -62,6 +66,7 @@ pub async fn run<B: Backend>(
     writer: Arc<dyn RequestWriter>,
     secrets: Vec<SecretMapping>,
     mouse: MouseSetup,
+    suspended: Arc<AtomicBool>,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
@@ -199,6 +204,38 @@ pub async fn run<B: Backend>(
                             secrets::resolve(&root, &lookups, &|key| std::env::var_os(key));
                         let _ = sender.blocking_send(AppEvent::SecretsResolved { root, resolved });
                     });
+                }
+                Command::OpenInEditor { program, text } => {
+                    suspended.store(true, Ordering::SeqCst);
+                    let mouse_was_captured = model.mouse.capture;
+                    if mouse_was_captured {
+                        let _ = mouse.capture.set(false);
+                    }
+                    let _ = ratatui::try_restore();
+
+                    let result = tokio::task::spawn_blocking(move || {
+                        editor::spawn_external_editor(&program, &text)
+                    })
+                    .await;
+
+                    let _ = ratatui::try_init();
+                    let _ = terminal.clear();
+                    if mouse_was_captured {
+                        let _ = mouse.capture.set(true);
+                    }
+                    suspended.store(false, Ordering::SeqCst);
+
+                    match result {
+                        Ok(Err(error)) => {
+                            model.last_status =
+                                Some(model::StatusMessage::EditorError(error.to_string()));
+                        }
+                        Err(join_error) => {
+                            model.last_status =
+                                Some(model::StatusMessage::EditorError(join_error.to_string()));
+                        }
+                        Ok(Ok(())) => {}
+                    }
                 }
             }
         }

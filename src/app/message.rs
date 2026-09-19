@@ -176,6 +176,8 @@ pub enum Message {
     ToggleField,
     /// `Ctrl+S`, en session : valide une saisie en cours puis enregistre.
     SaveEdit,
+    /// `Ctrl+E` : ouvre le corps brut de la réponse dans un éditeur externe.
+    OpenResponseInEditor,
     /// Touche d'édition du tampon pendant une saisie de champ.
     InputKey(InputKey),
     /// `Tab` pendant une saisie de champ.
@@ -287,6 +289,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
             KeyCode::Char('c') => Some(Message::ForceQuit),
             KeyCode::Char('x') => Some(Message::CancelRun),
             KeyCode::Char('s') => Some(Message::SaveEdit),
+            KeyCode::Char('e') => Some(Message::OpenResponseInEditor),
             _ => None,
         };
     }
@@ -478,6 +481,11 @@ mod tests {
             ),
             (KeyCode::Char('c'), KeyModifiers::CONTROL, "ForceQuit"),
             (KeyCode::Char('x'), KeyModifiers::CONTROL, "CancelRun"),
+            (
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                "OpenResponseInEditor",
+            ),
             (KeyCode::Char('/'), none, "StartSearch"),
             (KeyCode::Char('|'), none, "OpenFilter"),
             (KeyCode::Char('n'), none, "NextMatch"),
@@ -747,7 +755,7 @@ mod tests {
             capture(KeyCode::Char('e'), KeyModifiers::ALT).as_deref(),
             Some("InputKey(Char('e'))")
         );
-        // Seules Ctrl+C, Ctrl+X et Ctrl+S gardent un sens global.
+        // Seules Ctrl+C, Ctrl+X, Ctrl+S et Ctrl+E gardent un sens global.
         assert_eq!(
             capture(KeyCode::Char('c'), KeyModifiers::CONTROL).as_deref(),
             Some("ForceQuit")
@@ -760,10 +768,36 @@ mod tests {
             capture(KeyCode::Char('s'), KeyModifiers::CONTROL).as_deref(),
             Some("SaveEdit")
         );
+        assert_eq!(
+            capture(KeyCode::Char('e'), KeyModifiers::CONTROL).as_deref(),
+            Some("OpenResponseInEditor")
+        );
         // Tab ne change jamais le focus pendant une saisie.
         assert_ne!(capture(KeyCode::Tab, none).as_deref(), Some("NextFocus"));
         assert!(capture(KeyCode::PageDown, none).is_none());
         assert!(capture(KeyCode::F(1), none).is_none());
+    }
+
+    #[test]
+    fn ctrl_e_opens_response_in_editor_under_any_capture() {
+        for capture in [
+            None,
+            Some(TextCapture::Search),
+            Some(TextCapture::Input),
+            Some(TextCapture::Filter),
+            Some(TextCapture::SecretName),
+            Some(TextCapture::SecretValue),
+            Some(TextCapture::MethodPicker),
+        ] {
+            let event = key(KeyCode::Char('e'), KeyModifiers::CONTROL);
+            assert!(
+                matches!(
+                    to_message(event, capture),
+                    Some(Message::OpenResponseInEditor)
+                ),
+                "Ctrl+E doit produire OpenResponseInEditor avec capture {capture:?}"
+            );
+        }
     }
 
     #[test]

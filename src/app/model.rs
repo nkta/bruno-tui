@@ -642,6 +642,10 @@ pub enum StatusMessage {
     /// Modification refusée par `bru-writer` ; le texte décrit la nature
     /// du refus sans jamais citer la saisie.
     EditRefused(String),
+    /// Aucune réponse exploitable à ouvrir dans un éditeur externe.
+    NoResponseBody,
+    /// Échec lors du lancement de l'éditeur externe.
+    EditorError(String),
 }
 
 impl Model {
@@ -762,6 +766,27 @@ impl Model {
     /// Vrai si le nœud est un dossier déplié.
     pub fn is_expanded(&self, node: &TreeNode) -> bool {
         matches!(node, TreeNode::Folder(folder) if self.tree.expanded.contains(&folder.path))
+    }
+
+    /// Corps brut de la réponse sélectionnée en texte pour l'éditeur externe.
+    pub fn selected_response_body(&self) -> Option<String> {
+        selected_response_body(self)
+    }
+}
+
+/// Retourne le corps brut de la réponse sélectionnée en texte : chaîne telle
+/// quelle, autre valeur mise en forme via [`crate::app::filter::pretty_print`],
+/// ou `None` si aucune requête n'est sélectionnée, si la requête n'a pas de
+/// résultat d'exécution, ou si son corps de réponse est `null`.
+pub fn selected_response_body(model: &Model) -> Option<String> {
+    let Some(TreeNode::Request(request)) = model.selected_node() else {
+        return None;
+    };
+    let outcome = model.run.outcomes.get(&request.path)?;
+    match &outcome.result.response.data {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => Some(text.clone()),
+        data => Some(super::filter::pretty_print(data)),
     }
 }
 
@@ -1356,5 +1381,41 @@ mod tests {
         let row = secret_rows(&model).remove(0);
         assert_eq!(row.source, SecretSource::Typed);
         assert_eq!(row.value.as_ref().map(SecretString::expose), Some("typed"));
+    }
+
+    #[test]
+    fn selected_response_body_coverage() {
+        use crate::app::test_support::{runner_probe_model, select};
+
+        let mut model = runner_probe_model();
+
+        // Dossier sélectionné : aucun corps
+        select(&mut model, "folder");
+        assert_eq!(selected_response_body(&model), None);
+
+        // Requête sélectionnée avec corps null (folder/down.bru dans mixed.json)
+        select(&mut model, "folder/down.bru");
+        assert_eq!(selected_response_body(&model), None);
+
+        // Requête sélectionnée avec corps texte brut (ok.bru dans mixed.json)
+        select(&mut model, "ok.bru");
+        assert_eq!(
+            selected_response_body(&model),
+            Some("<html><body>probe</body></html>\n".to_string())
+        );
+
+        // Requête sélectionnée avec corps JSON structuré (json.bru dans mixed.json)
+        select(&mut model, "json.bru");
+        let body = selected_response_body(&model).expect("corps JSON attendu");
+        assert!(body.contains("{\n"));
+        assert!(body.contains("\"a\": ["));
+
+        // Requête jamais exécutée
+        model.run.outcomes.clear();
+        assert_eq!(selected_response_body(&model), None);
+
+        // Aucune sélection
+        model.tree.rows.clear();
+        assert_eq!(selected_response_body(&model), None);
     }
 }

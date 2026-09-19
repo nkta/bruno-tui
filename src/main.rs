@@ -84,7 +84,8 @@ fn main() -> ExitCode {
     }
 
     let (sender, events) = mpsc::channel(EVENT_BUFFER);
-    let result = match spawn_terminal_reader(sender.clone()) {
+    let suspended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = match spawn_terminal_reader(sender.clone(), Arc::clone(&suspended)) {
         Ok(()) => runtime.block_on(run(
             &mut terminal,
             Arc::new(BruLoader),
@@ -96,6 +97,7 @@ fn main() -> ExitCode {
             Arc::new(bruno_tui::writer::BruWriter),
             secrets,
             mouse_setup,
+            suspended,
         )),
         Err(error) => Ok(Exit::TerminalError(error)),
     };
