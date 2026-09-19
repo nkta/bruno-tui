@@ -9,76 +9,109 @@ ni éditer le fichier à la main.
 
 ## Requirements
 
-### Requirement: Affichage des variables d'un environnement
-Le panneau Environnement (`Focus::EnvironmentPicker`) SHALL se dessiner
-dans un menu déroulant flottant ancré en haut à droite de l'écran, sous
-la ligne de titre, superposé au reste de l'interface : l'arbre, le
-détail et la réponse restent affichés derrière, tels qu'ils étaient
-avant l'ouverture. `Entrée` sur une entrée de la liste qui désigne un
+### Requirement: Panneau Environnement permanent
+Le panneau Environnement SHALL être affiché en permanence, dans sa
+propre zone de la mise en page (au-dessus du panneau Statut), quel que
+soit le focus courant — comme les panneaux Collection, Détail, Réponse
+et Statut. `E` SHALL donner le focus à ce panneau (`Tab` continue par
+ailleurs de cycler entre tous les panneaux, Environnement y compris).
+`Entrée` ou `Droite` sur une entrée de la liste qui désigne un
 environnement valide (ni « Aucun », ni une entrée en erreur) SHALL
-remplacer la liste des environnements par la liste de ses variables
-(`Environment.variables`, une ligne par entrée, dans l'ordre du
-fichier), sans changer l'environnement actif. Chaque ligne SHALL
-afficher la clé et la valeur courante de la variable. Une variable
-désactivée (clé préfixée de `~` dans le fichier) SHALL rester visible,
-sa valeur affichée avec un style la distinguant comme non éditable,
-cohérent avec l'affichage déjà utilisé pour une entrée désactivée dans
-le détail d'une requête. `Entrée` sur « Aucun » ou sur une entrée en
-erreur SHALL rester sans effet, comme `Droite` aujourd'hui sur ces
-mêmes entrées.
+l'activer (devient l'environnement courant), sans changer le focus ni
+masquer aucun autre panneau. `Entrée` ou `Droite` sur « Aucun » SHALL
+désactiver l'environnement courant. `Entrée` ou `Droite` sur une entrée
+en erreur SHALL rester sans effet.
 
-#### Scenario: Le menu déroulant se superpose sans masquer le reste
-- **WHEN** l'arbre affiche une collection avec une requête sélectionnée,
-  et l'utilisateur appuie sur `E`
-- **THEN** le menu déroulant Environnement apparaît en haut à droite,
-  l'arbre et le détail de la requête sélectionnée restent visibles
-  derrière
+#### Scenario: Le panneau est visible sans action de l'utilisateur
+- **WHEN** une collection est chargée, quel que soit le focus courant
+- **THEN** le panneau Environnement est visible, au-dessus du panneau
+  Statut
 
-#### Scenario: Entrée sur un environnement valide affiche ses variables
-- **WHEN** le menu déroulant Environnement a le focus, la liste affiche
+#### Scenario: Entrée active un environnement valide
+- **WHEN** le panneau Environnement a le focus, la sélection est sur
   l'environnement `staging`, et l'utilisateur appuie sur `Entrée`
-- **THEN** le menu affiche les variables de `staging`, une ligne par
-  entrée de `Environment.variables`, dans l'ordre du fichier
+- **THEN** `staging` devient l'environnement courant, le focus reste sur
+  le panneau Environnement
 
-#### Scenario: Entrée sur « Aucun » ne fait rien
-- **WHEN** le menu déroulant Environnement a le focus, l'entrée courante
-  est « Aucun », et l'utilisateur appuie sur `Entrée`
-- **THEN** la liste des environnements reste affichée, sans changement
+#### Scenario: Entrée sur « Aucun » désactive l'environnement courant
+- **WHEN** le panneau Environnement a le focus, un environnement est
+  actif, la sélection est sur « Aucun », et l'utilisateur appuie sur
+  `Entrée`
+- **THEN** plus aucun environnement n'est actif
 
-#### Scenario: Entrée sur un environnement en erreur ne fait rien
-- **WHEN** le menu déroulant Environnement a le focus, l'entrée courante
-  est un environnement dont le fichier est en erreur de lecture, et
+#### Scenario: Entrée sur une entrée en erreur ne fait rien
+- **WHEN** le panneau Environnement a le focus, la sélection est sur un
+  environnement dont le fichier est en erreur de lecture, et
   l'utilisateur appuie sur `Entrée`
-- **THEN** la liste des environnements reste affichée, sans changement
+- **THEN** l'environnement courant ne change pas
 
-#### Scenario: Retour à la liste des environnements
-- **WHEN** le menu affiche les variables d'un environnement, aucune
-  saisie n'est en cours, et l'utilisateur appuie sur `Échap`
-- **THEN** la liste des environnements réapparaît dans le menu, la
-  sélection sur l'environnement précédemment ouvert
+### Requirement: Ouverture du popup d'édition
+`e` sur une entrée valide (ni « Aucun », ni une entrée en erreur) du
+panneau Environnement SHALL ouvrir un popup d'édition centré, superposé
+au reste de l'écran, affichant les variables de l'environnement visé
+sous forme de tableau à deux colonnes (Clé, Valeur). Un double-clic
+(deux clics gauche sur la même entrée du panneau, dans un délai court)
+SHALL produire le même effet qu'un simple clic (activer l'entrée) puis,
+en plus, ouvrir ce même popup. `Échap`, sans saisie en cours dans le
+popup, SHALL le fermer et rendre le focus au panneau Environnement, sans
+perdre les modifications déjà validées en mémoire (non sauvegardées).
 
-#### Scenario: Échap depuis la liste ferme le menu
-- **WHEN** le menu affiche la liste des environnements (pas la vue des
-  variables), et l'utilisateur appuie sur `Échap`
-- **THEN** le menu déroulant disparaît, le focus revient à l'arbre
+#### Scenario: e ouvre le popup d'édition
+- **WHEN** le panneau Environnement a le focus, la sélection est sur
+  l'environnement `staging`, et l'utilisateur appuie sur `e`
+- **THEN** le popup d'édition s'ouvre, affichant les variables de
+  `staging` en tableau Clé/Valeur
+
+#### Scenario: e sur « Aucun » ou une entrée en erreur ne fait rien
+- **WHEN** le panneau Environnement a le focus, la sélection est sur
+  « Aucun » ou sur une entrée en erreur, et l'utilisateur appuie sur `e`
+- **THEN** aucun popup ne s'ouvre
+
+#### Scenario: Double-clic active et ouvre le popup
+- **WHEN** le panneau Environnement a le focus, et l'utilisateur fait
+  un double-clic sur l'entrée `staging`
+- **THEN** `staging` devient l'environnement courant et le popup
+  d'édition s'ouvre sur ses variables
+
+#### Scenario: Échap ferme le popup sans perdre les modifications validées
+- **WHEN** le popup d'édition est ouvert, une valeur a déjà été validée
+  (marquant la session modifiée), aucune saisie n'est en cours, et
+  l'utilisateur appuie sur `Échap`
+- **THEN** le popup se ferme, le focus revient au panneau Environnement,
+  la modification reste en mémoire (non sauvegardée)
 
 ### Requirement: Saisie d'une valeur de variable
-Dans la vue des variables d'un environnement, `Entrée` ou `e` sur une
-variable activée SHALL commencer la saisie de sa valeur en texte libre,
-curseur en fin de valeur courante — comportement identique à la saisie
-d'une valeur d'en-tête de requête. `Entrée` pendant cette saisie SHALL
-valider la nouvelle valeur en mémoire sans écrire sur disque. `Échap`
-pendant cette saisie SHALL annuler la saisie et restaurer la valeur
-affichée avant la saisie, sans modifier la variable. `Entrée` ou `e` sur
-une variable désactivée SHALL rester sans effet : sa valeur n'est pas
-éditable tant qu'elle reste désactivée.
+Dans le popup d'édition, `Entrée` ou `e` sur une variable activée SHALL
+commencer la saisie de sa valeur en texte libre, curseur en fin de
+valeur courante — comportement identique à la saisie d'une valeur
+d'en-tête de requête. Un clic gauche sur la ligne d'une variable
+activée SHALL produire le même effet, comme le clic sur un en-tête de
+requête (`mouse-support`, « Saisie d'un champ au clic »). `Entrée`
+pendant cette saisie SHALL valider la nouvelle valeur en mémoire sans
+écrire sur disque. `Échap` pendant cette saisie SHALL annuler la saisie
+et restaurer la valeur affichée avant la saisie, sans modifier la
+variable. `Entrée` ou `e` sur une variable désactivée SHALL rester sans
+effet : sa valeur n'est pas éditable tant qu'elle reste désactivée. Un
+clic gauche, où qu'il tombe dans le popup (variable désactivée, ligne
+d'en-tête, ou hors du tableau), SHALL d'abord valider une saisie en
+cours sur une autre variable exactement comme le ferait `Entrée` sur
+cette variable, avant de produire son propre effet (ou d'en rester
+dépourvu s'il ne cible aucune variable activée) — même principe que
+« Clic pendant une session d'édition » (`mouse-support`) pour une
+requête.
 
 #### Scenario: Modifier la valeur d'une variable
-- **WHEN** la vue des variables affiche `host = localhost` activée, le
-  curseur de sélection dessus, et l'utilisateur appuie sur `Entrée`, tape
+- **WHEN** le popup affiche `host = localhost` activée, le curseur de
+  sélection dessus, et l'utilisateur appuie sur `Entrée`, tape
   `staging.example.com`, puis appuie sur `Entrée`
 - **THEN** la variable `host` affiche `staging.example.com` en mémoire,
   la session est marquée modifiée
+
+#### Scenario: Modifier la valeur d'une variable à la souris
+- **WHEN** le popup affiche `host = localhost` activée, et l'utilisateur
+  clique sur sa ligne
+- **THEN** la saisie de la valeur de `host` démarre, curseur en fin de
+  `localhost`
 
 #### Scenario: Annuler une saisie en cours
 - **WHEN** l'utilisateur a commencé la saisie de la valeur de `host` et
@@ -87,9 +120,15 @@ une variable désactivée SHALL rester sans effet : sa valeur n'est pas
   modification n'est retenue
 
 #### Scenario: Une variable désactivée n'est pas éditable
-- **WHEN** la vue des variables affiche `debug` désactivée, le curseur de
-  sélection dessus, et l'utilisateur appuie sur `Entrée`
+- **WHEN** le popup affiche `debug` désactivée, le curseur de sélection
+  dessus, et l'utilisateur appuie sur `Entrée`
 - **THEN** aucune saisie ne démarre
+
+#### Scenario: Un clic sur une variable désactivée valide la saisie en cours ailleurs
+- **WHEN** l'utilisateur a commencé la saisie de la valeur de `host` et
+  tapé des caractères, puis clique sur la ligne de `debug` (désactivée)
+- **THEN** `host` affiche la valeur tapée en mémoire, la session est
+  marquée modifiée, et aucune saisie ne démarre sur `debug`
 
 ### Requirement: Sauvegarde des variables modifiées
 `s` ou `Ctrl+S`, avec au moins une variable modifiée en mémoire dans la
