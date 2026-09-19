@@ -10,6 +10,7 @@
 //! disque depuis son chargement. Ce module ne journalise et ne réimplémente
 //! rien de `bru-parser` : il consomme son AST tel quel et ne le modifie pas.
 
+mod dictionary;
 mod draft;
 mod edit;
 pub mod environment;

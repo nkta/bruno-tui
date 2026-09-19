@@ -204,6 +204,10 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                 model.secrets.input = Some(SecretInput::Name(String::new()));
             } else if model.focus == Focus::Detail {
                 add_entry(model);
+            } else if model.focus == Focus::EnvironmentPicker
+                && let Some(session) = &mut model.environment_editing
+            {
+                session.begin_add();
             }
             Command::None
         }
@@ -212,6 +216,10 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                 forget_secret(model);
             } else if model.focus == Focus::Detail {
                 delete_entry(model);
+            } else if model.focus == Focus::EnvironmentPicker
+                && let Some(session) = &mut model.environment_editing
+            {
+                session.remove_current();
             }
             Command::None
         }
@@ -454,8 +462,8 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::ValidateInput => {
-            if let Some(session) = &mut model.environment_editing {
-                session.commit_input();
+            if model.environment_editing.is_some() {
+                environment_commit_or_advance(model);
             } else {
                 validate_input(model, false);
             }
@@ -1342,25 +1350,8 @@ fn cancel_input(model: &mut Model) {
 
 /// Touche d'édition du tampon pendant une saisie.
 fn input_key(model: &mut Model, key: InputKey) {
-    if let Some(session) = &mut model.environment_editing {
-        let EnvironmentEditState::Input(input) = &mut session.state else {
-            return;
-        };
-        match key {
-            InputKey::Char(c) => input.insert(c),
-            InputKey::Backspace => input.backspace(),
-            InputKey::Delete => input.delete(),
-            InputKey::Left => input.left(),
-            InputKey::Right => input.right(),
-            InputKey::Up => input.up(),
-            InputKey::Down => input.down(),
-            InputKey::Home => input.home(),
-            InputKey::End => input.end(),
-            InputKey::Enter => {
-                session.commit_input();
-            }
-        }
-        model.last_status = None;
+    if model.environment_editing.is_some() {
+        environment_input_key(model, key);
         return;
     }
     let Some(session) = &mut model.editing else {
@@ -1387,6 +1378,99 @@ fn input_key(model: &mut Model, key: InputKey) {
     }
     model.last_status = None;
     scroll_edit_into_view(model);
+}
+
+/// Touche d'édition de tampon pendant une saisie du popup d'environnement
+/// (valeur, clé ou valeur d'un ajout en cours) — `Entrée` est traitée à
+/// part, selon l'état courant (`add-environment-entry-management`).
+fn environment_input_key(model: &mut Model, key: InputKey) {
+    if matches!(key, InputKey::Enter) {
+        environment_commit_or_advance(model);
+        model.last_status = None;
+        return;
+    }
+    let Some(session) = &mut model.environment_editing else {
+        return;
+    };
+    let Some(input) = session.state.text_input_mut() else {
+        return;
+    };
+    match key {
+        InputKey::Char(c) => input.insert(c),
+        InputKey::Backspace => input.backspace(),
+        InputKey::Delete => input.delete(),
+        InputKey::Left => input.left(),
+        InputKey::Right => input.right(),
+        InputKey::Up => input.up(),
+        InputKey::Down => input.down(),
+        InputKey::Home => input.home(),
+        InputKey::End => input.end(),
+        InputKey::Enter => {}
+    }
+    model.last_status = None;
+}
+
+/// `Entrée` ou `Tab` (`Message::ValidateInput`) pendant une saisie du
+/// popup d'environnement : valide selon l'état courant — une valeur
+/// existante, la clé d'un ajout (contre `bru-writer`, comme
+/// `check_edit` pour une requête), ou la valeur d'un ajout.
+fn environment_commit_or_advance(model: &mut Model) {
+    let Some(session) = &model.environment_editing else {
+        return;
+    };
+    match &session.state {
+        EnvironmentEditState::Input(_) => {
+            if let Some(session) = &mut model.environment_editing {
+                session.commit_input();
+            }
+        }
+        EnvironmentEditState::AddingKey(input) => {
+            let key = input.text().to_owned();
+            commit_environment_add_key(model, key);
+        }
+        EnvironmentEditState::AddingValue { .. } => {
+            if let Some(session) = &mut model.environment_editing {
+                session.finish_add();
+            }
+        }
+        EnvironmentEditState::Select => {}
+    }
+}
+
+/// Valide la clé d'un ajout en cours en l'essayant contre `bru-writer`
+/// (`writer::environment::resolve`, sans écriture disque) ; avance vers
+/// la saisie de la valeur si elle est acceptée, sinon affiche le refus
+/// et laisse la saisie de la clé active — même mécanisme que
+/// `check_edit`/`try_commit` pour l'ajout d'un en-tête de requête.
+fn commit_environment_add_key(model: &mut Model, key: String) {
+    let Some(session) = &model.environment_editing else {
+        return;
+    };
+    let session_path = session.path.clone();
+    let mut candidate = session.pending.clone();
+    candidate.push(crate::writer::EnvironmentVarEdit::Add {
+        key: key.clone(),
+        value: String::new(),
+        enabled: true,
+    });
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    let ast = collection.environments.iter().find_map(|e| match e {
+        Ok(env) if env.path == session_path => env.ast.as_ref(),
+        _ => None,
+    });
+    let Some(ast) = ast else {
+        return;
+    };
+    if let Err(error) = crate::writer::environment::resolve(ast, &candidate) {
+        model.last_status = Some(StatusMessage::EditRefused(error.to_string()));
+        return;
+    }
+    model.last_status = None;
+    if let Some(session) = &mut model.environment_editing {
+        session.advance_add_to_value(key);
+    }
 }
 
 /// Journal de la session augmenté de `edit`, avec une seule coalescence :
@@ -1587,7 +1671,12 @@ fn save_environment(model: &mut Model) -> Command {
     }
     let session_path = session.path.clone();
     let session_stamp = session.stamp;
-    let session_vars = session.variables.clone();
+    // Journal ordonné des modifications déjà validées (design D3, note
+    // « Journal des modifications ») : écrit tel quel, sans comparaison
+    // indice par indice — les indices qu'il porte ne désignent plus
+    // forcément l'AST d'origine dès qu'un ajout ou une suppression a eu
+    // lieu.
+    let edits = session.pending.clone();
 
     let Some(collection) = model.loaded() else {
         return Command::None;
@@ -1602,20 +1691,6 @@ fn save_environment(model: &mut Model) -> Command {
     let Some(ast) = &env.ast else {
         return Command::None;
     };
-    let Some(entries) = ast.dictionary("vars") else {
-        return Command::None;
-    };
-    let mut edits = Vec::new();
-    for (index, kv) in session_vars.iter().enumerate() {
-        if let Some(entry) = entries.get(index)
-            && entry.value != kv.value
-        {
-            edits.push(crate::writer::EnvironmentVarEdit {
-                index,
-                value: kv.value.clone(),
-            });
-        }
-    }
     if edits.is_empty() {
         if let Some(session) = &mut model.environment_editing {
             session.dirty = false;
@@ -1646,6 +1721,7 @@ fn environment_saved(
             }
             session.stamp = saved.stamp;
             session.dirty = false;
+            session.pending.clear();
             Some((saved.ast, session.variables.clone()))
         }
         Err(error) => {
@@ -3454,6 +3530,84 @@ mod tests {
         );
     }
 
+    /// `a` puis `d` dans le popup d'édition d'environnement
+    /// (`add-environment-entry-management`).
+    #[test]
+    fn a_and_d_add_and_remove_a_variable_in_the_environment_popup() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::StartEdit);
+        assert_eq!(
+            model.environment_editing.as_ref().unwrap().variables.len(),
+            2
+        );
+
+        // `a` : ajout en deux temps, clé puis valeur.
+        update(&mut model, Message::Add);
+        assert!(matches!(
+            model.environment_editing.as_ref().unwrap().state,
+            EnvironmentEditState::AddingKey(_)
+        ));
+        for c in "region".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+        update(&mut model, Message::ValidateInput);
+        assert!(matches!(
+            &model.environment_editing.as_ref().unwrap().state,
+            EnvironmentEditState::AddingValue { key, .. } if key == "region"
+        ));
+        for c in "eu-west".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+        update(&mut model, Message::ValidateInput);
+
+        let session = model.environment_editing.as_ref().unwrap();
+        assert_eq!(session.state, EnvironmentEditState::Select);
+        assert_eq!(session.variables.len(), 3);
+        assert_eq!(session.variables[2].key, "region");
+        assert_eq!(session.variables[2].value, "eu-west");
+        assert_eq!(session.cursor, 2);
+        assert!(session.dirty);
+
+        // `d` : suppression immédiate de la variable sous le curseur.
+        update(&mut model, Message::Delete);
+        let session = model.environment_editing.as_ref().unwrap();
+        assert_eq!(session.variables.len(), 2);
+        assert!(
+            session.variables.iter().all(|v| v.key != "region"),
+            "region supprimée"
+        );
+    }
+
+    #[test]
+    fn invalid_key_on_add_is_refused_and_keeps_the_key_input_open() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::StartEdit);
+
+        update(&mut model, Message::Add);
+        for c in "in valid".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+        update(&mut model, Message::ValidateInput);
+
+        // Refusée : la saisie de la clé reste active, rien n'est ajouté.
+        assert!(matches!(
+            model.environment_editing.as_ref().unwrap().state,
+            EnvironmentEditState::AddingKey(_)
+        ));
+        assert_eq!(
+            model.environment_editing.as_ref().unwrap().variables.len(),
+            2
+        );
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::EditRefused(_))
+        ));
+    }
+
     #[test]
     fn escape_cancels_input_if_active_or_closes_environment_editing_to_picker() {
         let mut model = loaded_model((100, 30));
@@ -3531,8 +3685,13 @@ mod tests {
                 assert_eq!(path, session.path);
                 assert_eq!(stamp, session.stamp);
                 assert_eq!(edits.len(), 1);
-                assert_eq!(edits[0].index, 0);
-                assert_eq!(edits[0].value, "localhost:3000!");
+                assert_eq!(
+                    edits[0],
+                    crate::writer::EnvironmentVarEdit::Value {
+                        index: 0,
+                        value: "localhost:3000!".into(),
+                    }
+                );
                 let env = model
                     .loaded()
                     .unwrap()
@@ -3567,7 +3726,13 @@ mod tests {
         match update(&mut model, Message::SaveEdit) {
             Command::SaveEnvironment { edits, .. } => {
                 assert_eq!(edits.len(), 1);
-                assert_eq!(edits[0].value, "localhost:3000x");
+                assert_eq!(
+                    edits[0],
+                    crate::writer::EnvironmentVarEdit::Value {
+                        index: 0,
+                        value: "localhost:3000x".into(),
+                    }
+                );
             }
             _ => panic!("Command::SaveEnvironment attendu"),
         }

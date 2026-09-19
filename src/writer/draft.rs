@@ -7,12 +7,16 @@
 
 use std::ops::Range;
 
+use super::dictionary::{
+    DictEntry as DraftEntry, DictSection as Section, block_node, check_key_general,
+    dictionary_replacements,
+};
 use super::edit::{EntrySection, FieldEdit, Replacement};
 use super::error::{EditError, EntryProblem};
 use super::format;
 use super::query;
 use crate::collection::ast::METHODS;
-use crate::collection::{BlockBody, BruFile, Entry, NodeKind};
+use crate::collection::{BlockBody, BruFile, NodeKind};
 
 const TEXT_BODY_BLOCKS: [(&str, &str); 5] = [
     ("json", "body:json"),
@@ -22,27 +26,6 @@ const TEXT_BODY_BLOCKS: [(&str, &str); 5] = [
     ("graphql", "body:graphql"),
 ];
 const FORM_BODY_KINDS: [&str; 3] = ["formUrlEncoded", "multipartForm", "file"];
-
-/// Entrée courante d'une section ; `origin` est l'indice de l'`Entry`
-/// d'origine dans le bloc, `None` pour une entrée ajoutée.
-#[derive(Debug, Clone)]
-struct DraftEntry {
-    origin: Option<usize>,
-    key: String,
-    value: String,
-    disabled: bool,
-}
-
-impl DraftEntry {
-    fn from_entry(index: usize, entry: &Entry) -> Self {
-        Self {
-            origin: Some(index),
-            key: entry.key.clone(),
-            value: entry.value.clone(),
-            disabled: entry.disabled,
-        }
-    }
-}
 
 /// Entrée `url` du bloc de méthode, valeur d'origine et valeur courante.
 struct UrlState {
@@ -67,15 +50,6 @@ struct MethodState {
 struct BodyState {
     span: Range<usize>,
     text: String,
-}
-
-struct Section {
-    entries: Vec<DraftEntry>,
-    /// Le bloc existe dans le fichier chargé.
-    block_present: bool,
-    /// Une modification structurelle ou une synchronisation a touché la
-    /// section : un bloc resté vide est alors retiré.
-    touched: bool,
 }
 
 pub(crate) struct Draft<'a> {
@@ -319,76 +293,25 @@ impl<'a> Draft<'a> {
         let mut prefixed_anchors: Vec<usize> = Vec::new();
         for section in EntrySection::ALL {
             let state = &self.sections[section.position()];
-            match block_node(self.ast, section.block_name()) {
-                Some((span, entries)) => {
-                    if state.touched && state.entries.is_empty() {
-                        let start = span.start - preceding_blank_line_len(raw, span.start);
-                        replacements.push(Replacement {
-                            span: start..span.end,
-                            bytes: String::new(),
-                        });
-                        continue;
-                    }
-                    for (index, original) in entries.iter().enumerate() {
-                        let current = state.entries.iter().find(|e| e.origin == Some(index));
-                        match current {
-                            None => replacements.push(Replacement {
-                                span: original.span.clone(),
-                                bytes: String::new(),
-                            }),
-                            Some(entry)
-                                if entry.key != original.key
-                                    || entry.value != original.value
-                                    || entry.disabled != original.disabled =>
-                            {
-                                replacements.push(Replacement {
-                                    span: original.span.clone(),
-                                    bytes: format::format_entry(
-                                        &entry.key,
-                                        &entry.value,
-                                        entry.disabled,
-                                        eol,
-                                    ),
-                                });
-                            }
-                            Some(_) => {}
-                        }
-                    }
-                    let added = format_added(state, eol);
-                    if !added.is_empty() {
-                        let anchor = entries
-                            .last()
-                            .map_or_else(|| line_end(raw, span.start), |e| e.span.end);
-                        replacements.push(Replacement {
-                            span: anchor..anchor,
-                            bytes: added,
-                        });
-                    }
-                }
-                None if !state.entries.is_empty() => {
-                    let anchor = creation_anchor(self.ast, section);
-                    let mut bytes = String::new();
-                    if !raw[..anchor].is_empty()
-                        && !raw[..anchor].ends_with('\n')
-                        && !prefixed_anchors.contains(&anchor)
-                    {
-                        bytes.push_str(eol);
-                        prefixed_anchors.push(anchor);
-                    }
-                    bytes.push_str(eol);
-                    bytes.push_str(section.block_name());
-                    bytes.push_str(" {");
-                    bytes.push_str(eol);
-                    bytes.push_str(&format_added(state, eol));
-                    bytes.push('}');
-                    bytes.push_str(eol);
-                    replacements.push(Replacement {
-                        span: anchor..anchor,
-                        bytes,
-                    });
-                }
-                None => {}
+            let block = block_node(self.ast, section.block_name());
+            let anchor = if block.is_none() && !state.entries.is_empty() {
+                creation_anchor(self.ast, section)
+            } else {
+                0
+            };
+            let separate = !prefixed_anchors.contains(&anchor);
+            if block.is_none() && !state.entries.is_empty() && separate {
+                prefixed_anchors.push(anchor);
             }
+            replacements.extend(dictionary_replacements(
+                raw,
+                eol,
+                section.block_name(),
+                block,
+                state,
+                anchor,
+                separate,
+            ));
         }
 
         // Une insertion (tranche vide) passe avant un remplacement qui
@@ -404,37 +327,19 @@ impl<'a> Draft<'a> {
     }
 }
 
-fn format_added(section: &Section, eol: &str) -> String {
-    section
-        .entries
-        .iter()
-        .filter(|entry| entry.origin.is_none())
-        .map(|entry| format::format_entry(&entry.key, &entry.value, entry.disabled, eol))
-        .collect()
-}
-
+/// Règles générales (`check_key_general`, `dictionary.rs`) plus la règle
+/// propre aux paramètres de requête (caractères réservés d'une chaîne de
+/// requête dans la clé).
 fn check_key(section: EntrySection, key: &str, index: Option<usize>) -> Result<(), EditError> {
-    let problem = if key.is_empty() {
-        Some(EntryProblem::EmptyKey)
-    } else if key.contains([' ', '\t', '\n', '\r']) {
-        Some(EntryProblem::KeyWhitespace)
-    } else if key.contains(':') {
-        Some(EntryProblem::KeyColon)
-    } else if key.starts_with(['~', '"']) {
-        Some(EntryProblem::KeyLeadingMarker)
-    } else if section == EntrySection::QueryParams && key.contains(['&', '=', '#']) {
-        Some(EntryProblem::QueryKeyReserved)
-    } else {
-        None
-    };
-    match problem {
-        Some(problem) => Err(EditError::InvalidEntry {
+    check_key_general(key, section.block_name(), index)?;
+    if section == EntrySection::QueryParams && key.contains(['&', '=', '#']) {
+        return Err(EditError::InvalidEntry {
             block: section.block_name(),
             index,
-            problem,
-        }),
-        None => Ok(()),
+            problem: EntryProblem::QueryKeyReserved,
+        });
     }
+    Ok(())
 }
 
 fn check_query_value(value: &str, index: Option<usize>) -> Result<(), EditError> {
@@ -446,17 +351,6 @@ fn check_query_value(value: &str, index: Option<usize>) -> Result<(), EditError>
         });
     }
     Ok(())
-}
-
-/// Tranche et entrées du premier bloc dictionnaire portant ce nom.
-fn block_node<'f>(ast: &'f BruFile, name: &str) -> Option<(Range<usize>, &'f [Entry])> {
-    ast.nodes().iter().find_map(|node| match &node.kind {
-        NodeKind::Block(block) if block.name == name => match &block.body {
-            BlockBody::Dictionary(entries) => Some((node.span.clone(), entries.as_slice())),
-            _ => None,
-        },
-        _ => None,
-    })
 }
 
 /// Tranche du premier bloc de méthode.
@@ -481,30 +375,6 @@ fn creation_anchor(ast: &BruFile, section: EntrySection) -> usize {
         }
     }
     anchor.unwrap_or(ast.raw().len())
-}
-
-/// Fin de la ligne commençant à `start` (fin de ligne comprise).
-fn line_end(raw: &str, start: usize) -> usize {
-    raw[start..].find('\n').map_or(raw.len(), |i| start + i + 1)
-}
-
-/// Longueur de la ligne vide qui se termine juste avant `start`, zéro s'il
-/// n'y en a pas.
-fn preceding_blank_line_len(raw: &str, start: usize) -> usize {
-    let before = &raw[..start];
-    let eol_len = if before.ends_with("\r\n") {
-        2
-    } else if before.ends_with('\n') {
-        1
-    } else {
-        return 0;
-    };
-    let rest = &before[..before.len() - eol_len];
-    if rest.is_empty() || rest.ends_with('\n') {
-        eol_len
-    } else {
-        0
-    }
 }
 
 fn url_state(ast: &BruFile) -> Result<UrlState, EditError> {

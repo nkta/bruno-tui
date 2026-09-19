@@ -257,8 +257,19 @@ pub(crate) fn environment_edit_popup_area(
     let width = (screen.width / 2).clamp(36, 60).min(screen.width);
     let max_height = screen.height.saturating_sub(4).max(4);
     // En-tête de colonnes (1) + une ligne par variable (au moins 1 pour
-    // « aucune variable ») + bordure (2).
-    let content_rows = u16::try_from(session.variables.len().max(1)).unwrap_or(u16::MAX);
+    // « aucune variable ») + la ligne provisoire d'un ajout en cours,
+    // s'il y en a un (`add-environment-entry-management`) + bordure (2).
+    let is_adding = matches!(
+        session.state,
+        crate::app::model::EnvironmentEditState::AddingKey(_)
+            | crate::app::model::EnvironmentEditState::AddingValue { .. }
+    );
+    let variable_rows = if is_adding {
+        session.variables.len() + 1
+    } else {
+        session.variables.len().max(1)
+    };
+    let content_rows = u16::try_from(variable_rows).unwrap_or(u16::MAX);
     let height = content_rows.saturating_add(3).clamp(4, max_height);
     let x = screen.x + screen.width.saturating_sub(width) / 2;
     let y = screen.y + screen.height.saturating_sub(height) / 2;
@@ -550,7 +561,7 @@ fn environment_session_help_line(session: &crate::app::model::EnvironmentEditSes
         EnvironmentEditState::Select => {
             let var_name = session.current_variable().map_or("", |v| v.key.as_str());
             format!(
-                "Sélection · {var_name}{unsaved} — ↑↓ variable  Entrée éditer  Ctrl+S sauvegarder  Échap retour"
+                "Sélection · {var_name}{unsaved} — ↑↓ variable  Entrée éditer  a ajouter  d supprimer  Ctrl+S sauvegarder  Échap retour"
             )
         }
         EnvironmentEditState::Input(_) => {
@@ -558,6 +569,12 @@ fn environment_session_help_line(session: &crate::app::model::EnvironmentEditSes
             format!(
                 "Saisie · {var_name}{unsaved} — Entrée valider  Échap annuler  Ctrl+S sauvegarder"
             )
+        }
+        EnvironmentEditState::AddingKey(_) => {
+            format!("Ajout · clé{unsaved} — Entrée/Tab valider  Échap annuler")
+        }
+        EnvironmentEditState::AddingValue { key, .. } => {
+            format!("Ajout · {key}{unsaved} — Entrée/Tab valider  Échap annuler")
         }
     }
 }

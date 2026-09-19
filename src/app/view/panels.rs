@@ -156,17 +156,31 @@ pub fn render_environment_edit_popup(
     area: Rect,
 ) {
     let block = panel(" Environnement ", has_focus);
-    if session.variables.is_empty() {
+    let is_adding = matches!(
+        session.state,
+        EnvironmentEditState::AddingKey(_) | EnvironmentEditState::AddingValue { .. }
+    );
+    if session.variables.is_empty() && !is_adding {
         frame.render_widget(
             empty_state_message(area, "aucune variable").block(block),
             area,
         );
         return;
     }
+
+    // La ligne provisoire (clé et/ou valeur en cours de saisie) compte
+    // dans la largeur de la colonne Clé, pour ne pas désaligner le
+    // tableau pendant qu'on tape une clé plus longue que les existantes.
+    let provisional_key_width = match &session.state {
+        EnvironmentEditState::AddingKey(input) => Some(Line::raw(input.text()).width()),
+        EnvironmentEditState::AddingValue { key, .. } => Some(Line::raw(key.as_str()).width()),
+        _ => None,
+    };
     let key_width = session
         .variables
         .iter()
         .map(|v| Line::raw(v.key.as_str()).width())
+        .chain(provisional_key_width)
         .max()
         .unwrap_or(0)
         .clamp(3, 20);
@@ -195,13 +209,40 @@ pub fn render_environment_edit_popup(
         ListItem::new(Line::from(vec![key_span, val_span]))
     }));
 
+    // Ligne provisoire de l'ajout en cours, en fin de tableau
+    // (`add-environment-entry-management`).
+    let provisional_row = match &session.state {
+        EnvironmentEditState::AddingKey(input) => Some(Line::from(vec![
+            Span::styled(
+                format!("{:<key_width$}{ENV_TABLE_SEPARATOR}", input.text()),
+                theme::LABEL,
+            ),
+            Span::raw(""),
+        ])),
+        EnvironmentEditState::AddingValue { key, input } => Some(Line::from(vec![
+            Span::styled(
+                format!("{key:<key_width$}{ENV_TABLE_SEPARATOR}"),
+                theme::LABEL,
+            ),
+            Span::raw(input.text().to_owned()),
+        ])),
+        _ => None,
+    };
+    if let Some(row) = provisional_row {
+        items.push(ListItem::new(row));
+    }
+
     // +1 : la ligne d'en-tête occupe l'indice 0, jamais sélectionnable.
-    let selected = Some(
-        session
-            .cursor
-            .min(session.variables.len().saturating_sub(1))
-            + 1,
-    );
+    let selected = if is_adding {
+        Some(items.len() - 1)
+    } else {
+        Some(
+            session
+                .cursor
+                .min(session.variables.len().saturating_sub(1))
+                + 1,
+        )
+    };
     let mut list_state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(
         List::new(items)
@@ -211,23 +252,38 @@ pub fn render_environment_edit_popup(
         &mut list_state,
     );
 
-    if let EnvironmentEditState::Input(input) = &session.state {
-        let inner_area = inner(area);
-        if inner_area.width > 0 && inner_area.height > 0 {
-            let rel_y = session.cursor as u16 + 1;
-            if rel_y < inner_area.height {
-                let cursor_y = inner_area.y + rel_y;
-                let prefix_width = u16::try_from(key_width + ENV_TABLE_SEPARATOR.chars().count())
-                    .unwrap_or(u16::MAX);
-                let text_before = input.text_before_cursor_on_line();
-                let text_width =
-                    u16::try_from(Line::raw(text_before.as_str()).width()).unwrap_or(u16::MAX);
-                let max_col = inner_area.width.saturating_sub(1);
-                let cursor_x = inner_area.x + (prefix_width + text_width).min(max_col);
-                frame.set_cursor_position((cursor_x, cursor_y));
-            }
-        }
+    let inner_area = inner(area);
+    if inner_area.width == 0 || inner_area.height == 0 {
+        return;
     }
+    let (rel_y, prefix_width, text) = match &session.state {
+        EnvironmentEditState::Input(input) => (
+            session.cursor as u16 + 1,
+            key_width,
+            input.text_before_cursor_on_line(),
+        ),
+        EnvironmentEditState::AddingKey(input) => (
+            selected.map_or(0, |i| i as u16),
+            0,
+            input.text_before_cursor_on_line(),
+        ),
+        EnvironmentEditState::AddingValue { key, input } => (
+            selected.map_or(0, |i| i as u16),
+            key_width.max(Line::raw(key.as_str()).width()),
+            input.text_before_cursor_on_line(),
+        ),
+        EnvironmentEditState::Select => return,
+    };
+    if rel_y >= inner_area.height {
+        return;
+    }
+    let cursor_y = inner_area.y + rel_y;
+    let prefix_width =
+        u16::try_from(prefix_width + ENV_TABLE_SEPARATOR.chars().count()).unwrap_or(u16::MAX);
+    let text_width = u16::try_from(Line::raw(text.as_str()).width()).unwrap_or(u16::MAX);
+    let max_col = inner_area.width.saturating_sub(1);
+    let cursor_x = inner_area.x + (prefix_width + text_width).min(max_col);
+    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
 /// Dessine le panneau plein corps des variables secrètes : bandeau

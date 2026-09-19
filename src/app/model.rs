@@ -15,7 +15,7 @@ use crate::collection::{
 };
 use crate::runner::{self, SecretString};
 use crate::secrets::{Resolved, SecretLookup, SecretMapping, SecretSource, is_valid_name};
-use crate::writer::{EntrySection, FieldEdit, FileStamp};
+use crate::writer::{EntrySection, EnvironmentVarEdit, FieldEdit, FileStamp};
 
 use super::filter::FilterState;
 use super::message::TextCapture;
@@ -287,12 +287,34 @@ impl EditSession {
     }
 }
 
-/// État d'une session d'édition d'environnement : sélection de la variable,
-/// ou saisie de sa valeur.
+/// État d'une session d'édition d'environnement : sélection de la
+/// variable, saisie de sa valeur, ou ajout d'une variable en deux temps
+/// (`add-environment-entry-management`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvironmentEditState {
     Select,
     Input(TextInput),
+    /// Ajout d'une variable : saisie de la clé.
+    AddingKey(TextInput),
+    /// Ajout d'une variable : clé déjà validée, saisie de la valeur.
+    AddingValue {
+        key: String,
+        input: TextInput,
+    },
+}
+
+impl EnvironmentEditState {
+    /// Le `TextInput` porté par cet état, s'il y en a un — couvre les
+    /// trois variantes de saisie de texte, pour ne pas tripler le même
+    /// branchement dans `update.rs` (design D3).
+    pub fn text_input_mut(&mut self) -> Option<&mut TextInput> {
+        match self {
+            EnvironmentEditState::Input(input)
+            | EnvironmentEditState::AddingKey(input)
+            | EnvironmentEditState::AddingValue { input, .. } => Some(input),
+            EnvironmentEditState::Select => None,
+        }
+    }
 }
 
 /// Session d'édition des variables d'un environnement.
@@ -310,6 +332,13 @@ pub struct EnvironmentEditSession {
     pub state: EnvironmentEditState,
     /// Au moins une variable a été modifiée par rapport à l'état initial.
     pub dirty: bool,
+    /// Journal ordonné des modifications validées (valeur, ajout,
+    /// suppression), appliqué tel quel par `bru-writer` : un indice y
+    /// désigne la position dans `variables` telle qu'elle résulte des
+    /// modifications précédentes de la même liste — même principe que
+    /// `EditSession.pending` pour une requête
+    /// (`add-environment-entry-management`, design D3).
+    pub pending: Vec<EnvironmentVarEdit>,
 }
 
 impl EnvironmentEditSession {
@@ -323,6 +352,7 @@ impl EnvironmentEditSession {
             cursor: 0,
             state: EnvironmentEditState::Select,
             dirty: false,
+            pending: Vec::new(),
         }
     }
 
@@ -354,17 +384,81 @@ impl EnvironmentEditSession {
         if let Some(var) = self.variables.get_mut(self.cursor)
             && var.value != text
         {
-            var.value = text;
+            var.value = text.clone();
             self.dirty = true;
+            self.pending.push(EnvironmentVarEdit::Value {
+                index: self.cursor,
+                value: text,
+            });
         }
         self.state = EnvironmentEditState::Select;
         true
     }
 
-    /// Annule la saisie en cours et restaure l'état de sélection sans modifier
-    /// la valeur ni changer `dirty`.
+    /// Annule la saisie en cours et restaure l'état de sélection, sans
+    /// rien modifier — que ce soit une saisie de valeur ou un ajout en
+    /// cours (`AddingKey`/`AddingValue`) : dans tous les cas, `Échap`
+    /// abandonne l'ajout entier sans rien ajouter
+    /// (`add-environment-entry-management`).
     pub fn cancel_input(&mut self) {
         self.state = EnvironmentEditState::Select;
+    }
+
+    /// Démarre l'ajout d'une variable : saisie de la clé, texte vide.
+    pub fn begin_add(&mut self) {
+        self.state = EnvironmentEditState::AddingKey(TextInput::new("", false));
+    }
+
+    /// Fait passer l'ajout de la saisie de la clé à celle de la valeur ;
+    /// `key` est supposée déjà validée par l'appelant (`update.rs`, qui
+    /// seul a accès à l'AST pour la vérifier via `bru-writer`). Sans
+    /// effet hors de `AddingKey`.
+    pub fn advance_add_to_value(&mut self, key: String) {
+        if matches!(self.state, EnvironmentEditState::AddingKey(_)) {
+            self.state = EnvironmentEditState::AddingValue {
+                key,
+                input: TextInput::new("", false),
+            };
+        }
+    }
+
+    /// Termine l'ajout en cours : ajoute la variable en fin de liste,
+    /// activée, curseur dessus, session modifiée. Sans effet hors de
+    /// `AddingValue`.
+    pub fn finish_add(&mut self) {
+        let EnvironmentEditState::AddingValue { key, input } = &self.state else {
+            return;
+        };
+        let key = key.clone();
+        let value = input.text().to_owned();
+        self.variables.push(KeyValue {
+            key: key.clone(),
+            value: value.clone(),
+            enabled: true,
+        });
+        self.cursor = self.variables.len() - 1;
+        self.dirty = true;
+        self.pending.push(EnvironmentVarEdit::Add {
+            key,
+            value,
+            enabled: true,
+        });
+        self.state = EnvironmentEditState::Select;
+    }
+
+    /// Retire la variable sous le curseur, immédiatement, sans
+    /// confirmation ; le curseur reste au même indice, borné à la
+    /// dernière position. Sans effet si la liste est vide.
+    pub fn remove_current(&mut self) -> bool {
+        if self.cursor >= self.variables.len() {
+            return false;
+        }
+        self.variables.remove(self.cursor);
+        self.dirty = true;
+        self.pending
+            .push(EnvironmentVarEdit::Remove { index: self.cursor });
+        self.cursor = self.cursor.min(self.variables.len().saturating_sub(1));
+        true
     }
 
     /// Indique si la session a des modifications non enregistrées.
@@ -372,7 +466,10 @@ impl EnvironmentEditSession {
         self.dirty
             || match &self.state {
                 EnvironmentEditState::Select => false,
-                EnvironmentEditState::Input(input) => input.is_modified(),
+                EnvironmentEditState::Input(input) | EnvironmentEditState::AddingKey(input) => {
+                    input.is_modified()
+                }
+                EnvironmentEditState::AddingValue { .. } => true,
             }
     }
 }
@@ -808,10 +905,14 @@ impl Model {
             .editing
             .as_ref()
             .is_some_and(|s| matches!(s.state, EditState::Input(_)))
-            || self
-                .environment_editing
-                .as_ref()
-                .is_some_and(|s| matches!(s.state, EnvironmentEditState::Input(_)))
+            || self.environment_editing.as_ref().is_some_and(|s| {
+                matches!(
+                    s.state,
+                    EnvironmentEditState::Input(_)
+                        | EnvironmentEditState::AddingKey(_)
+                        | EnvironmentEditState::AddingValue { .. }
+                )
+            })
         {
             return Some(TextCapture::Input);
         }
@@ -1634,6 +1735,134 @@ mod tests {
         // begin_input doit refuser
         assert!(!session.begin_input());
         assert_eq!(session.state, EnvironmentEditState::Select);
+        assert!(!session.dirty);
+    }
+
+    fn sample_env_session() -> EnvironmentEditSession {
+        let stamp = FileStamp::capture(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/collections/parser-cases/environments/local.bru"),
+        )
+        .expect("stamp");
+        let variables = vec![
+            KeyValue {
+                key: "host".into(),
+                value: "localhost".into(),
+                enabled: true,
+            },
+            KeyValue {
+                key: "debug".into(),
+                value: "true".into(),
+                enabled: false,
+            },
+        ];
+        EnvironmentEditSession::new(
+            "local".into(),
+            PathBuf::from("environments/local.bru"),
+            stamp,
+            variables,
+        )
+    }
+
+    #[test]
+    fn environment_edit_session_full_add_sequence() {
+        let mut session = sample_env_session();
+
+        session.begin_add();
+        assert!(matches!(session.state, EnvironmentEditState::AddingKey(_)));
+        assert!(
+            !session.has_unsaved(),
+            "clé pas encore tapée : rien à perdre"
+        );
+
+        if let EnvironmentEditState::AddingKey(input) = &mut session.state {
+            for c in "region".chars() {
+                input.insert(c);
+            }
+        }
+        assert!(session.has_unsaved(), "clé en cours de saisie");
+        session.advance_add_to_value("region".into());
+        assert!(matches!(
+            &session.state,
+            EnvironmentEditState::AddingValue { key, .. } if key == "region"
+        ));
+        assert!(!session.dirty, "pas encore ajoutée");
+
+        if let EnvironmentEditState::AddingValue { input, .. } = &mut session.state {
+            for c in "eu-west".chars() {
+                input.insert(c);
+            }
+        }
+        session.finish_add();
+
+        assert_eq!(session.state, EnvironmentEditState::Select);
+        assert!(session.dirty);
+        assert_eq!(session.cursor, 2);
+        assert_eq!(session.variables.len(), 3);
+        assert_eq!(session.variables[2].key, "region");
+        assert_eq!(session.variables[2].value, "eu-west");
+        assert!(session.variables[2].enabled);
+        assert_eq!(
+            session.pending,
+            vec![crate::writer::EnvironmentVarEdit::Add {
+                key: "region".into(),
+                value: "eu-west".into(),
+                enabled: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn environment_edit_session_cancel_input_abandons_add_at_either_step() {
+        // Abandon pendant la saisie de la clé.
+        let mut session = sample_env_session();
+        session.begin_add();
+        if let EnvironmentEditState::AddingKey(input) = &mut session.state {
+            input.insert('x');
+        }
+        session.cancel_input();
+        assert_eq!(session.state, EnvironmentEditState::Select);
+        assert_eq!(session.variables.len(), 2);
+        assert!(session.pending.is_empty());
+
+        // Abandon pendant la saisie de la valeur : la clé déjà validée
+        // n'ajoute rien non plus.
+        session.begin_add();
+        session.advance_add_to_value("region".into());
+        if let EnvironmentEditState::AddingValue { input, .. } = &mut session.state {
+            input.insert('x');
+        }
+        session.cancel_input();
+        assert_eq!(session.state, EnvironmentEditState::Select);
+        assert_eq!(session.variables.len(), 2);
+        assert!(session.pending.is_empty());
+    }
+
+    #[test]
+    fn environment_edit_session_remove_current_bounds_cursor() {
+        let mut session = sample_env_session();
+        session.variables.push(KeyValue {
+            key: "region".into(),
+            value: "eu".into(),
+            enabled: true,
+        });
+        session.cursor = 2; // "region", la dernière
+
+        assert!(session.remove_current());
+        assert_eq!(session.variables.len(), 2);
+        assert_eq!(session.cursor, 1, "borné à la dernière position restante");
+        assert!(session.dirty);
+        assert_eq!(
+            session.pending,
+            vec![crate::writer::EnvironmentVarEdit::Remove { index: 2 }]
+        );
+    }
+
+    #[test]
+    fn environment_edit_session_remove_current_on_empty_list_does_nothing() {
+        let mut session = sample_env_session();
+        session.variables.clear();
+        assert!(!session.remove_current());
         assert!(!session.dirty);
     }
 

@@ -696,7 +696,7 @@ fn environment_vars_edit_matches_after_fixture() {
         &path,
         &ast,
         &stamp,
-        &[EnvironmentVarEdit {
+        &[EnvironmentVarEdit::Value {
             index: 0,
             value: "staging.example.com:443".into(),
         }],

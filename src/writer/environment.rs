@@ -1,30 +1,51 @@
 //! Écriture de modifications de variables dans le bloc `vars` d'un fichier
 //! `.bru` d'environnement.
 //!
-//! Ne réécrit que les tranches de source correspondant aux variables éditées ;
-//! le reste du fichier (autres variables, variables secrètes, commentaires,
-//! fins de ligne) est réémis à l'octet près.
+//! Ne réécrit que les tranches de source correspondant aux variables
+//! touchées (valeur modifiée, ajoutée ou supprimée) ; le reste du fichier
+//! (autres variables, variables secrètes, commentaires, fins de ligne) est
+//! réémis à l'octet près. Diffusion d'un ajout ou d'une suppression
+//! déléguée à `dictionary::dictionary_replacements`, partagée avec le
+//! writer de requête (`add-environment-entry-management`, design D1).
 
-use std::collections::HashMap;
 use std::path::Path;
 
+use super::dictionary::{
+    DictEntry, DictSection, block_node, check_key_general, dictionary_replacements,
+};
 use super::edit::Replacement;
 use super::error::{EditError, WriteError};
-use super::format::{detect_eol, format_entry};
+use super::format::detect_eol;
 use super::{FileStamp, write_atomic};
 use crate::collection::BruFile;
 
-/// Modification de la valeur d'une variable du bloc `vars` d'un environnement.
+/// Position d'insertion du bloc `vars` s'il n'existe pas encore : tout
+/// début de fichier, cohérent avec les fichiers d'environnement réels où
+/// `vars` précède toujours `vars:secret` (design D2).
+const VARS_CREATION_ANCHOR: usize = 0;
+
+/// Modification des variables du bloc `vars` d'un environnement.
+///
+/// Les indices s'appliquent dans l'ordre de la liste : un indice désigne
+/// la position dans les variables telle qu'elle résulte des modifications
+/// précédentes de la même liste (même principe que `FieldEdit` pour une
+/// requête).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnvironmentVarEdit {
-    pub index: usize,
-    pub value: String,
+pub enum EnvironmentVarEdit {
+    /// Nouvelle valeur d'une variable déjà présente.
+    Value { index: usize, value: String },
+    /// Ajout d'une variable en fin de bloc.
+    Add {
+        key: String,
+        value: String,
+        enabled: bool,
+    },
+    /// Suppression d'une variable.
+    Remove { index: usize },
 }
 
-/// Résout les modifications de variables d'un environnement vers les tranches
-/// de source à remplacer.
-///
-/// Ne produit une tranche que si la valeur a effectivement changé.
+/// Résout les modifications de variables d'un environnement vers les
+/// tranches de source à remplacer.
 pub(crate) fn resolve(
     ast: &BruFile,
     edits: &[EnvironmentVarEdit],
@@ -33,39 +54,69 @@ pub(crate) fn resolve(
         return Ok(Vec::new());
     }
 
-    let entries = ast
-        .dictionary("vars")
-        .ok_or(EditError::NoSuchBlock { block: "vars" })?;
+    let block = block_node(ast, "vars");
+    let mut section = DictSection {
+        entries: block
+            .as_ref()
+            .map_or(&[][..], |(_, entries)| entries)
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| DictEntry::from_entry(index, entry))
+            .collect(),
+        block_present: block.is_some(),
+        touched: false,
+    };
 
-    // Si plusieurs modifications ciblent le même indice, la dernière l'emporte.
-    let mut latest_edits: HashMap<usize, &str> = HashMap::new();
     for edit in edits {
-        if edit.index >= entries.len() {
-            return Err(EditError::IndexOutOfRange {
-                block: "vars",
-                index: edit.index,
-            });
+        match edit {
+            EnvironmentVarEdit::Value { index, value } => {
+                let entry = section
+                    .entries
+                    .get_mut(*index)
+                    .ok_or(EditError::IndexOutOfRange {
+                        block: "vars",
+                        index: *index,
+                    })?;
+                entry.value = value.clone();
+            }
+            EnvironmentVarEdit::Add {
+                key,
+                value,
+                enabled,
+            } => {
+                check_key_general(key, "vars", None)?;
+                section.entries.push(DictEntry {
+                    origin: None,
+                    key: key.clone(),
+                    value: value.clone(),
+                    disabled: !enabled,
+                });
+                section.touched = true;
+            }
+            EnvironmentVarEdit::Remove { index } => {
+                if *index >= section.entries.len() {
+                    return Err(EditError::IndexOutOfRange {
+                        block: "vars",
+                        index: *index,
+                    });
+                }
+                section.entries.remove(*index);
+                section.touched = true;
+            }
         }
-        latest_edits.insert(edit.index, &edit.value);
     }
 
-    let eol = detect_eol(ast.raw());
-    let mut replacements = Vec::new();
-
-    // On parcourt les entrées dans l'ordre pour produire des remplacements triés.
-    for (index, entry) in entries.iter().enumerate() {
-        if let Some(&new_value) = latest_edits.get(&index)
-            && entry.value != new_value
-        {
-            let bytes = format_entry(&entry.key, new_value, entry.disabled, eol);
-            replacements.push(Replacement {
-                span: entry.span.clone(),
-                bytes,
-            });
-        }
-    }
-
-    Ok(replacements)
+    let raw = ast.raw();
+    let eol = detect_eol(raw);
+    Ok(dictionary_replacements(
+        raw,
+        eol,
+        "vars",
+        block,
+        &section,
+        VARS_CREATION_ANCHOR,
+        true,
+    ))
 }
 
 /// Sérialise l'AST avec les modifications appliquées.
@@ -122,7 +173,7 @@ mod tests {
         let source = "vars {\n  host: localhost\n  ~debug: true\n}\n\nvars:secret [\n  token\n]\n";
         let file = parse(source);
 
-        let edits = vec![EnvironmentVarEdit {
+        let edits = vec![EnvironmentVarEdit::Value {
             index: 0,
             value: "staging.example.com".into(),
         }];
@@ -142,7 +193,7 @@ mod tests {
         let source = "vars {\n  host: localhost\n}\n";
         let file = parse(source);
 
-        let edits = vec![EnvironmentVarEdit {
+        let edits = vec![EnvironmentVarEdit::Value {
             index: 0,
             value: "localhost".into(),
         }];
@@ -159,18 +210,24 @@ mod tests {
         let file_no_vars = parse("vars:secret [\n  token\n]\n");
         let err = resolve(
             &file_no_vars,
-            &[EnvironmentVarEdit {
+            &[EnvironmentVarEdit::Value {
                 index: 0,
                 value: "x".into(),
             }],
         )
-        .expect_err("bloc manquant");
-        assert!(matches!(err, EditError::NoSuchBlock { block: "vars" }));
+        .expect_err("indice hors limites (aucune entrée)");
+        assert!(matches!(
+            err,
+            EditError::IndexOutOfRange {
+                block: "vars",
+                index: 0
+            }
+        ));
 
         let file = parse("vars {\n  host: localhost\n}\n");
         let err_oob = resolve(
             &file,
-            &[EnvironmentVarEdit {
+            &[EnvironmentVarEdit::Value {
                 index: 2,
                 value: "x".into(),
             }],
@@ -183,6 +240,80 @@ mod tests {
                 index: 2
             }
         ));
+    }
+
+    #[test]
+    fn resolve_adds_a_variable_to_an_existing_block() {
+        let file = parse("vars {\n  host: localhost\n}\n");
+        let edits = vec![EnvironmentVarEdit::Add {
+            key: "region".into(),
+            value: "eu-west".into(),
+            enabled: true,
+        }];
+        let serialized = serialize(&file, &edits).expect("sérialisation");
+        assert_eq!(
+            String::from_utf8(serialized).expect("utf-8"),
+            "vars {\n  host: localhost\n  region: eu-west\n}\n"
+        );
+    }
+
+    #[test]
+    fn resolve_creates_the_vars_block_when_absent() {
+        let file = parse("vars:secret [\n  token\n]\n");
+        let edits = vec![EnvironmentVarEdit::Add {
+            key: "host".into(),
+            value: "localhost".into(),
+            enabled: true,
+        }];
+        let serialized = serialize(&file, &edits).expect("sérialisation");
+        assert_eq!(
+            String::from_utf8(serialized).expect("utf-8"),
+            "vars {\n  host: localhost\n}\n\nvars:secret [\n  token\n]\n"
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_an_invalid_key_on_add() {
+        let file = parse("vars {\n  host: localhost\n}\n");
+        let err = resolve(
+            &file,
+            &[EnvironmentVarEdit::Add {
+                key: "in valid".into(),
+                value: "x".into(),
+                enabled: true,
+            }],
+        )
+        .expect_err("clé invalide");
+        assert!(matches!(
+            err,
+            EditError::InvalidEntry {
+                block: "vars",
+                problem: crate::writer::EntryProblem::KeyWhitespace,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolve_removes_a_variable_among_others() {
+        let file = parse("vars {\n  host: localhost\n  debug: true\n  region: eu\n}\n");
+        let edits = vec![EnvironmentVarEdit::Remove { index: 1 }];
+        let serialized = serialize(&file, &edits).expect("sérialisation");
+        assert_eq!(
+            String::from_utf8(serialized).expect("utf-8"),
+            "vars {\n  host: localhost\n  region: eu\n}\n"
+        );
+    }
+
+    #[test]
+    fn resolve_removing_the_last_variable_drops_the_block() {
+        let file = parse("vars {\n  host: localhost\n}\n\nvars:secret [\n  token\n]\n");
+        let edits = vec![EnvironmentVarEdit::Remove { index: 0 }];
+        let serialized = serialize(&file, &edits).expect("sérialisation");
+        assert_eq!(
+            String::from_utf8(serialized).expect("utf-8"),
+            "vars:secret [\n  token\n]\n"
+        );
     }
 
     #[test]
@@ -199,7 +330,7 @@ mod tests {
             &path,
             &file,
             &stamp,
-            &[EnvironmentVarEdit {
+            &[EnvironmentVarEdit::Value {
                 index: 0,
                 value: "staging.example.com".into(),
             }],
@@ -233,7 +364,7 @@ mod tests {
             &path,
             &file,
             &stamp,
-            &[EnvironmentVarEdit {
+            &[EnvironmentVarEdit::Value {
                 index: 0,
                 value: "new-val".into(),
             }],
