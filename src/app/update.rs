@@ -6708,6 +6708,62 @@ mod mouse_tests {
         assert!(input_text(&model).is_none());
     }
 
+    /// Clic sur la ligne « aucun » d'une section vide hors session :
+    /// ouvre la session et démarre l'ajout sur cette section.
+    #[test]
+    fn click_on_empty_section_row_without_session_starts_add() {
+        let mut model = model_on("simple-get.bru", (140, 40));
+        let point = field_point(&model, EditableField::AddRow(EntrySection::Headers));
+        click(&mut model, point);
+        assert_eq!(model.focus, Focus::Detail);
+        let session = model.editing.as_ref().expect("session");
+        assert!(matches!(session.state, EditState::Input(_)));
+        assert!(matches!(
+            session.target,
+            InputTarget::NewKey {
+                section: EntrySection::Headers,
+                ..
+            }
+        ));
+        assert_eq!(input_text(&model).as_deref(), Some(""));
+    }
+
+    /// Clic sur la ligne « aucun » pour chacune des trois sections :
+    /// chacune ouvre l'ajout sur la bonne section et non sur une autre.
+    #[test]
+    fn click_on_empty_section_row_starts_add_for_correct_section() {
+        for section in [
+            EntrySection::Headers,
+            EntrySection::QueryParams,
+            EntrySection::PathParams,
+        ] {
+            let mut model = model_on("simple-get.bru", (140, 40));
+            let point = field_point(&model, EditableField::AddRow(section));
+            click(&mut model, point);
+            assert_eq!(model.focus, Focus::Detail);
+            let session = model.editing.as_ref().expect("session");
+            assert!(matches!(session.state, EditState::Input(_)));
+            assert!(
+                matches!(session.target, InputTarget::NewKey { section: s, .. } if s == section),
+                "l'ajout doit démarrer sur {section:?}"
+            );
+            assert_eq!(input_text(&model).as_deref(), Some(""));
+        }
+    }
+
+    /// Section ayant déjà une entrée, sans session ouverte :
+    /// un clic sous la dernière entrée (cadre inférieur de section)
+    /// ne fait que donner le focus au détail sans ouvrir de session.
+    #[test]
+    fn click_under_existing_entry_without_session_only_focuses_detail() {
+        let mut model = model_on("post-json.bru", (140, 40));
+        let header = field_line(&model, EditableField::HeaderValue(0));
+        let point = line_point(&model, true, header + 1);
+        click(&mut model, point);
+        assert_eq!(model.focus, Focus::Detail);
+        assert!(model.editing.is_none());
+    }
+
     // --- Copie ----------------------------------------------------------------
 
     #[test]

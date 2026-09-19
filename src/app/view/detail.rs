@@ -461,6 +461,12 @@ fn editable_entries(
     section: EntrySection,
 ) {
     if values.is_empty() && session.is_none() {
+        field_lines.push(FieldLine {
+            field: EditableField::AddRow(section),
+            line: lines.len(),
+            count: 1,
+            prefix_width: 2,
+        });
         lines.push(Line::raw("  aucun"));
         return;
     }
@@ -1934,5 +1940,36 @@ mod tests {
         small_terminal
             .draw(|frame| super::super::view(&model, frame))
             .expect("rendu 1x1");
+    }
+
+    /// Hors session, une section vide affiche « aucun » et enregistre un
+    /// `FieldLine` pour `EditableField::AddRow` sur cette ligne.
+    #[test]
+    fn empty_section_without_session_has_add_row_field_line_on_aucun() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        let (text, fields, _) = request_text_and_fields(request, None);
+        for section in [
+            EntrySection::Headers,
+            EntrySection::QueryParams,
+            EntrySection::PathParams,
+        ] {
+            let field_line = fields
+                .iter()
+                .find(|fl| fl.field == EditableField::AddRow(section))
+                .unwrap_or_else(|| panic!("FieldLine pour AddRow({section:?}) manquant"));
+            assert_eq!(field_line.count, 1);
+            assert_eq!(field_line.prefix_width, 2);
+            let line_content = &text.lines[field_line.line];
+            let rendered: String = line_content
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert_eq!(rendered, "  aucun");
+        }
     }
 }
