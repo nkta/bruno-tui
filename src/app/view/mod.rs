@@ -16,7 +16,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{
     CollectionState, EditState, Focus, Model, PendingConfirm, RunFailure, StatusMessage,
@@ -159,13 +159,10 @@ pub fn view(model: &Model, frame: &mut Frame) {
             Focus::History => {
                 panels::render_history(model, frame, areas.body);
             }
-            Focus::EnvironmentPicker => {
-                panels::render_environment_picker(model, frame, areas.body);
-            }
             Focus::Secrets => {
                 panels::render_secrets(model, frame, areas.body);
             }
-            Focus::Tree | Focus::Detail | Focus::Response => {
+            Focus::Tree | Focus::Detail | Focus::Response | Focus::EnvironmentPicker => {
                 render_tree(model, frame, areas.tree);
                 let detail_block = panel(" Détail ", model.focus == Focus::Detail);
                 match model.selected_node() {
@@ -189,6 +186,15 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 render_insert_cursor(model, frame, areas.detail);
                 render_status_panel(model, frame, &areas);
                 render_response(model, frame, areas.response);
+
+                // Menu déroulant Environnement : superposé en haut à droite,
+                // par-dessus le corps normal déjà dessiné ci-dessus, sans le
+                // remplacer (`redesign-environment-picker-as-dropdown`).
+                if model.focus == Focus::EnvironmentPicker {
+                    let dropdown_area = environment_dropdown_area(frame.area(), model);
+                    frame.render_widget(Clear, dropdown_area);
+                    panels::render_environment_picker(model, frame, dropdown_area);
+                }
             }
         },
     }
@@ -197,6 +203,35 @@ pub fn view(model: &Model, frame: &mut Frame) {
         Paragraph::new(status_line(model)).style(Style::new().add_modifier(Modifier::DIM)),
         areas.status,
     );
+}
+
+/// Nombre de lignes de contenu (hors bordure) qu'afficherait le menu
+/// déroulant Environnement pour l'état courant du modèle : les variables
+/// de l'environnement ouvert au drill-down, sinon « Aucun » plus une
+/// ligne par environnement de la collection.
+fn environment_dropdown_item_count(model: &Model) -> u16 {
+    let count = if let Some(session) = &model.environment_editing {
+        session.variables.len().max(1)
+    } else if let Some(collection) = model.loaded() {
+        1 + collection.environments.len()
+    } else {
+        1
+    };
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
+/// Zone du menu déroulant Environnement : ancré en haut à droite de
+/// `screen`, sous la ligne de titre, jamais hors de l'écran
+/// (`redesign-environment-picker-as-dropdown`, design D2).
+fn environment_dropdown_area(screen: Rect, model: &Model) -> Rect {
+    let width = (screen.width / 3).clamp(28, 44).min(screen.width);
+    let max_height = screen.height.saturating_sub(4).max(3);
+    let height = environment_dropdown_item_count(model)
+        .saturating_add(2)
+        .clamp(3, max_height);
+    let x = screen.x + screen.width.saturating_sub(width);
+    let y = screen.y + 1;
+    Rect::new(x, y, width, height)
 }
 
 /// Une saisie de champ est en cours sur la requête affichée.
@@ -1440,17 +1475,36 @@ mod tests {
         assert!(screen.contains("Aucun environnement"), "{screen}");
         assert!(!screen.contains("Environnement"), "{screen}");
 
-        // Panneau ouvert : « Aucun » + les 3 entrées, celle en erreur marquée
+        // Panneau ouvert : menu déroulant en haut à droite, superposé au
+        // corps normal (`redesign-environment-picker-as-dropdown`) — le
+        // reste de l'écran (arbre, détail) reste visible derrière.
         model.focus = Focus::EnvironmentPicker;
-        let screen = render(&model, 100, 30).join("\n");
+        let lines = render(&model, 100, 30);
+        let screen = lines.join("\n");
         assert!(screen.contains("Environnement"), "{screen}");
         assert!(screen.contains("Aucun"), "{screen}");
         assert!(screen.contains("local"), "{screen}");
         assert!(screen.contains("staging"), "{screen}");
+        // Le menu est étroit (largeur bornée à 44 colonnes) : l'entrée en
+        // erreur, plus longue, est tronquée mais reste reconnaissable.
         assert!(
-            screen.contains("malformed.bru (invalide)"),
+            screen.contains("malformed.bru"),
             "entrée en erreur non marquée : {screen}"
         );
+        assert!(
+            lines[1].contains("Collection") && lines[1].contains("Détail"),
+            "l'arbre et le détail doivent rester visibles derrière le menu : {}",
+            lines[1]
+        );
+
+        // Le coin du menu est bien dessiné à la position calculée : le
+        // corps dessiné dessous ne transparaît pas à travers (`Clear`).
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| view(&model, frame)).expect("rendu");
+        let dropdown = environment_dropdown_area(Rect::new(0, 0, 100, 30), &model);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(dropdown.x, dropdown.y)].symbol(), "┌");
 
         // Indicateur mis à jour après sélection
         model.current_environment = Some("staging".into());
@@ -1458,6 +1512,37 @@ mod tests {
         let screen = render(&model, 100, 30).join("\n");
         assert!(screen.contains("staging"), "{screen}");
         assert!(!screen.contains("Aucun environnement"), "{screen}");
+    }
+
+    /// La zone du menu déroulant Environnement reste toujours dans les
+    /// limites de l'écran, y compris au plancher `MIN_WIDTH`/`MIN_HEIGHT`
+    /// (`redesign-environment-picker-as-dropdown`, design D2).
+    #[test]
+    fn environment_dropdown_area_stays_within_screen_bounds() {
+        let mut model = loaded_model((100, 30));
+
+        for (width, height) in [(MIN_WIDTH, MIN_HEIGHT), (100, 30), (240, 60)] {
+            let screen = Rect::new(0, 0, width, height);
+
+            // Liste des environnements (pas de drill-down).
+            let area = environment_dropdown_area(screen, &model);
+            assert!(
+                area.x + area.width <= screen.width && area.y + area.height <= screen.height,
+                "liste hors écran à {width}x{height} : {area:?}"
+            );
+            assert!(area.width > 0 && area.height > 0, "{area:?}");
+
+            // Vue des variables (davantage de lignes potentielles).
+            model.focus = Focus::EnvironmentPicker;
+            model.environment_selected = 1;
+            update(&mut model, Message::Enter);
+            let area = environment_dropdown_area(screen, &model);
+            assert!(
+                area.x + area.width <= screen.width && area.y + area.height <= screen.height,
+                "variables hors écran à {width}x{height} : {area:?}"
+            );
+            model.environment_editing = None;
+        }
     }
 
     /// La bordure d'un panneau porte `theme::BORDER` sans focus,
@@ -2004,17 +2089,19 @@ mod tests {
         let content = lines.join("\n");
         assert!(content.contains("localhost:3000!"), "{content}");
 
-        // Vérification de la position du curseur
+        // Vérification de la position du curseur, relative au menu
+        // déroulant (`redesign-environment-picker-as-dropdown`) : ancré en
+        // haut à droite, pas à l'origine de l'écran.
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("curseur");
-        // Le panneau Environnement prend tout le corps (areas.body)
-        // La ligne 0 du corps a y = 1 (sous le titre)
-        // La première variable est sur y = 2 (dans le bloc)
-        assert_eq!(cursor.y, 2);
-        // Prefix "  host: " a une largeur de 8, "localhost:3000!" a une longueur de 15 -> x = 1 + 8 + 15 = 24
-        assert_eq!(cursor.x, 1 + 8 + 15);
+        let dropdown = environment_dropdown_area(Rect::new(0, 0, 100, 30), &model);
+        // Bordure du menu (+1), puis la première variable sur la ligne 0
+        // de son contenu (+0).
+        assert_eq!(cursor.y, dropdown.y + 1);
+        // Préfixe "  host: " (largeur 8) puis "localhost:3000!" (largeur 15).
+        assert_eq!(cursor.x, dropdown.x + 1 + 8 + 15);
     }
 
     #[test]
