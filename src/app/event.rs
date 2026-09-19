@@ -5,7 +5,10 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use ratatui::crossterm::event::{self, Event};
 use tokio::sync::mpsc;
@@ -59,16 +62,43 @@ pub enum AppEvent {
 /// Lance le thread qui lit le terminal et publie ses événements.
 ///
 /// Le thread s'arrête quand la boucle a fermé le canal ou quand la lecture
-/// échoue. Il n'est pas joint : bloqué dans `read`, il disparaît avec le
-/// processus.
-pub fn spawn_terminal_reader(events: mpsc::Sender<AppEvent>) -> io::Result<()> {
+/// échoue. Il n'est pas joint : il disparaît avec le processus. Pendant une
+/// suspension (`suspended == true`), le thread n'appelle ni `poll` ni `read`
+/// pour laisser l'entrée standard au processus externe.
+pub fn spawn_terminal_reader(
+    events: mpsc::Sender<AppEvent>,
+    suspended: Arc<AtomicBool>,
+) -> io::Result<()> {
     thread::Builder::new()
         .name("terminal-reader".into())
         .spawn(move || {
+            const POLL_TIMEOUT: Duration = Duration::from_millis(50);
+            const SUSPENDED_SLEEP: Duration = Duration::from_millis(25);
+
             loop {
-                match event::read() {
-                    Ok(event) => {
-                        if events.blocking_send(AppEvent::Terminal(event)).is_err() {
+                if suspended.load(Ordering::SeqCst) {
+                    thread::sleep(SUSPENDED_SLEEP);
+                    continue;
+                }
+                match event::poll(POLL_TIMEOUT) {
+                    Ok(true) => {
+                        if suspended.load(Ordering::SeqCst) {
+                            continue;
+                        }
+                        match event::read() {
+                            Ok(event) => {
+                                if events.blocking_send(AppEvent::Terminal(event)).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                let _ = events.blocking_send(AppEvent::TerminalClosed(error));
+                                break;
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        if events.is_closed() {
                             break;
                         }
                     }

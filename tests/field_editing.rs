@@ -108,6 +108,7 @@ fn spawn_run(
             writer,
             Vec::new(),
             bruno_tui::app::mouse::MouseSetup::terminal(false),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
         let Ok(exit) = result;

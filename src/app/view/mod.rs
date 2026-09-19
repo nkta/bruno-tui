@@ -416,6 +416,8 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::MouseCaptureError(reason) => {
             format!("Échec de la capture souris : {reason}")
         }
+        StatusMessage::NoResponseBody => "Aucun corps de réponse à ouvrir".to_owned(),
+        StatusMessage::EditorError(reason) => format!("Échec de l'éditeur : {reason}"),
     }
 }
 
@@ -903,6 +905,34 @@ mod tests {
         model.last_status = Some(crate::app::model::StatusMessage::Copied);
         let line = status_line(&model);
         assert!(line.contains("Copié"), "{line}");
+    }
+
+    #[test]
+    fn editor_status_messages_render_in_status_bar() {
+        let mut model = loaded_model((100, 30));
+
+        model.last_status = Some(StatusMessage::NoResponseBody);
+        let line = status_line(&model);
+        assert!(line.contains("Aucun corps de réponse à ouvrir"), "{line}");
+        let screen = render(&model, 100, 30);
+        assert!(
+            screen[29].contains("Aucun corps de réponse à ouvrir"),
+            "{}",
+            screen[29]
+        );
+
+        model.last_status = Some(StatusMessage::EditorError("binaire introuvable".into()));
+        let line = status_line(&model);
+        assert!(
+            line.contains("Échec de l'éditeur : binaire introuvable"),
+            "{line}"
+        );
+        let screen = render(&model, 100, 30);
+        assert!(
+            screen[29].contains("Échec de l'éditeur : binaire introuvable"),
+            "{}",
+            screen[29]
+        );
     }
 
     #[test]

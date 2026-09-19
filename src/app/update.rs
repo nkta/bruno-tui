@@ -12,7 +12,7 @@ use super::model::{
     EnvironmentEditSession, EnvironmentEditState, Exit, Focus, HistoryEntry, HistoryOutcome,
     InputTarget, Model, ResponseTab, SecretError, SecretInput, StatusMessage, environment_name_at,
     field_enabled, field_value, field_value_committed, secret_env_vars, secret_lookups,
-    secret_rows, section_entries, tree_node_at, visible_rows,
+    secret_rows, section_entries, selected_response_body, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::text_input::TextInput;
@@ -78,6 +78,12 @@ pub enum Command {
     /// l'exécute de façon synchrone et renvoie le résultat à `update` via
     /// `Message::MouseCaptureChanged`.
     SetMouseCapture(bool),
+    /// Ouvrir le corps de réponse dans un éditeur externe ; la boucle
+    /// l'exécute de façon bloquante (`D1`).
+    OpenInEditor {
+        program: String,
+        text: String,
+    },
 }
 
 /// Applique un message au modèle.
@@ -478,6 +484,16 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             environment_saved(model, path, result);
             Command::None
         }
+        Message::OpenResponseInEditor => match selected_response_body(model) {
+            Some(text) => Command::OpenInEditor {
+                program: resolve_editor(),
+                text,
+            },
+            None => {
+                model.last_status = Some(StatusMessage::NoResponseBody);
+                Command::None
+            }
+        },
         Message::Mouse(input) => {
             mouse(model, input);
             Command::None
@@ -2609,6 +2625,29 @@ fn apply_clipboard_result(
     });
 }
 
+/// Résout le programme éditeur à lancer : `VISUAL` si définie et non vide,
+/// sinon `EDITOR` si définie et non vide, sinon `"nano"`.
+///
+/// Paramétrée par une fonction de recherche de variable d'environnement
+/// pour rester pure et testable sans dépendre de l'état du processus.
+pub fn resolve_editor_with<F>(lookup: F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(visual) = lookup("VISUAL").filter(|v| !v.is_empty()) {
+        return visual;
+    }
+    if let Some(editor) = lookup("EDITOR").filter(|e| !e.is_empty()) {
+        return editor;
+    }
+    "nano".to_string()
+}
+
+/// Résout le programme éditeur à lancer depuis l'environnement réel du processus.
+pub fn resolve_editor() -> String {
+    resolve_editor_with(|key| std::env::var(key).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -2621,6 +2660,106 @@ mod tests {
     use crate::app::test_support::{loaded_model, runner_probe_model, select, selected_name};
     use crate::collection::{LoadError, RequestView};
     use crate::runner;
+
+    #[test]
+    fn resolve_editor_precedence() {
+        // VISUAL est prioritaire si définie et non vide
+        assert_eq!(
+            resolve_editor_with(|key| match key {
+                "VISUAL" => Some("code -w".into()),
+                "EDITOR" => Some("vim".into()),
+                _ => None,
+            }),
+            "code -w"
+        );
+
+        // EDITOR est utilisé si VISUAL n'est pas définie ou est vide
+        assert_eq!(
+            resolve_editor_with(|key| match key {
+                "VISUAL" => None,
+                "EDITOR" => Some("vim".into()),
+                _ => None,
+            }),
+            "vim"
+        );
+        assert_eq!(
+            resolve_editor_with(|key| match key {
+                "VISUAL" => Some("".into()),
+                "EDITOR" => Some("vim".into()),
+                _ => None,
+            }),
+            "vim"
+        );
+
+        // "nano" par défaut si ni VISUAL ni EDITOR ne sont définies ou sont vides
+        assert_eq!(
+            resolve_editor_with(|key| match key {
+                "VISUAL" => None,
+                "EDITOR" => None,
+                _ => None,
+            }),
+            "nano"
+        );
+        assert_eq!(
+            resolve_editor_with(|key| match key {
+                "VISUAL" => Some("".into()),
+                "EDITOR" => Some("".into()),
+                _ => None,
+            }),
+            "nano"
+        );
+    }
+
+    #[test]
+    fn open_response_in_editor_command_and_status() {
+        let mut model = runner_probe_model();
+
+        // Avec corps exploitable (ok.bru)
+        select(&mut model, "ok.bru");
+        match update(&mut model, Message::OpenResponseInEditor) {
+            Command::OpenInEditor { program, text } => {
+                assert_eq!(program, resolve_editor());
+                assert_eq!(text, "<html><body>probe</body></html>\n");
+            }
+            other => panic!("Command::OpenInEditor attendu, obtenu {other:?}"),
+        }
+
+        // Sans corps exploitable : dossier sélectionné
+        select(&mut model, "folder");
+        assert!(matches!(
+            update(&mut model, Message::OpenResponseInEditor),
+            Command::None
+        ));
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NoResponseBody)
+        ));
+
+        // Sans corps exploitable : corps null (folder/down.bru)
+        select(&mut model, "folder/down.bru");
+        model.last_status = None;
+        assert!(matches!(
+            update(&mut model, Message::OpenResponseInEditor),
+            Command::None
+        ));
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NoResponseBody)
+        ));
+
+        // Sans corps exploitable : requête jamais exécutée
+        select(&mut model, "ok.bru");
+        model.run.outcomes.clear();
+        model.last_status = None;
+        assert!(matches!(
+            update(&mut model, Message::OpenResponseInEditor),
+            Command::None
+        ));
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NoResponseBody)
+        ));
+    }
 
     fn sample_request_result(filename: &str) -> runner::report::RequestResult {
         use runner::report::{
