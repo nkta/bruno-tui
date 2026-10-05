@@ -814,6 +814,8 @@ pub struct Model {
     pub campaign: Option<CampaignSummary>,
     /// Indice sélectionné dans le panneau Campagne.
     pub campaign_selected: usize,
+    /// Mode plein écran actif sur le panneau focalisé (`feat/panel-zoom`).
+    pub zoom: bool,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -940,6 +942,20 @@ impl Model {
             help: None,
             campaign: None,
             campaign_selected: 0,
+            zoom: false,
+        }
+    }
+
+    /// Panneau actuellement zoomé en plein écran s'il y en a un
+    /// (`feat/panel-zoom`).
+    pub fn zoomed_panel(&self) -> Option<Focus> {
+        if self.zoom {
+            match self.focus {
+                Focus::Tree | Focus::Detail | Focus::Response => Some(self.focus),
+                _ => None,
+            }
+        } else {
+            None
         }
     }
 

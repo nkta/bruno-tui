@@ -47,6 +47,7 @@ d'édition non enregistrée demande confirmation.
 | `?` | aide des raccourcis (popup centré) |
 | `C` | panneau Campagne (bilan TNR de la dernière exécution récursive) |
 | `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
+| `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
 
 ## Édition d'une requête
 

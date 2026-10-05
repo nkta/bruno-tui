@@ -340,6 +340,11 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                 Focus::Detail => Focus::Response,
                 _ => Focus::Tree,
             };
+            if model.zoom {
+                scroll_tree_into_view(model);
+                model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
+                model.response_scroll = model.response_scroll.min(response_max_scroll(model));
+            }
             Command::None
         }
         Message::FocusTree if model.focus == Focus::Secrets => {
@@ -375,9 +380,28 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                         clear_tree_filter(model);
                         scroll_tree_into_view(model);
                     } else {
+                        model.zoom = false;
                         model.focus = Focus::Tree;
+                        scroll_tree_into_view(model);
+                        model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
+                        model.response_scroll =
+                            model.response_scroll.min(response_max_scroll(model));
                     }
                 }
+            }
+            Command::None
+        }
+        Message::ToggleZoom => {
+            if model.zoom {
+                model.zoom = false;
+                scroll_tree_into_view(model);
+                model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
+                model.response_scroll = model.response_scroll.min(response_max_scroll(model));
+            } else if matches!(model.focus, Focus::Tree | Focus::Detail | Focus::Response) {
+                model.zoom = true;
+                scroll_tree_into_view(model);
+                model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
+                model.response_scroll = model.response_scroll.min(response_max_scroll(model));
             }
             Command::None
         }
@@ -1848,7 +1872,7 @@ fn try_commit(model: &mut Model, edit: FieldEdit) -> bool {
 /// décalage horizontal de la valeur en saisie (`improve-direct-editing`,
 /// D7).
 fn scroll_edit_into_view(model: &mut Model) {
-    let Some(areas) = layout_for(model.size) else {
+    let Some(areas) = layout_for(model.size, model.zoomed_panel()) else {
         return;
     };
     let area = inner(areas.detail);
@@ -2099,7 +2123,8 @@ fn collapse_or_parent(model: &mut Model) {
 
 /// Hauteur utile du panneau de l'arbre.
 fn tree_height(model: &Model) -> usize {
-    layout_for(model.size).map_or(1, |areas| usize::from(inner(areas.tree).height).max(1))
+    layout_for(model.size, model.zoomed_panel())
+        .map_or(1, |areas| usize::from(inner(areas.tree).height).max(1))
 }
 
 /// Ajuste `offset` pour que la sélection reste visible sans laisser de
@@ -2160,7 +2185,7 @@ fn viewport_bottom(scroll: u16, height: u16, line_count: usize) -> u16 {
 /// Défilement maximal du détail : lignes logiques moins la hauteur du
 /// panneau.
 fn detail_max_scroll(model: &Model) -> u16 {
-    let Some(areas) = layout_for(model.size) else {
+    let Some(areas) = layout_for(model.size, model.zoomed_panel()) else {
         return 0;
     };
     max_scroll(detail_line_count(model), inner(areas.detail).height)
@@ -2168,7 +2193,7 @@ fn detail_max_scroll(model: &Model) -> u16 {
 
 /// Même principe que [`detail_max_scroll`], pour la réponse.
 fn response_max_scroll(model: &Model) -> u16 {
-    let Some(areas) = layout_for(model.size) else {
+    let Some(areas) = layout_for(model.size, model.zoomed_panel()) else {
         return 0;
     };
     max_scroll(response_line_count(model), inner(areas.response).height)
@@ -2177,7 +2202,7 @@ fn response_max_scroll(model: &Model) -> u16 {
 /// Dernière ligne visible du panneau de détail, à la position de
 /// défilement courante.
 pub(crate) fn bottom_of_viewport(model: &Model) -> u16 {
-    let Some(areas) = layout_for(model.size) else {
+    let Some(areas) = layout_for(model.size, model.zoomed_panel()) else {
         return model.detail_scroll;
     };
     viewport_bottom(
@@ -2189,7 +2214,7 @@ pub(crate) fn bottom_of_viewport(model: &Model) -> u16 {
 
 /// Même principe que [`bottom_of_viewport`], pour la réponse.
 pub(crate) fn response_bottom_of_viewport(model: &Model) -> u16 {
-    let Some(areas) = layout_for(model.size) else {
+    let Some(areas) = layout_for(model.size, model.zoomed_panel()) else {
         return model.response_scroll;
     };
     viewport_bottom(
@@ -2218,7 +2243,8 @@ pub(crate) fn response_selection_range(model: &Model) -> Option<RangeInclusive<u
 }
 
 fn scroll_detail(model: &mut Model, message: Message) {
-    let page = layout_for(model.size).map_or(1, |areas| inner(areas.detail).height.max(1));
+    let page = layout_for(model.size, model.zoomed_panel())
+        .map_or(1, |areas| inner(areas.detail).height.max(1));
     let max = detail_max_scroll(model);
     let scroll = model.detail_scroll;
     model.detail_scroll = match message {
@@ -2234,7 +2260,8 @@ fn scroll_detail(model: &mut Model, message: Message) {
 
 /// Même principe que [`scroll_detail`], pour la réponse.
 fn scroll_response(model: &mut Model, message: Message) {
-    let page = layout_for(model.size).map_or(1, |areas| inner(areas.response).height.max(1));
+    let page = layout_for(model.size, model.zoomed_panel())
+        .map_or(1, |areas| inner(areas.response).height.max(1));
     let max = response_max_scroll(model);
     let scroll = model.response_scroll;
     model.response_scroll = match message {
@@ -2270,7 +2297,8 @@ fn next_response_tab(model: &mut Model) {
 
 /// Hauteur utile du corps de l'écran (pour les panneaux plein corps).
 fn body_height(model: &Model) -> usize {
-    layout_for(model.size).map_or(1, |areas| usize::from(inner(areas.body).height).max(1))
+    layout_for(model.size, model.zoomed_panel())
+        .map_or(1, |areas| usize::from(inner(areas.body).height).max(1))
 }
 
 fn navigate_diagnostics(model: &mut Model, message: Message) {
@@ -2947,7 +2975,7 @@ fn mouse_accepted(model: &Model) -> bool {
             Focus::Tree | Focus::Detail | Focus::Response | Focus::EnvironmentPicker
         )
         && model.loaded().is_some()
-        && layout_for(model.size).is_some()
+        && layout_for(model.size, model.zoomed_panel()).is_some()
 }
 
 /// Lignes logiques du champ en cours de saisie, s'il y en a un.
@@ -2994,7 +3022,7 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
         environment_popup_mouse_press(model, input);
         return;
     }
-    if let Some(areas) = layout_for(model.size)
+    if let Some(areas) = layout_for(model.size, model.zoomed_panel())
         && let Some(index) = environment_panel_row_at(areas.environment, input)
     {
         environment_panel_mouse_press(model, index);
@@ -4981,7 +5009,8 @@ mod tests {
         }
         update(&mut model, Message::ConfirmSearch);
 
-        let areas = crate::app::view::layout_for(model.size).expect("taille suffisante");
+        let areas = crate::app::view::layout_for(model.size, model.zoomed_panel())
+            .expect("taille suffisante");
         let height = crate::app::view::inner(areas.detail).height;
         assert!(
             model.detail_scroll <= expected_line && expected_line < model.detail_scroll + height,
@@ -5015,7 +5044,8 @@ mod tests {
         }
         update(&mut model, Message::ConfirmSearch);
 
-        let areas = crate::app::view::layout_for(model.size).expect("taille suffisante");
+        let areas = crate::app::view::layout_for(model.size, model.zoomed_panel())
+            .expect("taille suffisante");
         let height = crate::app::view::inner(areas.response).height;
         assert!(
             model.response_scroll <= expected_line
@@ -6541,7 +6571,7 @@ mod tests {
     fn field_cursor_and_text_cursor_stay_visible() {
         // Terminal bas : le corps de post-json est hors écran au départ.
         let mut model = edit_session("post-json.bru", (100, 12));
-        let height = layout_for(model.size)
+        let height = layout_for(model.size, model.zoomed_panel())
             .map(|a| inner(a.detail).height)
             .expect("layout");
         assert_eq!(model.detail_scroll, 0);
@@ -6570,7 +6600,7 @@ mod tests {
 
         // URL plus large que le panneau : décalage horizontal.
         let mut model = edit_session("simple-get.bru", (60, 20));
-        let width = layout_for(model.size)
+        let width = layout_for(model.size, model.zoomed_panel())
             .map(|a| inner(a.detail).width)
             .expect("layout");
         move_to_field(&mut model, EditableField::Url);
@@ -8181,14 +8211,18 @@ mod mouse_tests {
     }
 
     fn tree_point(model: &Model, path: &str) -> (u16, u16) {
-        let area = inner(layout_for(model.size).expect("taille").tree);
+        let area = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .tree,
+        );
         let index = row_of(model, path) - model.tree.offset;
         (area.x + 2, area.y + u16::try_from(index).expect("petit"))
     }
 
     /// Position écran de la ligne logique `line` du détail ou de la réponse.
     fn line_point(model: &Model, detail: bool, line: u16) -> (u16, u16) {
-        let areas = layout_for(model.size).expect("taille");
+        let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
         let area = inner(if detail { areas.detail } else { areas.response });
         (area.y..area.bottom())
             .map(|y| (area.x + 1, y))
@@ -8341,7 +8375,7 @@ mod mouse_tests {
         let mut model = runner_probe_model();
         model.mouse.capture = true;
         select(&mut model, "green.bru");
-        let areas = layout_for(model.size).expect("taille");
+        let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
         let status = areas.response_status;
         for point in [
             (status.x + 2, status.y + 1),
@@ -8367,7 +8401,11 @@ mod mouse_tests {
         assert_eq!(selected_name(&model), "post-json");
         assert!(plain_lines(&model).iter().any(|l| l.contains("POST")));
 
-        let response = inner(layout_for(model.size).expect("taille").response);
+        let response = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .response,
+        );
         click(&mut model, (response.x, response.y));
         assert_eq!(model.focus, Focus::Response);
         let point = tree_point(&model, "simple-get.bru");
@@ -8391,12 +8429,18 @@ mod mouse_tests {
     #[test]
     fn click_in_a_scrolled_tree_and_on_borders() {
         let mut model = model_on("grp", (100, 11));
-        let area = inner(layout_for(model.size).expect("taille").tree);
+        let area = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .tree,
+        );
         model.tree.offset = 4;
         click(&mut model, (area.x + 1, area.y));
         assert_eq!(model.tree.selected, 4);
 
-        let tree = layout_for(model.size).expect("taille").tree;
+        let tree = layout_for(model.size, model.zoomed_panel())
+            .expect("taille")
+            .tree;
         model.focus = Focus::Detail;
         click(&mut model, (tree.x, area.y + 1));
         assert_eq!(model.focus, Focus::Tree);
@@ -8459,7 +8503,11 @@ mod mouse_tests {
         let mut model = session_on_post_json();
         move_to(&mut model, EditableField::HeaderValue(0));
         update(&mut model, Message::Enter);
-        let response = inner(layout_for(model.size).expect("taille").response);
+        let response = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .response,
+        );
         click(&mut model, (response.x, response.y));
         let session = model.editing.as_ref().expect("session");
         assert!(!session.dirty);
@@ -8501,7 +8549,11 @@ mod mouse_tests {
         model.size = (100, 11);
         select(&mut model, "green.bru");
         assert!(response_max_scroll(&model) >= 3, "réponse assez longue");
-        let response = inner(layout_for(model.size).expect("taille").response);
+        let response = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .response,
+        );
         event(&mut model, MouseKind::WheelDown, (response.x, response.y));
         assert_eq!(model.response_scroll, 3);
         assert_eq!(model.focus, Focus::Tree);
@@ -8514,7 +8566,11 @@ mod mouse_tests {
         let mut model = model_on("scripted.bru", (100, 12));
         let max = detail_max_scroll(&model);
         model.detail_scroll = max;
-        let detail = inner(layout_for(model.size).expect("taille").detail);
+        let detail = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .detail,
+        );
         event(&mut model, MouseKind::WheelDown, (detail.x, detail.y));
         assert_eq!(model.detail_scroll, max);
     }
@@ -8524,7 +8580,11 @@ mod mouse_tests {
         let mut model = model_on("grp", (100, 11));
         model.tree.selected = 0;
         model.tree.offset = 0;
-        let area = inner(layout_for(model.size).expect("taille").tree);
+        let area = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .tree,
+        );
         assert!(model.tree.rows.len() > usize::from(area.height) + 3);
         event(&mut model, MouseKind::WheelDown, (area.x, area.y));
         assert_eq!(model.tree.offset, 3);
@@ -8549,7 +8609,11 @@ mod mouse_tests {
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::Enter);
         let cursor = model.editing.as_ref().map(|s| s.cursor);
-        let detail = inner(layout_for(model.size).expect("taille").detail);
+        let detail = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .detail,
+        );
         event(&mut model, MouseKind::WheelDown, (detail.x, detail.y));
         assert_eq!(model.detail_scroll, 3);
         assert_eq!(model.editing.as_ref().map(|s| s.cursor), cursor);
@@ -8569,7 +8633,11 @@ mod mouse_tests {
         assert_eq!(selection_range(&model), Some(1..=3));
         assert!(model.editing.is_none());
 
-        let detail = inner(layout_for(model.size).expect("taille").detail);
+        let detail = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .detail,
+        );
         event(&mut model, MouseKind::WheelDown, (detail.x, detail.y));
         assert_eq!(model.detail_scroll, 3);
         assert_eq!(selection_range(&model), Some(1..=3));
@@ -8586,7 +8654,11 @@ mod mouse_tests {
         model.mouse.capture = true;
         model.size = (100, 14);
         select(&mut model, "green.bru");
-        let response = inner(layout_for(model.size).expect("taille").response);
+        let response = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .response,
+        );
         event(&mut model, MouseKind::Press, (response.x, response.y));
         event(&mut model, MouseKind::Drag, (response.x, response.bottom()));
         assert_eq!(model.response_scroll, 1);
@@ -8912,7 +8984,7 @@ mod mouse_tests {
 
     /// Position écran de l'entrée `index` du panneau permanent Environnement.
     fn environment_panel_point(model: &Model, index: usize) -> (u16, u16) {
-        let areas = layout_for(model.size).expect("taille");
+        let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
         let area = inner(areas.environment);
         (area.x + 1, area.y + u16::try_from(index).expect("petit"))
     }
@@ -9187,5 +9259,162 @@ mod mouse_tests {
         };
         update(&mut model, Message::Mouse(outside));
         assert!(model.help.is_none());
+    }
+
+    // --- Mode plein écran (zoom — touche 'z') ------------------------------
+
+    #[test]
+    fn zoom_toggle_on_three_main_panels() {
+        let mut model = loaded_model((100, 30));
+
+        // 1. Arbre
+        model.focus = Focus::Tree;
+        assert_eq!(model.zoomed_panel(), None);
+        update(&mut model, Message::ToggleZoom);
+        assert!(model.zoom);
+        assert_eq!(model.zoomed_panel(), Some(Focus::Tree));
+        update(&mut model, Message::ToggleZoom);
+        assert!(!model.zoom);
+        assert_eq!(model.zoomed_panel(), None);
+
+        // 2. Détail
+        model.focus = Focus::Detail;
+        update(&mut model, Message::ToggleZoom);
+        assert!(model.zoom);
+        assert_eq!(model.zoomed_panel(), Some(Focus::Detail));
+        update(&mut model, Message::ToggleZoom);
+        assert!(!model.zoom);
+        assert_eq!(model.zoomed_panel(), None);
+
+        // 3. Réponse
+        model.focus = Focus::Response;
+        update(&mut model, Message::ToggleZoom);
+        assert!(model.zoom);
+        assert_eq!(model.zoomed_panel(), Some(Focus::Response));
+        update(&mut model, Message::ToggleZoom);
+        assert!(!model.zoom);
+        assert_eq!(model.zoomed_panel(), None);
+    }
+
+    #[test]
+    fn zoom_ignored_on_auxiliary_panels() {
+        let mut model = loaded_model((100, 30));
+
+        for aux_focus in [
+            Focus::Diagnostics,
+            Focus::History,
+            Focus::Secrets,
+            Focus::Campaign,
+            Focus::EnvironmentPicker,
+        ] {
+            model.focus = aux_focus;
+            model.zoom = false;
+            update(&mut model, Message::ToggleZoom);
+            assert!(!model.zoom, "{aux_focus:?} ne doit pas basculer le zoom");
+            assert_eq!(model.zoomed_panel(), None);
+        }
+    }
+
+    #[test]
+    fn tab_rotates_focus_and_displayed_panel_in_zoom() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::Tree;
+        model.zoom = true;
+        assert_eq!(model.zoomed_panel(), Some(Focus::Tree));
+
+        // Tab -> Détail
+        update(&mut model, Message::NextFocus);
+        assert_eq!(model.focus, Focus::Detail);
+        assert_eq!(model.zoomed_panel(), Some(Focus::Detail));
+
+        // Tab -> Réponse
+        update(&mut model, Message::NextFocus);
+        assert_eq!(model.focus, Focus::Response);
+        assert_eq!(model.zoomed_panel(), Some(Focus::Response));
+
+        // Tab -> Arbre
+        update(&mut model, Message::NextFocus);
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.zoomed_panel(), Some(Focus::Tree));
+    }
+
+    #[test]
+    fn escape_exits_zoom_and_returns_to_tree() {
+        let mut model = loaded_model((100, 30));
+
+        // Depuis le Détail zoomé
+        model.focus = Focus::Detail;
+        model.zoom = true;
+        assert_eq!(model.zoomed_panel(), Some(Focus::Detail));
+        update(&mut model, Message::FocusTree);
+        assert!(!model.zoom);
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.zoomed_panel(), None);
+
+        // Depuis la Réponse zoomée
+        model.focus = Focus::Response;
+        model.zoom = true;
+        assert_eq!(model.zoomed_panel(), Some(Focus::Response));
+        update(&mut model, Message::FocusTree);
+        assert!(!model.zoom);
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.zoomed_panel(), None);
+    }
+
+    #[test]
+    fn escape_during_edit_session_closes_session_without_exiting_zoom() {
+        let mut model = session_on_post_json();
+        model.zoom = true;
+        assert!(model.editing.is_some());
+        assert_eq!(model.zoomed_panel(), Some(Focus::Detail));
+
+        // Premier Échap : ferme la session propre, reste en zoom
+        update(&mut model, Message::FocusTree);
+        assert!(model.editing.is_none());
+        assert!(model.zoom);
+        assert_eq!(model.zoomed_panel(), Some(Focus::Detail));
+
+        // Deuxième Échap : quitte le zoom et revient à l'arbre
+        update(&mut model, Message::FocusTree);
+        assert!(!model.zoom);
+        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.zoomed_panel(), None);
+    }
+
+    #[test]
+    fn scroll_and_mouse_consistency_in_zoom() {
+        let mut model = runner_probe_model();
+        model.mouse.capture = true;
+        model.size = (100, 20);
+        select(&mut model, "green.bru");
+
+        let normal_resp_max = response_max_scroll(&model);
+        let normal_areas = layout_for(model.size, None).expect("layout normal");
+
+        // Activer le zoom sur la réponse
+        model.focus = Focus::Response;
+        model.zoom = true;
+        let zoomed_resp_max = response_max_scroll(&model);
+        let zoomed_areas = layout_for(model.size, model.zoomed_panel()).expect("layout zoom");
+
+        // La hauteur de la réponse est plus grande en zoom qu'en disposition normale
+        assert!(zoomed_areas.response.height > normal_areas.response.height);
+        // Donc le défilement maximal nécessaire est inférieur ou égal
+        assert!(zoomed_resp_max <= normal_resp_max);
+
+        // Molette sur la zone zoomée de réponse
+        let center = (zoomed_areas.response.x + 5, zoomed_areas.response.y + 5);
+        event(&mut model, MouseKind::WheelDown, center);
+        if zoomed_resp_max > 0 {
+            assert!(model.response_scroll > 0);
+        }
+
+        // Clic sur l'arbre masqué ne modifie pas le focus
+        assert_eq!(zoomed_areas.tree, Rect::default());
+        let tree_old_pos = (normal_areas.tree.x + 2, normal_areas.tree.y + 2);
+        click(&mut model, tree_old_pos);
+        // Le clic tombe soit hors hit soit sur le panneau zoomé selon coordonnées,
+        // mais ne peut pas sélectionner l'arbre masqué
+        assert_ne!(model.focus, Focus::Tree);
     }
 }

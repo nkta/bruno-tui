@@ -62,6 +62,13 @@ const ENV_PANEL_COMPACT_HEIGHT: u16 = 3;
 
 const TOO_SMALL: &str = "Terminal trop petit : agrandir à 60×11 au moins.";
 
+const TITLE_TREE: &str = " Collection ";
+const TITLE_TREE_ZOOMED: &str = " Collection [plein écran — z] ";
+const TITLE_DETAIL: &str = " Détail ";
+const TITLE_DETAIL_ZOOMED: &str = " Détail [plein écran — z] ";
+const TITLE_RESPONSE: &str = " Réponse ";
+const TITLE_RESPONSE_ZOOMED: &str = " Réponse [plein écran — z] ";
+
 /// Zones de l'écran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Areas {
@@ -94,54 +101,106 @@ impl Areas {
 }
 
 /// Découpe l'écran ; `None` sous la taille minimale.
-pub fn layout(area: Rect) -> Option<Areas> {
+///
+/// Si `zoom` vaut `Some(Focus::Tree)`, `Some(Focus::Detail)` ou
+/// `Some(Focus::Response)`, le panneau désigné occupe l'intégralité de la
+/// zone du corps. En plein écran sur la Réponse, le panneau Statut reste
+/// affiché au-dessus d'elle en forme compacte.
+pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         return None;
     }
     let body_height = area.height - 2;
-    let tree_width = (area.width * 35 / 100).max(MIN_TREE_WIDTH);
     let body = Rect::new(area.x, area.y + 1, area.width, body_height);
-    let remaining = area.width - tree_width;
-    let detail_width = (remaining * 50 / 100).max(MIN_DETAIL_WIDTH);
-    let response_width = (remaining - detail_width).max(MIN_RESPONSE_WIDTH);
-    let response_x = body.x + tree_width + detail_width;
-    let full_size = area.height >= STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT;
-    let status_panel_height = if full_size {
-        STATUS_PANEL_HEIGHT
-    } else {
-        STATUS_PANEL_COMPACT_HEIGHT
-    };
-    let env_panel_height = if full_size {
-        ENV_PANEL_HEIGHT
-    } else {
-        ENV_PANEL_COMPACT_HEIGHT
-    };
-    let response_y = body.y + env_panel_height + status_panel_height;
-    Some(Areas {
-        title: Rect::new(area.x, area.y, area.width, 1),
-        body,
-        tree: Rect::new(body.x, body.y, tree_width, body_height),
-        detail: Rect::new(body.x + tree_width, body.y, detail_width, body_height),
-        environment: Rect::new(response_x, body.y, response_width, env_panel_height),
-        response_status: Rect::new(
-            response_x,
-            body.y + env_panel_height,
-            response_width,
-            status_panel_height,
-        ),
-        response: Rect::new(
-            response_x,
-            response_y,
-            response_width,
-            body_height.saturating_sub(env_panel_height + status_panel_height),
-        ),
-        status: Rect::new(area.x, area.y + area.height - 1, area.width, 1),
-    })
+    let title = Rect::new(area.x, area.y, area.width, 1);
+    let status = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+
+    match zoom {
+        Some(Focus::Tree) => Some(Areas {
+            title,
+            body,
+            tree: body,
+            detail: Rect::default(),
+            environment: Rect::default(),
+            response_status: Rect::default(),
+            response: Rect::default(),
+            status,
+        }),
+        Some(Focus::Detail) => Some(Areas {
+            title,
+            body,
+            tree: Rect::default(),
+            detail: body,
+            environment: Rect::default(),
+            response_status: Rect::default(),
+            response: Rect::default(),
+            status,
+        }),
+        Some(Focus::Response) => {
+            let status_panel_height = STATUS_PANEL_COMPACT_HEIGHT;
+            let response_status = Rect::new(body.x, body.y, body.width, status_panel_height);
+            let response = Rect::new(
+                body.x,
+                body.y + status_panel_height,
+                body.width,
+                body_height.saturating_sub(status_panel_height),
+            );
+            Some(Areas {
+                title,
+                body,
+                tree: Rect::default(),
+                detail: Rect::default(),
+                environment: Rect::default(),
+                response_status,
+                response,
+                status,
+            })
+        }
+        _ => {
+            let tree_width = (area.width * 35 / 100).max(MIN_TREE_WIDTH);
+            let remaining = area.width - tree_width;
+            let detail_width = (remaining * 50 / 100).max(MIN_DETAIL_WIDTH);
+            let response_width = (remaining - detail_width).max(MIN_RESPONSE_WIDTH);
+            let response_x = body.x + tree_width + detail_width;
+            let full_size = area.height >= STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT;
+            let status_panel_height = if full_size {
+                STATUS_PANEL_HEIGHT
+            } else {
+                STATUS_PANEL_COMPACT_HEIGHT
+            };
+            let env_panel_height = if full_size {
+                ENV_PANEL_HEIGHT
+            } else {
+                ENV_PANEL_COMPACT_HEIGHT
+            };
+            let response_y = body.y + env_panel_height + status_panel_height;
+            Some(Areas {
+                title,
+                body,
+                tree: Rect::new(body.x, body.y, tree_width, body_height),
+                detail: Rect::new(body.x + tree_width, body.y, detail_width, body_height),
+                environment: Rect::new(response_x, body.y, response_width, env_panel_height),
+                response_status: Rect::new(
+                    response_x,
+                    body.y + env_panel_height,
+                    response_width,
+                    status_panel_height,
+                ),
+                response: Rect::new(
+                    response_x,
+                    response_y,
+                    response_width,
+                    body_height.saturating_sub(env_panel_height + status_panel_height),
+                ),
+                status,
+            })
+        }
+    }
 }
 
 /// Zones de l'écran pour une taille de terminal.
-pub fn layout_for(size: (u16, u16)) -> Option<Areas> {
-    layout(Rect::new(0, 0, size.0, size.1))
+pub fn layout_for(size: (u16, u16), zoom: Option<Focus>) -> Option<Areas> {
+    layout(Rect::new(0, 0, size.0, size.1), zoom)
 }
 
 /// Intérieur d'un panneau bordé.
@@ -153,7 +212,7 @@ pub fn inner(area: Rect) -> Rect {
 pub fn view(model: &Model, frame: &mut Frame) {
     frame.render_widget(Block::default().style(theme::BACKGROUND), frame.area());
 
-    let Some(areas) = layout(frame.area()) else {
+    let Some(areas) = layout(frame.area(), model.zoomed_panel()) else {
         frame.render_widget(
             Paragraph::new(TOO_SMALL).wrap(Wrap { trim: true }),
             frame.area(),
@@ -202,33 +261,48 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 panels::render_campaign(model, frame, areas.body);
             }
             Focus::Tree | Focus::Detail | Focus::Response | Focus::EnvironmentPicker => {
-                render_tree(model, frame, areas.tree);
-                let detail_block = panel(" Détail ", model.focus == Focus::Detail);
-                match model.selected_node() {
-                    Some(TreeNode::Request(_)) => {
-                        render_boxed_detail(model, frame, areas.detail, detail_block);
-                    }
-                    _ => {
-                        // Pendant une saisie, pas de retour à la ligne : une
-                        // ligne logique = une ligne affichée, pour que le
-                        // curseur de texte et le décalage horizontal tombent
-                        // exactement (`improve-direct-editing`, D7).
-                        let mut detail = Paragraph::new(detail::render_text(model))
-                            .scroll((model.detail_scroll, 0))
-                            .block(detail_block);
-                        if detail_wraps(model) {
-                            detail = detail.wrap(Wrap { trim: false });
-                        }
-                        frame.render_widget(detail, areas.detail);
-                    }
+                if areas.tree.width > 0 && areas.tree.height > 0 {
+                    render_tree(model, frame, areas.tree);
                 }
-                render_insert_cursor(model, frame, areas.detail);
-                // Panneau Environnement : permanent, dans sa propre zone
-                // de la mise en page (`add-environment-panel-and-edit-popup`),
-                // plus une superposition en coin.
-                panels::render_environment_picker(model, frame, areas.environment);
-                render_status_panel(model, frame, &areas);
-                render_response(model, frame, areas.response);
+                if areas.detail.width > 0 && areas.detail.height > 0 {
+                    let title = if model.zoomed_panel() == Some(Focus::Detail) {
+                        TITLE_DETAIL_ZOOMED
+                    } else {
+                        TITLE_DETAIL
+                    };
+                    let detail_block = panel(title, model.focus == Focus::Detail);
+                    match model.selected_node() {
+                        Some(TreeNode::Request(_)) => {
+                            render_boxed_detail(model, frame, areas.detail, detail_block);
+                        }
+                        _ => {
+                            // Pendant une saisie, pas de retour à la ligne : une
+                            // ligne logique = une ligne affichée, pour que le
+                            // curseur de texte et le décalage horizontal tombent
+                            // exactement (`improve-direct-editing`, D7).
+                            let mut detail = Paragraph::new(detail::render_text(model))
+                                .scroll((model.detail_scroll, 0))
+                                .block(detail_block);
+                            if detail_wraps(model) {
+                                detail = detail.wrap(Wrap { trim: false });
+                            }
+                            frame.render_widget(detail, areas.detail);
+                        }
+                    }
+                    render_insert_cursor(model, frame, areas.detail);
+                }
+                if areas.environment.width > 0 && areas.environment.height > 0 {
+                    // Panneau Environnement : permanent, dans sa propre zone
+                    // de la mise en page (`add-environment-panel-and-edit-popup`),
+                    // plus une superposition en coin.
+                    panels::render_environment_picker(model, frame, areas.environment);
+                }
+                if areas.response_status.width > 0 && areas.response_status.height > 0 {
+                    render_status_panel(model, frame, &areas);
+                }
+                if areas.response.width > 0 && areas.response.height > 0 {
+                    render_response(model, frame, areas.response);
+                }
 
                 // Popup d'édition d'un environnement : superposé au centre
                 // de l'écran, par-dessus tout le reste déjà dessiné
@@ -641,15 +715,15 @@ fn status_line(model: &Model) -> String {
     }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
-            "↑↓ naviguer  →/← déplier  r lancer  f filtrer  / chercher  Tab détail  S secrets  ? aide  q quitter  M souris"
+            "↑↓ naviguer  →/← déplier  r lancer  f filtrer  / chercher  Tab détail  S secrets  ? aide  q quitter  M souris  z plein écran"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
-            "↑↓ défiler  Début/Fin  Entrée éditer  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter"
+            "↑↓ défiler  Début/Fin  Entrée éditer  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter  z plein écran"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Response) => {
-            "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter"
+            "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter  z plein écran"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Diagnostics) => {
@@ -687,18 +761,21 @@ pub(crate) fn panel(title: &'static str, focused: bool) -> Block<'static> {
 }
 
 fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
-    let title = if let Some(pattern) = active_tree_filter_pattern(model) {
-        format!(" Collection — filtre : {pattern} ")
+    let base = if model.zoomed_panel() == Some(Focus::Tree) {
+        TITLE_TREE_ZOOMED
     } else {
-        " Collection ".to_string()
+        TITLE_TREE
     };
-    let block = Block::bordered()
-        .title(title)
-        .border_style(if model.focus == Focus::Tree {
-            theme::FOCUS
-        } else {
-            theme::BORDER
-        });
+    let title = match active_tree_filter_pattern(model) {
+        Some(pattern) => format!("{} — filtre : {pattern} ", base.trim_end()),
+        None => base.to_owned(),
+    };
+    let style = if model.focus == Focus::Tree {
+        theme::FOCUS
+    } else {
+        theme::BORDER
+    };
+    let block = Block::bordered().title(title).border_style(style);
     let state = &model.tree;
     if state.rows.is_empty() {
         let msg = if is_tree_filtered(model) {
@@ -758,7 +835,12 @@ fn render_status_panel(model: &Model, frame: &mut Frame, areas: &Areas) {
 /// requête sélectionnée, ou un message unique délibérément centré quand
 /// il n'y en a aucun (`visual-theme`, `split-request-response-panels`).
 fn render_response(model: &Model, frame: &mut Frame, area: Rect) {
-    let block = panel(" Réponse ", model.focus == Focus::Response);
+    let title = if model.zoomed_panel() == Some(Focus::Response) {
+        TITLE_RESPONSE_ZOOMED
+    } else {
+        TITLE_RESPONSE
+    };
+    let block = panel(title, model.focus == Focus::Response);
     let text = detail::render_response_text(model);
     if text.lines.is_empty() {
         frame.render_widget(
@@ -882,9 +964,9 @@ mod tests {
 
     #[test]
     fn layout_respects_minimums() {
-        assert_eq!(layout_for((59, 30)), None);
-        assert_eq!(layout_for((100, 10)), None);
-        let areas = layout_for((60, 11)).expect("taille minimale");
+        assert_eq!(layout_for((59, 30), None), None);
+        assert_eq!(layout_for((100, 10), None), None);
+        let areas = layout_for((60, 11), None).expect("taille minimale");
         assert_eq!(areas.tree.width, MIN_TREE_WIDTH);
         assert_eq!(areas.detail.width, MIN_DETAIL_WIDTH);
         assert_eq!(areas.response.width, MIN_RESPONSE_WIDTH);
@@ -912,7 +994,7 @@ mod tests {
             ((100, 20), 6, 5),
             ((100, 30), 6, 5),
         ] {
-            let areas = layout_for(size).expect("taille suffisante");
+            let areas = layout_for(size, None).expect("taille suffisante");
             let (env, status, response) =
                 (areas.environment, areas.response_status, areas.response);
             assert_eq!(env.height, env_height, "{size:?}");
@@ -1100,7 +1182,9 @@ mod tests {
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let buffer = terminal.backend().buffer();
         let (line, range) = model.detail_match.clone().expect("correspondance");
-        let detail_area = layout_for((100, 12)).expect("taille suffisante").detail;
+        let detail_area = layout_for((100, 12), None)
+            .expect("taille suffisante")
+            .detail;
         let inner_area = inner(detail_area);
         let row = inner_area.y + (line - model.detail_scroll);
         let col = inner_area.x + range.start as u16;
@@ -1139,7 +1223,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
 
-        let detail_area = layout_for((100, 30)).expect("layout").detail;
+        let detail_area = layout_for((100, 30), None).expect("layout").detail;
         let inner_area = inner(detail_area);
         let buffer = terminal.backend().buffer();
 
@@ -1284,7 +1368,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).expect("terminal");
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
-        let inner_area = inner(layout_for((60, 20)).expect("layout").detail);
+        let inner_area = inner(layout_for((60, 20), None).expect("layout").detail);
         let cursor = terminal.get_cursor_position().expect("curseur");
         assert!(cursor.x >= inner_area.x && cursor.x < inner_area.x + inner_area.width);
 
@@ -1317,7 +1401,7 @@ mod tests {
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("cursor position");
 
-        let detail_area = layout_for((100, 30)).expect("layout").detail;
+        let detail_area = layout_for((100, 30), None).expect("layout").detail;
         let inner_area = inner(detail_area);
         assert_eq!(cursor.y, inner_area.y + 4);
         assert!(cursor.x >= inner_area.x);
@@ -1375,7 +1459,7 @@ mod tests {
         assert!(screen.contains("Statut"), "{screen}");
         assert!(screen.contains(" 200  OK"), "{screen}");
         assert!(screen.contains("✓ réussi"), "{screen}");
-        let detail_col_end = layout_for((100, 30)).expect("layout").detail.right();
+        let detail_col_end = layout_for((100, 30), None).expect("layout").detail.right();
         let detail_only: String = lines
             .iter()
             .map(|line| {
@@ -1682,7 +1766,7 @@ mod tests {
             "{}",
             lines[1]
         );
-        let areas = layout_for((100, 30)).expect("layout");
+        let areas = layout_for((100, 30), None).expect("layout");
         assert!(
             areas.environment.y < areas.response_status.y
                 && areas.response_status.y < areas.response.y,
@@ -1706,7 +1790,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let buffer = terminal.backend().buffer();
-        let areas = layout_for((100, 30)).expect("layout");
+        let areas = layout_for((100, 30), None).expect("layout");
         let focus_fg = theme::FOCUS.fg.expect("fg défini");
         let border_fg = theme::BORDER.fg.expect("fg défini");
 
@@ -1920,7 +2004,7 @@ mod tests {
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
         let lines = render(&model, 100, 30);
-        let areas = layout_for((100, 30)).expect("layout");
+        let areas = layout_for((100, 30), None).expect("layout");
         let status = region(&lines, areas.response_status);
         assert!(status[0].contains("Statut"), "{status:?}");
         assert!(status[1].contains(" 200  OK"), "{status:?}");
@@ -1965,7 +2049,7 @@ mod tests {
 
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
-        let areas = layout_for((100, 30)).expect("layout");
+        let areas = layout_for((100, 30), None).expect("layout");
         let focus_fg = theme::FOCUS.fg.expect("fg défini");
         let mut foci = Vec::new();
         for _ in 0..3 {
@@ -1989,7 +2073,7 @@ mod tests {
         select(&mut model, "json.bru");
         model.size = (60, 11);
         let lines = render(&model, 60, 11);
-        let areas = layout_for((60, 11)).expect("layout");
+        let areas = layout_for((60, 11), None).expect("layout");
         let status = region(&lines, areas.response_status);
         assert!(status[1].contains(" 200 "), "{status:?}");
         let response = region(&lines, areas.response);
@@ -2017,7 +2101,7 @@ mod tests {
             .cloned()
             .expect("réponse non vide");
         let lines = render(&model, 100, 12);
-        let areas = layout_for((100, 12)).expect("layout");
+        let areas = layout_for((100, 12), None).expect("layout");
         let response = region(&lines, inner(areas.response));
         assert_eq!(response.last().map(|l| l.trim_end()), Some(last.as_str()));
     }
@@ -2028,7 +2112,7 @@ mod tests {
         use crate::app::test_support::runner_probe_model;
         use crate::runner::{RunEvent, RunId, RunOutcome};
 
-        let areas = layout_for((100, 30)).expect("layout");
+        let areas = layout_for((100, 30), None).expect("layout");
         let status_of =
             |model: &Model| region(&render(model, 100, 30), areas.response_status).join("\n");
         let start = |model: &mut Model| {
@@ -2161,7 +2245,7 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).expect("terminal");
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("curseur");
-        let inner_area = inner(layout_for((100, 40)).expect("layout").detail);
+        let inner_area = inner(layout_for((100, 40), None).expect("layout").detail);
         // +1 pour la bordure gauche de la boîte de section « En-têtes »
         // (`add-boxed-detail-sections`), en plus de l'indentation « 2 » et
         // des 3 caractères tapés.
@@ -2362,5 +2446,93 @@ mod tests {
             empty_screen.contains("Aucune requête ne correspond"),
             "{empty_screen}"
         );
+    }
+
+    #[test]
+    fn zoomed_layout_allocates_full_body_and_masks_others() {
+        let size = (100, 30);
+        let normal = layout_for(size, None).expect("normal");
+
+        // 1. Zoom Arbre
+        let tree_zoom = layout_for(size, Some(Focus::Tree)).expect("tree zoom");
+        assert_eq!(tree_zoom.title, normal.title);
+        assert_eq!(tree_zoom.status, normal.status);
+        assert_eq!(tree_zoom.body, normal.body);
+        assert_eq!(tree_zoom.tree, normal.body);
+        assert_eq!(tree_zoom.detail, Rect::default());
+        assert_eq!(tree_zoom.environment, Rect::default());
+        assert_eq!(tree_zoom.response_status, Rect::default());
+        assert_eq!(tree_zoom.response, Rect::default());
+
+        // 2. Zoom Détail
+        let detail_zoom = layout_for(size, Some(Focus::Detail)).expect("detail zoom");
+        assert_eq!(detail_zoom.body, normal.body);
+        assert_eq!(detail_zoom.tree, Rect::default());
+        assert_eq!(detail_zoom.detail, normal.body);
+        assert_eq!(detail_zoom.environment, Rect::default());
+        assert_eq!(detail_zoom.response_status, Rect::default());
+        assert_eq!(detail_zoom.response, Rect::default());
+
+        // 3. Zoom Réponse : Statut compact au-dessus de la réponse
+        let resp_zoom = layout_for(size, Some(Focus::Response)).expect("resp zoom");
+        assert_eq!(resp_zoom.body, normal.body);
+        assert_eq!(resp_zoom.tree, Rect::default());
+        assert_eq!(detail_zoom.detail, normal.body);
+        assert_eq!(resp_zoom.environment, Rect::default());
+        assert_eq!(resp_zoom.response_status.x, normal.body.x);
+        assert_eq!(resp_zoom.response_status.y, normal.body.y);
+        assert_eq!(resp_zoom.response_status.width, normal.body.width);
+        assert_eq!(resp_zoom.response_status.height, 3);
+        assert!(resp_zoom.status_panel_compact());
+        assert_eq!(resp_zoom.response.x, normal.body.x);
+        assert_eq!(resp_zoom.response.y, normal.body.y + 3);
+        assert_eq!(resp_zoom.response.width, normal.body.width);
+        assert_eq!(resp_zoom.response.height, normal.body.height - 3);
+    }
+
+    #[test]
+    fn zoomed_panel_displays_fullscreen_indicator_in_title() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        model.size = (100, 30);
+
+        // Zoom Arbre
+        model.focus = Focus::Tree;
+        model.zoom = true;
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Collection [plein écran — z]"), "{screen}");
+        assert!(!screen.contains("Détail"), "{screen}");
+        assert!(!screen.contains("Réponse"), "{screen}");
+
+        // Zoom Détail
+        model.focus = Focus::Detail;
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Détail [plein écran — z]"), "{screen}");
+        assert!(!screen.contains("Collection"), "{screen}");
+        assert!(!screen.contains("Réponse"), "{screen}");
+
+        // Zoom Réponse
+        model.focus = Focus::Response;
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Réponse [plein écran — z]"), "{screen}");
+        assert!(screen.contains("Statut"), "{screen}");
+        assert!(!screen.contains("Collection"), "{screen}");
+        assert!(!screen.contains("Détail"), "{screen}");
+    }
+
+    #[test]
+    fn status_line_mentions_zoom_key() {
+        let mut model = loaded_model((100, 30));
+
+        model.focus = Focus::Tree;
+        assert!(status_line(&model).contains("z plein écran"));
+
+        model.focus = Focus::Detail;
+        assert!(status_line(&model).contains("z plein écran"));
+
+        model.focus = Focus::Response;
+        assert!(status_line(&model).contains("z plein écran"));
     }
 }

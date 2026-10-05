@@ -261,6 +261,8 @@ pub enum Message {
     },
     /// `?`, hors saisie : ouvre ou ferme le popup d'aide des raccourcis.
     ToggleHelp,
+    /// `z`, hors saisie : bascule le mode plein écran du panneau actif.
+    ToggleZoom,
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -363,6 +365,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char(' ') => Message::ToggleField,
         KeyCode::Char('M') => Message::ToggleMouseCapture,
         KeyCode::Char('?') => Message::ToggleHelp,
+        KeyCode::Char('z') => Message::ToggleZoom,
         _ => return None,
     };
     Some(message)
@@ -558,6 +561,7 @@ mod tests {
                 "ToggleMouseCapture",
             ),
             (KeyCode::Char('?'), none, "ToggleHelp"),
+            (KeyCode::Char('z'), none, "ToggleZoom"),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(
@@ -616,7 +620,7 @@ mod tests {
 
     #[test]
     fn ignored_keys() {
-        assert!(name(key(KeyCode::Char('z'), KeyModifiers::NONE)).is_none());
+        assert!(name(key(KeyCode::Char('b'), KeyModifiers::NONE)).is_none());
         assert!(name(key(KeyCode::Char('q'), KeyModifiers::CONTROL)).is_none());
         assert!(name(key(KeyCode::Char('j'), KeyModifiers::ALT)).is_none());
         assert!(name(key(KeyCode::F(1), KeyModifiers::NONE)).is_none());

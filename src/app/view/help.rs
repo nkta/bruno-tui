@@ -42,6 +42,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "faire tourner le focus (Collection, Détail, Réponse)",
             },
             HelpEntry {
+                key: "z",
+                effect: "basculer le mode plein écran (Collection, Détail, Réponse)",
+            },
+            HelpEntry {
                 key: "Échap",
                 effect: "ramener le focus à l'arbre",
             },
