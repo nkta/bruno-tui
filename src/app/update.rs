@@ -512,7 +512,13 @@ pub fn update(model: &mut Model, message: Message) -> Command {
         }
         Message::OpenTreeFilter => {
             if model.focus == Focus::Tree && model.loaded().is_some() {
-                open_tree_filter(model);
+                // Filtrer peut déplacer la sélection : refusé tant qu'une
+                // édition non enregistrée la verrouille.
+                if selection_locked(model) {
+                    model.last_status = Some(StatusMessage::EditLocked);
+                } else {
+                    open_tree_filter(model);
+                }
             }
             Command::None
         }
