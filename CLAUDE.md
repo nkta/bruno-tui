@@ -26,7 +26,7 @@ Binaire : `bruno-tui`
 
 ratatui + crossterm (UI), tokio (process asynchrone), serde/serde_json
 (reporter). Pas d'autre framework TUI. Toute nouvelle dépendance doit
-être justifiée dans le `design.md` du changement en cours.
+être justifiée dans le message de commit qui l'introduit.
 
 ## Architecture
 
@@ -52,13 +52,12 @@ Elm-like : `Model` / `Message` / `update` / `view`.
 
 ## Workflow
 
-Ce projet suit OpenSpec. Avant toute modification de code, vérifier
-qu'un changement correspondant existe dans `openspec/changes/`.
-Si la demande ne rentre dans aucun changement actif, le dire et
-proposer `/opsx:propose` plutôt que de coder directement.
+Ce projet n'utilise plus OpenSpec. Le dossier `openspec/` n'est
+conservé qu'à titre d'historique : ne plus créer ni mettre à jour de
+changement. Coder directement à partir de la demande.
 
-Quand un travail peut être parallélisé (proposition openspec, tâches indépendantes d'un
-changement, exploration, tests ou revues concurrentes) :
+Quand un travail peut être parallélisé (tâches indépendantes,
+exploration, tests ou revues concurrentes) :
 
 - Isoler les contextes d'exécution via des **git worktrees** dédiés.
 - Utiliser le skill `/herdr` pour orchestrer, superviser et distribuer
