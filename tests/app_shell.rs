@@ -188,7 +188,8 @@ async fn quit_does_not_wait_for_a_blocked_load() {
 async fn failed_load_keeps_the_interface_open() {
     let (loader, open, _) = GateLoader::new();
     let (sender, events) = mpsc::channel(EVENT_BUFFER);
-    let handle = spawn_run(loader, sender.clone(), events);
+    let width = (fixture().display().to_string().len() + 40) as u16;
+    let handle = spawn_run_sized(loader, sender.clone(), events, width.max(120));
 
     let failure = BruLoader.load(&fixture().join("../../reports"));
     assert!(matches!(failure, Err(LoadError::NotACollection { .. })));

@@ -241,6 +241,8 @@ pub enum Message {
         root: PathBuf,
         resolved: Vec<Resolved>,
     },
+    /// `?`, hors saisie : ouvre ou ferme le popup d'aide des raccourcis.
+    ToggleHelp,
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -338,6 +340,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('e') => Message::StartEdit,
         KeyCode::Char(' ') => Message::ToggleField,
         KeyCode::Char('M') => Message::ToggleMouseCapture,
+        KeyCode::Char('?') => Message::ToggleHelp,
         _ => return None,
     };
     Some(message)
@@ -516,6 +519,7 @@ mod tests {
                 KeyModifiers::SHIFT,
                 "ToggleMouseCapture",
             ),
+            (KeyCode::Char('?'), none, "ToggleHelp"),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(
@@ -847,5 +851,31 @@ mod tests {
         );
         assert!(name_capturing(key(KeyCode::Tab, none), TextCapture::Filter).is_none());
         assert!(name_capturing(key(KeyCode::PageDown, none), TextCapture::Filter).is_none());
+    }
+
+    #[test]
+    fn question_mark_is_typed_text_during_text_capture() {
+        let none = KeyModifiers::NONE;
+        let event = || key(KeyCode::Char('?'), none);
+        assert_eq!(
+            name_capturing(event(), TextCapture::Search).as_deref(),
+            Some("SearchInput")
+        );
+        assert_eq!(
+            name_capturing(event(), TextCapture::Input).as_deref(),
+            Some("InputKey")
+        );
+        assert_eq!(
+            name_capturing(event(), TextCapture::Filter).as_deref(),
+            Some("FilterInput")
+        );
+        assert_eq!(
+            name_capturing(event(), TextCapture::SecretName).as_deref(),
+            Some("SecretInput")
+        );
+        assert_eq!(
+            name_capturing(event(), TextCapture::SecretValue).as_deref(),
+            Some("SecretInput")
+        );
     }
 }

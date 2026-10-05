@@ -43,6 +43,7 @@ d'édition non enregistrée demande confirmation.
 | `D` | panneau Diagnostics (erreurs de chargement) |
 | `H` | panneau Historique des exécutions |
 | `S` | panneau Variables secrètes |
+| `?` | aide des raccourcis (popup centré) |
 
 ## Édition d'une requête
 
@@ -144,3 +145,21 @@ sélectionnée a un résultat avec un corps non vide.
 
 Aucun de ces trois panneaux ne prend le clic pour l'instant — seul le
 clavier y navigue.
+
+## Aide des raccourcis
+
+À tout moment hors saisie de texte, la touche `?` ouvre un popup centré
+rappelant l'ensemble des raccourcis clavier de l'application, organisés par
+section : Global, Collection, Détail, Édition d'une requête, Réponse,
+Environnement (panneau et popup), et Diagnostics / Historique / Secrets.
+
+| Touche | Effet |
+|---|---|
+| `↑`/`k`, `↓`/`j` | défiler dans l'aide |
+| `Début`/`g`, `Fin`/`G` | début, fin de l'aide |
+| `?`, `Échap`, `q` | fermer le popup d'aide |
+
+Toutes les autres touches sont ignorées tant que le popup est ouvert, à
+l'exception de `Ctrl+C` qui quitte l'application. À la souris, cliquer en
+dehors du popup le referme également.
+
