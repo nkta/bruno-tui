@@ -94,7 +94,7 @@ fn spawn_run_sized(
             sender,
             events,
             "bru".into(),
-            Arc::new(bruno_tui::app::clipboard::SystemClipboard),
+            Arc::new(bruno_tui::app::clipboard::SystemClipboard::default()),
             Arc::new(bruno_tui::writer::BruWriter),
             Vec::new(),
             bruno_tui::app::mouse::MouseSetup::terminal(false),

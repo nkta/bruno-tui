@@ -93,7 +93,7 @@ fn main() -> ExitCode {
             sender,
             events,
             "bru".into(),
-            Arc::new(SystemClipboard),
+            Arc::new(SystemClipboard::default()),
             Arc::new(bruno_tui::writer::BruWriter),
             secrets,
             mouse_setup,

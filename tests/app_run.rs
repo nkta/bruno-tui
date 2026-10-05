@@ -72,7 +72,7 @@ fn spawn_run(
             sender,
             events,
             bru_program.into(),
-            Arc::new(bruno_tui::app::clipboard::SystemClipboard),
+            Arc::new(bruno_tui::app::clipboard::SystemClipboard::default()),
             Arc::new(bruno_tui::writer::BruWriter),
             Vec::new(),
             bruno_tui::app::mouse::MouseSetup::terminal(false),

@@ -5,10 +5,11 @@
 //! vers un hôte injoignable. L'appel passe donc toujours par un
 //! `spawn_blocking`, jamais directement dans la boucle d'événements.
 
+use std::sync::Mutex;
+
 use thiserror::Error;
 
-/// Écrit du texte dans le presse-papiers du système. `&self` : aucune
-/// implémentation ne conserve de ressource ouverte entre deux appels.
+/// Écrit du texte dans le presse-papiers du système.
 pub trait Clipboard: Send + Sync + 'static {
     fn set_text(&self, text: String) -> Result<(), ClipboardError>;
 }
@@ -19,23 +20,51 @@ pub trait Clipboard: Send + Sync + 'static {
 #[error("presse-papiers inaccessible : {0}")]
 pub struct ClipboardError(String);
 
-/// Presse-papiers du système, via `arboard`. Reconstruit une connexion à
-/// chaque appel plutôt que d'en garder une ouverte.
+/// Presse-papiers du système, via `arboard`. La connexion est ouverte au
+/// premier appel puis conservée pour toute la session : sous X11, le texte
+/// copié n'existe que tant que son propriétaire vit. Fermer la connexion
+/// juste après l'écriture perdait la copie (sauf gestionnaire de
+/// presse-papiers assez rapide) et faisait écrire à `arboard` un
+/// avertissement sur stderr, en plein milieu de l'écran du TUI.
+///
+/// Une écriture en échec abandonne la connexion : la suivante en rouvre
+/// une neuve (serveur d'affichage redémarré, par exemple).
 ///
 /// Vérifié manuellement (`cargo run` d'une sonde isolée) : `DISPLAY=:1`
 /// disponible → succès en 0,57 ms ; `DISPLAY`/`WAYLAND_DISPLAY` absents →
 /// `Clipboard::new()` échoue en 24 µs (« X11 server connection timed out »),
 /// sans blocage perceptible.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemClipboard;
+#[derive(Default)]
+pub struct SystemClipboard {
+    connection: Mutex<Option<arboard::Clipboard>>,
+}
+
+impl std::fmt::Debug for SystemClipboard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemClipboard").finish_non_exhaustive()
+    }
+}
 
 impl Clipboard for SystemClipboard {
     fn set_text(&self, text: String) -> Result<(), ClipboardError> {
-        let mut clipboard =
-            arboard::Clipboard::new().map_err(|error| ClipboardError(error.to_string()))?;
-        clipboard
+        // Un verrou empoisonné ne protège qu'une connexion : on la reprend.
+        let mut connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clipboard = match connection.as_mut() {
+            Some(clipboard) => clipboard,
+            None => connection.insert(
+                arboard::Clipboard::new().map_err(|error| ClipboardError(error.to_string()))?,
+            ),
+        };
+        let result = clipboard
             .set_text(text)
-            .map_err(|error| ClipboardError(error.to_string()))
+            .map_err(|error| ClipboardError(error.to_string()));
+        if result.is_err() {
+            *connection = None;
+        }
+        result
     }
 }
 
