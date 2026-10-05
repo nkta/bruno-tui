@@ -92,6 +92,12 @@ pub enum Command {
 
 /// Applique un message au modèle.
 pub fn update(model: &mut Model, message: Message) -> Command {
+    // Un statut (copie, campagne terminée…) masque le rappel des touches :
+    // il ne dure que jusqu'à l'action suivante de l'utilisateur. Le
+    // traitement du message peut ensuite en poser un nouveau.
+    if is_user_action(&message) {
+        model.last_status = None;
+    }
     if let Some(confirm) = model.confirm {
         return match message {
             Message::ConfirmYes | Message::Yank | Message::Right | Message::Enter => {
@@ -943,6 +949,17 @@ fn cancel_run(model: &mut Model) {
 }
 
 /// Applique l'issue d'une exécution, en ignorant un identifiant obsolète.
+/// Touche ou clic de l'utilisateur, par opposition aux résultats de
+/// tâches de fond et aux événements du terminal (redimensionnement,
+/// glisser ou relâchement de la souris).
+fn is_user_action(message: &Message) -> bool {
+    match message {
+        Message::Resize { .. } | Message::TerminalClosed(_) => false,
+        Message::Mouse(input) => input.kind == MouseKind::Press,
+        other => !is_background_result(other),
+    }
+}
+
 /// Message issu d'une tâche de fond plutôt que d'une action de
 /// l'utilisateur : il est toujours traité, quel que soit l'overlay ouvert.
 fn is_background_result(message: &Message) -> bool {
@@ -9125,6 +9142,22 @@ mod mouse_tests {
         click(&mut model, point);
         assert!(model.environment_editing.is_some());
         assert_eq!(model.focus, Focus::EnvironmentPicker);
+    }
+
+    #[test]
+    fn status_message_lasts_until_next_user_action() {
+        let mut model = loaded_model((100, 30));
+        model.last_status = Some(crate::app::model::StatusMessage::Copied);
+        update(
+            &mut model,
+            Message::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        assert!(model.last_status.is_some());
+        update(&mut model, Message::Down);
+        assert!(model.last_status.is_none());
     }
 
     #[test]
