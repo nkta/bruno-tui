@@ -101,6 +101,98 @@ pub fn render_history(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
+/// Dessine le panneau plein corps de la campagne de TNR.
+pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
+    let block = panel(" Campagne ", model.focus == Focus::Campaign);
+    let Some(campaign) = &model.campaign else {
+        frame.render_widget(
+            empty_state_message(area, "Aucune campagne lancée").block(block),
+            area,
+        );
+        return;
+    };
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let failures_str = if campaign.failed <= 1 {
+        format!("{} échec", campaign.failed)
+    } else {
+        format!("{} échecs", campaign.failed)
+    };
+    let failures_style = if campaign.failed == 0 {
+        theme::SUCCESS
+    } else {
+        theme::FAILURE
+    };
+    let header_line = Line::from(vec![
+        Span::styled("Cible : ", theme::LABEL),
+        Span::styled(
+            campaign.target.display().to_string(),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  ·  "),
+        Span::styled(
+            format!("{}/{} réussis", campaign.passed, campaign.total),
+            theme::SUCCESS,
+        ),
+        Span::raw("  ·  "),
+        Span::styled(failures_str, failures_style),
+        Span::raw("  ·  "),
+        Span::styled(
+            format!("{:.2}s", campaign.duration_secs),
+            Style::new().add_modifier(Modifier::DIM),
+        ),
+    ]);
+    let header = vec![header_line, Line::default()];
+
+    let header_height = u16::try_from(header.len()).unwrap_or(2);
+    let [header_area, list_area] =
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(inner_area);
+
+    frame.render_widget(Paragraph::new(header), header_area);
+
+    if campaign.failures.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled("aucun échec", theme::EMPTY_MESSAGE)),
+            list_area,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = campaign
+        .failures
+        .iter()
+        .map(|failure| {
+            let code_str = match failure.http_code {
+                Some(code) => code.to_string(),
+                None => "—".to_string(),
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    failure.path.display().to_string(),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(format!("({})", failure.name), theme::LABEL),
+                Span::raw("  "),
+                Span::styled(code_str, theme::LABEL),
+                Span::raw("  —  "),
+                Span::styled(failure.reason.clone(), theme::FAILURE),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let selected = Some(model.campaign_selected.min(campaign.failures.len() - 1));
+    let mut list_state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        list_area,
+        &mut list_state,
+    );
+}
+
 const DISABLED_ENTRY_VALUE: Style =
     Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC));
 

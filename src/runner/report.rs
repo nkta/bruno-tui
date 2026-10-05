@@ -221,7 +221,7 @@ pub enum ResultStatus {
 }
 
 impl ResultStatus {
-    fn is_failure(&self) -> bool {
+    pub fn is_failure(&self) -> bool {
         matches!(self, Self::Fail | Self::Error)
     }
 }

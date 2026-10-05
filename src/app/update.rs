@@ -9,11 +9,12 @@ use std::time::{Duration, Instant};
 use super::filter::{FilterState, evaluate};
 use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
-    CollectionState, DetailSelection, Drag, DragPanel, EditSession, EditState, EditableField,
-    EnvironmentEditSession, EnvironmentEditState, Exit, Focus, HistoryEntry, HistoryOutcome,
-    InputTarget, Model, ResponseTab, SecretError, SecretInput, StatusMessage, environment_name_at,
-    field_enabled, field_value, field_value_committed, secret_env_vars, secret_lookups,
-    secret_rows, section_entries, selected_response_body, tree_node_at, visible_rows,
+    CampaignFailure, CampaignSummary, CollectionState, DetailSelection, Drag, DragPanel,
+    EditSession, EditState, EditableField, EnvironmentEditSession, EnvironmentEditState, Exit,
+    Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, ResponseTab, SecretError, SecretInput,
+    StatusMessage, all_rows, environment_name_at, field_enabled, field_value,
+    field_value_committed, secret_env_vars, secret_lookups, secret_rows, section_entries,
+    selected_response_body, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::text_input::TextInput;
@@ -315,6 +316,23 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             }
             Command::None
         }
+        Message::ToggleCampaign => {
+            if model.loaded().is_some() {
+                model.focus = match model.focus {
+                    Focus::Campaign => Focus::Tree,
+                    _ => Focus::Campaign,
+                };
+            }
+            Command::None
+        }
+        Message::NextFailedRequest => {
+            navigate_failed_request(model, true);
+            Command::None
+        }
+        Message::PreviousFailedRequest => {
+            navigate_failed_request(model, false);
+            Command::None
+        }
         Message::ToggleEnvironmentPicker => {
             match model.focus {
                 Focus::EnvironmentPicker => model.focus = Focus::Tree,
@@ -551,6 +569,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                 Focus::History => navigate_history(model, navigation),
                 Focus::EnvironmentPicker => navigate_environment_picker(model, navigation),
                 Focus::Secrets => navigate_secrets(model, navigation),
+                Focus::Campaign => navigate_campaign(model, navigation),
             }
             Command::None
         }
@@ -573,7 +592,7 @@ fn run_selected(model: &mut Model) -> Command {
             Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
             Some(TreeNode::Error(_)) | None => None,
         },
-        Focus::Diagnostics | Focus::EnvironmentPicker | Focus::Secrets => None,
+        Focus::Diagnostics | Focus::EnvironmentPicker | Focus::Secrets | Focus::Campaign => None,
     };
     let Some((target, recursive)) = target else {
         return Command::None;
@@ -815,6 +834,60 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
     }
     model.history.push_front(entry);
 
+    if active.recursive
+        && let crate::runner::RunOutcome::Completed { ref report, .. } = event.outcome
+    {
+        let results: Vec<_> = report
+            .iterations()
+            .iter()
+            .flat_map(|it| &it.results)
+            .collect();
+        let total = results.len();
+        let failed = results.iter().filter(|r| r.is_failure()).count();
+        let skipped = results
+            .iter()
+            .filter(|r| r.skipped && !r.is_failure())
+            .count();
+        let passed = total.saturating_sub(failed + skipped);
+        let duration_secs: f64 = results.iter().map(|r| r.run_duration).sum();
+
+        let failures = results
+            .iter()
+            .filter(|r| r.is_failure())
+            .map(|r| CampaignFailure {
+                path: std::path::PathBuf::from(&r.test.filename),
+                name: r.name.clone(),
+                http_code: match r.response.status {
+                    ResponseStatus::Http(code) => Some(code),
+                    _ => None,
+                },
+                reason: extract_failure_reason(r),
+            })
+            .collect();
+
+        model.campaign = Some(CampaignSummary {
+            target: active.target.clone(),
+            total,
+            passed,
+            failed,
+            skipped,
+            duration_secs,
+            failures,
+        });
+        model.campaign_selected = 0;
+
+        let failures_text = if failed <= 1 {
+            format!("{failed} échec")
+        } else {
+            format!("{failed} échecs")
+        };
+        let status_text = format!(
+            "Campagne {} : {passed}/{total} réussis · {failures_text} — C pour le détail",
+            active.target.display()
+        );
+        model.last_status = Some(StatusMessage::CampaignFinished(status_text));
+    }
+
     match event.outcome {
         crate::runner::RunOutcome::Completed { report, exit_code } => {
             for result in report.0.into_iter().flat_map(|iteration| iteration.results) {
@@ -838,6 +911,39 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
             });
         }
     }
+}
+
+/// Détermine la première raison d'échec d'une requête exécutée.
+fn extract_failure_reason(result: &crate::runner::report::RequestResult) -> String {
+    if let Some(error) = &result.error {
+        return error.clone();
+    }
+    for assertion in &result.assertion_results {
+        if assertion.status.is_failure() {
+            let expr = format!(
+                "{} {} {}",
+                assertion.lhs_expr, assertion.operator, assertion.rhs_expr
+            );
+            return match &assertion.error {
+                Some(err) => format!("{expr} : {err}"),
+                None => expr,
+            };
+        }
+    }
+    for test in result
+        .test_results
+        .iter()
+        .chain(&result.pre_request_test_results)
+        .chain(&result.post_response_test_results)
+    {
+        if test.status.is_failure() {
+            return match &test.error {
+                Some(err) => format!("{} : {err}", test.description),
+                None => test.description.clone(),
+            };
+        }
+    }
+    "échec d'exécution".to_owned()
 }
 
 /// Recalcule les lignes visibles de l'arbre.
@@ -2143,6 +2249,135 @@ fn cross_navigate_to_tree(model: &mut Model, address: &[usize]) {
     model.focus = Focus::Tree;
 }
 
+fn navigate_campaign(model: &mut Model, message: Message) {
+    let Some(campaign) = &model.campaign else {
+        model.campaign_selected = 0;
+        return;
+    };
+    let count = campaign.failures.len();
+    if count == 0 {
+        model.campaign_selected = 0;
+        return;
+    }
+    let page = body_height(model);
+    let before = model.campaign_selected.min(count - 1);
+    match message {
+        Message::Up => model.campaign_selected = before.saturating_sub(1),
+        Message::Down => model.campaign_selected = (before + 1).min(count - 1),
+        Message::Home => model.campaign_selected = 0,
+        Message::End => model.campaign_selected = count - 1,
+        Message::PageUp => model.campaign_selected = before.saturating_sub(page),
+        Message::PageDown => model.campaign_selected = (before + page).min(count - 1),
+        Message::Right | Message::Enter => {
+            if let Some(failure) = campaign.failures.get(before) {
+                let target_path = failure.path.clone();
+                select_request_and_focus_detail(model, &target_path);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Sélectionne une requête dans l'arbre en dépliant ses dossiers parents
+/// et donne le focus au panneau Détail.
+fn select_request_and_focus_detail(model: &mut Model, target_path: &std::path::Path) {
+    let current_path = model.selected_node().map(|node| node.path());
+    if selection_locked(model) && current_path != Some(target_path) {
+        model.last_status = Some(StatusMessage::EditLocked);
+        return;
+    }
+    for ancestor in target_path.ancestors().skip(1) {
+        if !ancestor.as_os_str().is_empty() {
+            model.tree.expanded.insert(ancestor.to_path_buf());
+        }
+    }
+    refresh_rows(model);
+    let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
+    if let Some(index) = model.tree.rows.iter().position(|row| {
+        model
+            .node_at(&row.address)
+            .is_some_and(|node| node.path() == target_path)
+    }) {
+        model.tree.selected = index;
+    }
+    clear_detail_view_state(model);
+    reset_filter_if_selection_changed(model, previous_path.as_deref());
+    scroll_tree_into_view(model);
+    model.focus = Focus::Detail;
+}
+
+/// Navigue vers la requête en échec suivante (`forward = true`) ou précédente
+/// (`forward = false`) dans l'ordre de l'arbre.
+fn navigate_failed_request(model: &mut Model, forward: bool) {
+    if !matches!(model.focus, Focus::Tree | Focus::Detail | Focus::Response) {
+        return;
+    }
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    let all = all_rows(&collection.tree);
+    let mut failed_requests = Vec::new();
+    for (all_idx, row) in all.iter().enumerate() {
+        if let Some(TreeNode::Request(req)) = tree_node_at(&collection.tree, &row.address)
+            && model
+                .run
+                .outcomes
+                .get(&req.path)
+                .is_some_and(|o| o.result.is_failure())
+        {
+            failed_requests.push((all_idx, req.path.clone()));
+        }
+    }
+
+    if failed_requests.is_empty() {
+        model.last_status = Some(StatusMessage::NoFailedRequests);
+        return;
+    }
+
+    let current_addr = model.tree.rows.get(model.tree.selected).map(|r| &r.address);
+    let current_all_idx = current_addr
+        .and_then(|addr| all.iter().position(|r| &r.address == addr))
+        .unwrap_or(0);
+
+    let target_path = if forward {
+        failed_requests
+            .iter()
+            .find(|(all_idx, _)| *all_idx > current_all_idx)
+            .map(|(_, path)| path)
+            .unwrap_or(&failed_requests[0].1)
+    } else {
+        failed_requests
+            .iter()
+            .rfind(|(all_idx, _)| *all_idx < current_all_idx)
+            .map(|(_, path)| path)
+            .unwrap_or(&failed_requests[failed_requests.len() - 1].1)
+    };
+
+    if selection_locked(model) && model.selected_node().map(|n| n.path()) != Some(target_path) {
+        model.last_status = Some(StatusMessage::EditLocked);
+        return;
+    }
+
+    for ancestor in target_path.ancestors().skip(1) {
+        if !ancestor.as_os_str().is_empty() {
+            model.tree.expanded.insert(ancestor.to_path_buf());
+        }
+    }
+    refresh_rows(model);
+
+    let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
+    if let Some(index) = model.tree.rows.iter().position(|row| {
+        model
+            .node_at(&row.address)
+            .is_some_and(|node| node.path() == target_path)
+    }) {
+        model.tree.selected = index;
+    }
+    clear_detail_view_state(model);
+    reset_filter_if_selection_changed(model, previous_path.as_deref());
+    scroll_tree_into_view(model);
+}
+
 // --- Recherche -----------------------------------------------------------
 
 /// `/` : ouvre la saisie sur le motif déjà validé, ou vide s'il n'y en a
@@ -2173,9 +2408,11 @@ fn confirm_search(model: &mut Model) {
         Focus::Tree => SearchScope::Tree,
         Focus::Detail => SearchScope::Detail,
         Focus::Response => SearchScope::Response,
-        Focus::Diagnostics | Focus::History | Focus::EnvironmentPicker | Focus::Secrets => {
-            SearchScope::Tree
-        }
+        Focus::Diagnostics
+        | Focus::History
+        | Focus::EnvironmentPicker
+        | Focus::Secrets
+        | Focus::Campaign => SearchScope::Tree,
     };
     search.pattern = search.draft.clone();
     search.editing = false;
@@ -7005,6 +7242,359 @@ mod tests {
         assert!(!session.dirty);
         assert_eq!(session.preview, saved_view);
         assert!(session.fields.contains(&EditableField::HeaderValue(0)));
+    }
+
+    // --- Panneau Campagne & navigation dans les requêtes en échec ---
+
+    #[test]
+    fn toggle_campaign_panel() {
+        let mut model = loaded_model((100, 30));
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Ouverture puis fermeture campagne avec C
+        update(&mut model, Message::ToggleCampaign);
+        assert_eq!(model.focus, Focus::Campaign);
+        update(&mut model, Message::ToggleCampaign);
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Bascule directe depuis Diagnostics
+        update(&mut model, Message::ToggleDiagnostics);
+        assert_eq!(model.focus, Focus::Diagnostics);
+        update(&mut model, Message::ToggleCampaign);
+        assert_eq!(model.focus, Focus::Campaign);
+
+        // Échap referme le panneau vers l'arbre
+        update(&mut model, Message::FocusTree);
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Sans collection chargée : aucun effet
+        let mut loading_model = Model::new("/x".into(), (100, 30));
+        update(&mut loading_model, Message::ToggleCampaign);
+        assert_eq!(loading_model.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn campaign_summary_constructed_on_recursive_completed() {
+        use runner::report::{AssertionResult, ResponseStatus, ResultStatus, TestResult};
+
+        let mut model = loaded_model((100, 30));
+        let id = runner::RunId(42);
+        model.run.active = Some(ActiveRun {
+            id,
+            target: PathBuf::from("grp"),
+            recursive: true,
+            handle: None,
+        });
+
+        let mut res1 = sample_request_result("grp/ok.bru");
+        res1.run_duration = 0.1;
+
+        let mut res2 = sample_request_result("grp/skipped.bru");
+        res2.skipped = true;
+        res2.run_duration = 0.05;
+
+        let mut res3 = sample_request_result("grp/down.bru");
+        res3.error = Some("connect ECONNREFUSED 127.0.0.1:80".into());
+        res3.status = ResultStatus::Error;
+        res3.response.status = ResponseStatus::Error;
+        res3.run_duration = 0.2;
+
+        let mut res4 = sample_request_result("grp/bad_assert.bru");
+        res4.response.status = ResponseStatus::Http(404);
+        res4.assertion_results = vec![AssertionResult {
+            uid: "1".into(),
+            lhs_expr: "res.status".into(),
+            rhs_expr: "200".into(),
+            rhs_operand: "200".into(),
+            operator: "eq".into(),
+            status: ResultStatus::Fail,
+            error: Some("expected 404 to equal 200".into()),
+        }];
+        res4.run_duration = 0.15;
+
+        let mut res5 = sample_request_result("grp/bad_test.bru");
+        res5.response.status = ResponseStatus::Http(401);
+        res5.test_results = vec![TestResult {
+            uid: "2".into(),
+            description: "token test".into(),
+            status: ResultStatus::Fail,
+            error: Some("missing token".into()),
+            actual: None,
+            expected: None,
+        }];
+        res5.run_duration = 0.1;
+
+        let report = runner::Report(vec![runner::report::Iteration {
+            iteration_index: 0,
+            results: vec![res1, res2, res3, res4, res5],
+            summary: runner::report::Summary {
+                total_requests: 5,
+                passed_requests: 1,
+                failed_requests: 3,
+                error_requests: 1,
+                skipped_requests: 1,
+                total_assertions: 1,
+                passed_assertions: 0,
+                failed_assertions: 1,
+                total_tests: 1,
+                passed_tests: 0,
+                failed_tests: 1,
+                total_pre_request_tests: 0,
+                passed_pre_request_tests: 0,
+                failed_pre_request_tests: 0,
+                total_post_response_tests: 0,
+                passed_post_response_tests: 0,
+                failed_post_response_tests: 0,
+            },
+        }]);
+
+        update(
+            &mut model,
+            Message::RunFinished(runner::RunEvent {
+                id,
+                outcome: runner::RunOutcome::Completed {
+                    report,
+                    exit_code: Some(1),
+                },
+            }),
+        );
+
+        let campaign = model.campaign.as_ref().expect("campagne construite");
+        assert_eq!(campaign.target, PathBuf::from("grp"));
+        assert_eq!(campaign.total, 5);
+        assert_eq!(campaign.passed, 1);
+        assert_eq!(campaign.failed, 3);
+        assert_eq!(campaign.skipped, 1);
+        assert!((campaign.duration_secs - 0.6).abs() < 1e-6);
+        assert_eq!(campaign.failures.len(), 3);
+
+        // Première raison d'échec : message d'erreur bru
+        assert_eq!(campaign.failures[0].path, PathBuf::from("grp/down.bru"));
+        assert_eq!(campaign.failures[0].http_code, None);
+        assert_eq!(
+            campaign.failures[0].reason,
+            "connect ECONNREFUSED 127.0.0.1:80"
+        );
+
+        // Deuxième raison d'échec : première assertion en échec avec son message
+        assert_eq!(
+            campaign.failures[1].path,
+            PathBuf::from("grp/bad_assert.bru")
+        );
+        assert_eq!(campaign.failures[1].http_code, Some(404));
+        assert_eq!(
+            campaign.failures[1].reason,
+            "res.status eq 200 : expected 404 to equal 200"
+        );
+
+        // Troisième raison d'échec : premier test en échec avec son message
+        assert_eq!(campaign.failures[2].path, PathBuf::from("grp/bad_test.bru"));
+        assert_eq!(campaign.failures[2].http_code, Some(401));
+        assert_eq!(campaign.failures[2].reason, "token test : missing token");
+
+        // Statut émis dans la barre d'état
+        assert!(matches!(
+            &model.last_status,
+            Some(StatusMessage::CampaignFinished(msg))
+                if msg == "Campagne grp : 1/5 réussis · 3 échecs — C pour le détail"
+        ));
+
+        // Une exécution non récursive ne remplace pas le résumé de campagne
+        let non_rec_id = runner::RunId(43);
+        model.run.active = Some(ActiveRun {
+            id: non_rec_id,
+            target: PathBuf::from("simple-get.bru"),
+            recursive: false,
+            handle: None,
+        });
+        let single_report = sample_report(&["simple-get.bru"]);
+        update(
+            &mut model,
+            Message::RunFinished(runner::RunEvent {
+                id: non_rec_id,
+                outcome: runner::RunOutcome::Completed {
+                    report: single_report,
+                    exit_code: Some(0),
+                },
+            }),
+        );
+        assert_eq!(
+            model.campaign.as_ref().unwrap().target,
+            PathBuf::from("grp")
+        );
+    }
+
+    #[test]
+    fn campaign_navigation_and_cross_selection() {
+        let mut model = loaded_model((100, 30));
+        model.campaign = Some(CampaignSummary {
+            target: PathBuf::from("grp"),
+            total: 2,
+            passed: 0,
+            failed: 2,
+            skipped: 0,
+            duration_secs: 0.3,
+            failures: vec![
+                CampaignFailure {
+                    path: PathBuf::from("grp/x.bru"),
+                    name: "x".into(),
+                    http_code: Some(500),
+                    reason: "server error".into(),
+                },
+                CampaignFailure {
+                    path: PathBuf::from("grp/sub/deep.bru"),
+                    name: "deep".into(),
+                    http_code: Some(400),
+                    reason: "bad request".into(),
+                },
+            ],
+        });
+        model.focus = Focus::Campaign;
+        assert_eq!(model.campaign_selected, 0);
+
+        // Navigation
+        update(&mut model, Message::Down);
+        assert_eq!(model.campaign_selected, 1);
+        update(&mut model, Message::Down);
+        assert_eq!(model.campaign_selected, 1);
+        update(&mut model, Message::Up);
+        assert_eq!(model.campaign_selected, 0);
+        update(&mut model, Message::End);
+        assert_eq!(model.campaign_selected, 1);
+        update(&mut model, Message::Home);
+        assert_eq!(model.campaign_selected, 0);
+
+        // Sélection croisée vers Détail via Right
+        assert!(!model.tree.expanded.contains(Path::new("grp")));
+        update(&mut model, Message::Right);
+        assert_eq!(model.focus, Focus::Detail);
+        assert!(model.tree.expanded.contains(Path::new("grp")));
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/x.bru")
+        );
+
+        // Sélection croisée vers Détail via Enter
+        model.focus = Focus::Campaign;
+        model.campaign_selected = 1;
+        assert!(!model.tree.expanded.contains(Path::new("grp/sub")));
+        update(&mut model, Message::Enter);
+        assert_eq!(model.focus, Focus::Detail);
+        assert!(model.tree.expanded.contains(Path::new("grp/sub")));
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/sub/deep.bru")
+        );
+    }
+
+    #[test]
+    fn next_and_previous_failed_request_keys() {
+        let mut model = loaded_model((100, 30));
+
+        // 1. Sans aucune requête en échec : statut "Aucune requête en échec"
+        update(&mut model, Message::NextFailedRequest);
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NoFailedRequests)
+        ));
+
+        model.last_status = None;
+        update(&mut model, Message::PreviousFailedRequest);
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NoFailedRequests)
+        ));
+
+        // 2. Avec deux requêtes en échec dans l'arbre : grp/x.bru et grp/sub/deep.bru
+        let mut res_fail1 = sample_request_result("grp/x.bru");
+        res_fail1.error = Some("fail 1".into());
+        res_fail1.status = runner::report::ResultStatus::Error;
+        model.run.outcomes.insert(
+            PathBuf::from("grp/x.bru"),
+            super::super::model::RequestOutcome {
+                result: res_fail1,
+                exit_code: Some(1),
+            },
+        );
+
+        let mut res_fail2 = sample_request_result("grp/sub/deep.bru");
+        res_fail2.error = Some("fail 2".into());
+        res_fail2.status = runner::report::ResultStatus::Error;
+        model.run.outcomes.insert(
+            PathBuf::from("grp/sub/deep.bru"),
+            super::super::model::RequestOutcome {
+                result: res_fail2,
+                exit_code: Some(1),
+            },
+        );
+
+        // Positionné au début de l'arbre (dossier grp)
+        model.focus = Focus::Tree;
+        model.tree.selected = 0;
+
+        // ']' sélectionne le premier échec (grp/x.bru) et déplie grp
+        update(&mut model, Message::NextFailedRequest);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/x.bru")
+        );
+        assert!(model.tree.expanded.contains(Path::new("grp")));
+        assert_eq!(model.focus, Focus::Tree);
+
+        // ']' suivant sélectionne le deuxième échec (grp/sub/deep.bru) et déplie sub
+        update(&mut model, Message::NextFailedRequest);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/sub/deep.bru")
+        );
+        assert!(model.tree.expanded.contains(Path::new("grp/sub")));
+
+        // ']' suivant boucle au premier échec
+        update(&mut model, Message::NextFailedRequest);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/x.bru")
+        );
+
+        // '[' recule et boucle sur le dernier échec
+        update(&mut model, Message::PreviousFailedRequest);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/sub/deep.bru")
+        );
+
+        // '[' précédent revient à grp/x.bru
+        update(&mut model, Message::PreviousFailedRequest);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/x.bru")
+        );
+
+        // Fonctionne aussi depuis Focus::Detail et Focus::Response
+        model.focus = Focus::Detail;
+        update(&mut model, Message::NextFailedRequest);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/sub/deep.bru")
+        );
+        assert_eq!(model.focus, Focus::Detail);
+
+        model.focus = Focus::Response;
+        update(&mut model, Message::NextFailedRequest);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/x.bru")
+        );
+        assert_eq!(model.focus, Focus::Response);
+
+        // Ignoré depuis un autre panneau (ex: Diagnostics)
+        model.focus = Focus::Diagnostics;
+        update(&mut model, Message::NextFailedRequest);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/x.bru")
+        );
+        assert_eq!(model.focus, Focus::Diagnostics);
     }
 }
 
