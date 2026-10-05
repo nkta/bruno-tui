@@ -43,7 +43,7 @@ pub enum DragRow {
 /// Panneau et ligne sous la position `(column, row)` du terminal ; `None`
 /// hors de l'arbre, du détail et de la réponse, ou sous la taille minimale.
 pub fn hit_test(model: &Model, column: u16, row: u16) -> Option<Hit> {
-    let areas = layout_for(model.size)?;
+    let areas = layout_for(model.size, model.zoomed_panel())?;
     let position = Position::new(column, row);
     if areas.tree.contains(position) {
         let area = inner(areas.tree);
@@ -70,7 +70,7 @@ pub fn hit_test(model: &Model, column: u16, row: u16) -> Option<Hit> {
 /// que soit la colonne. `None` si le panneau n'a aucun contenu ou sous la
 /// taille minimale.
 pub fn drag_row(model: &Model, panel: DragPanel, row: u16) -> Option<DragRow> {
-    let areas = layout_for(model.size)?;
+    let areas = layout_for(model.size, model.zoomed_panel())?;
     let area = inner(panel_area(&areas, panel));
     let (lines, wraps, scroll, boxes) = panel_content(model, panel);
     let last = u16::try_from(lines.len().checked_sub(1)?).unwrap_or(u16::MAX);
@@ -193,7 +193,7 @@ mod tests {
     ) -> usize {
         let (width, height) = model.size;
         let screen = render(model, width, height);
-        let areas = layout_for(model.size).expect("taille suffisante");
+        let areas = layout_for(model.size, model.zoomed_panel()).expect("taille suffisante");
         let panel = inner(area(&areas));
         let mut checked = 0;
         for y in panel.y..panel.bottom() {
@@ -287,7 +287,7 @@ mod tests {
         model.editing = Some(session);
         model.focus = Focus::Detail;
         assert!(!detail_wraps(&model));
-        let areas = layout_for(model.size).expect("taille");
+        let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
         let panel = inner(areas.detail);
         for y in 0..panel.height {
             let expected = u16::try_from(usize::from(y))
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn tree_rows_borders_and_other_areas() {
         let mut model = loaded_model((100, 12));
-        let areas = layout_for(model.size).expect("taille");
+        let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
         let tree = inner(areas.tree);
         assert_eq!(
             hit_test(&model, tree.x, tree.y),
@@ -338,7 +338,11 @@ mod tests {
         model.tree.offset = 0;
         let mut short = loaded_model((100, 40));
         short.tree.offset = 0;
-        let tall = inner(layout_for(short.size).expect("taille").tree);
+        let tall = inner(
+            layout_for(short.size, short.zoomed_panel())
+                .expect("taille")
+                .tree,
+        );
         assert_eq!(
             hit_test(&short, tall.x, tall.bottom() - 1),
             Some(Hit::Tree { row: None })
@@ -363,7 +367,7 @@ mod tests {
     fn drag_rows_outside_and_beyond_content() {
         let mut model = loaded_model((140, 60));
         select(&mut model, "simple-get.bru");
-        let areas = layout_for(model.size).expect("taille");
+        let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
         let panel = inner(areas.detail);
         let last = u16::try_from(plain_lines(&model).len() - 1).expect("court");
         assert_eq!(
@@ -384,5 +388,42 @@ mod tests {
         );
         // Réponse sans contenu.
         assert_eq!(drag_row(&model, DragPanel::Response, panel.y), None);
+    }
+
+    #[test]
+    fn hit_test_in_zoomed_panels() {
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        model.size = (100, 30);
+        model.zoom = true;
+
+        // 1. Arbre zoomé : occupe tout le corps (x: 0..100, y: 1..29)
+        model.focus = Focus::Tree;
+        let hit = hit_test(&model, 80, 5);
+        assert!(
+            matches!(hit, Some(Hit::Tree { .. })),
+            "un clic à droite en zoom arbre doit toucher l'arbre: {hit:?}"
+        );
+
+        // 2. Détail zoomé : occupe tout le corps
+        model.focus = Focus::Detail;
+        let hit = hit_test(&model, 5, 5);
+        assert!(
+            matches!(hit, Some(Hit::Detail { .. })),
+            "un clic à gauche en zoom détail doit toucher le détail: {hit:?}"
+        );
+
+        // 3. Réponse zoomée : Statut compact en y: 1..4, Réponse en y: 4..29
+        model.focus = Focus::Response;
+        let hit_status = hit_test(&model, 5, 2);
+        assert_eq!(
+            hit_status, None,
+            "le panneau Statut au-dessus de la réponse n'a pas de hit"
+        );
+        let hit_response = hit_test(&model, 5, 6);
+        assert!(
+            matches!(hit_response, Some(Hit::Response { .. })),
+            "un clic dans la réponse zoomée doit toucher la réponse: {hit_response:?}"
+        );
     }
 }
