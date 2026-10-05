@@ -558,7 +558,9 @@ fn filter_input_line(model: &Model) -> Option<String> {
 /// remplace la barre d'état, à la place des rappels de touches habituels.
 fn tree_filter_input_line(model: &Model) -> Option<String> {
     let filter = model.tree_filter.as_ref()?;
-    filter.editing.then(|| format!("f{}", filter.draft))
+    filter
+        .editing
+        .then(|| format!("Filtre arbre : {}", filter.draft))
 }
 
 /// Ligne de saisie de recherche, tant qu'elle est ouverte : remplace la
@@ -1595,7 +1597,7 @@ mod tests {
         let screen = render(&hist_model, 100, 30).join("\n");
         assert!(screen.contains("ping.bru"), "{screen}");
         assert!(screen.contains("succès"), "{screen}");
-        assert!(screen.contains("0.25s"), "{screen}");
+        assert!(screen.contains("0,25 s"), "{screen}");
     }
 
     /// Le message unique d'un panneau vide n'est plus collé à la première
@@ -1675,10 +1677,10 @@ mod tests {
         assert!(screen.contains("my-suite"), "{screen}");
         assert!(screen.contains("12/15 réussis"), "{screen}");
         assert!(screen.contains("3 échecs"), "{screen}");
-        assert!(screen.contains("1.42s"), "{screen}");
+        assert!(screen.contains("1,42 s"), "{screen}");
         assert!(screen.contains("req1.bru"), "{screen}");
         assert!(screen.contains("Premier échec"), "{screen}");
-        assert!(screen.contains("500"), "{screen}");
+        assert!(screen.contains("HTTP 500"), "{screen}");
         assert!(screen.contains("Internal server error"), "{screen}");
         assert!(screen.contains("folder/req2.bru"), "{screen}");
         assert!(screen.contains("connect ECONNREFUSED"), "{screen}");
@@ -2429,7 +2431,7 @@ mod tests {
             update(&mut model, Message::TreeFilterInput(c));
         }
         let input_status = status_line(&model);
-        assert_eq!(input_status, "fping");
+        assert_eq!(input_status, "Filtre arbre : ping");
 
         // Validation du filtre : rappel dans le titre du panneau
         update(&mut model, Message::ConfirmTreeFilter);

@@ -140,7 +140,7 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
         Span::styled(failures_str, failures_style),
         Span::raw("  ·  "),
         Span::styled(
-            format!("{:.2}s", campaign.duration_secs),
+            format_duration(campaign.duration_secs),
             Style::new().add_modifier(Modifier::DIM),
         ),
     ]);
@@ -164,22 +164,22 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
         .failures
         .iter()
         .map(|failure| {
-            let code_str = match failure.http_code {
-                Some(code) => code.to_string(),
-                None => "—".to_string(),
-            };
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     failure.path.display().to_string(),
                     Style::new().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
                 Span::styled(format!("({})", failure.name), theme::LABEL),
-                Span::raw("  "),
-                Span::styled(code_str, theme::LABEL),
-                Span::raw("  —  "),
-                Span::styled(failure.reason.clone(), theme::FAILURE),
-            ]);
+                Span::raw("  ·  "),
+            ];
+            // Sans réponse HTTP (hôte injoignable…), seule la raison s'affiche.
+            if let Some(code) = failure.http_code {
+                spans.push(Span::styled(format!("HTTP {code}"), theme::LABEL));
+                spans.push(Span::raw("  ·  "));
+            }
+            spans.push(Span::styled(failure.reason.clone(), theme::FAILURE));
+            let line = Line::from(spans);
             ListItem::new(line)
         })
         .collect();
@@ -529,7 +529,7 @@ fn history_row_line(entry: &HistoryEntry) -> Line<'static> {
             };
             (
                 Span::styled(text, style.add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{duration_secs:.2}s")),
+                Span::raw(format_duration(*duration_secs)),
             )
         }
         HistoryOutcome::Cancelled => (
@@ -569,4 +569,10 @@ fn format_time(time: SystemTime) -> String {
     let minutes = (seconds_in_day % 3600) / 60;
     let seconds = seconds_in_day % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+/// Durée en secondes au format français, comme les tailles du panneau
+/// Statut : `0,07 s`.
+fn format_duration(secs: f64) -> String {
+    format!("{secs:.2} s").replace('.', ",")
 }

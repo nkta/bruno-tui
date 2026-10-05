@@ -375,6 +375,15 @@ pub fn help_content_lines(key_width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// Largeur d'affichage de la plus longue ligne de l'aide, en colonnes.
+pub fn help_content_width() -> usize {
+    help_content_lines(help_key_column_width())
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Nombre total de lignes de contenu de l'aide.
 pub fn help_content_lines_count() -> usize {
     let mut count = 0;
@@ -390,7 +399,14 @@ pub fn help_content_lines_count() -> usize {
 
 /// Calcule la zone centrée du popup d'aide sur l'écran.
 pub fn help_popup_area(screen: Rect) -> Rect {
-    let width = (screen.width * 75 / 100).clamp(48, 76).min(screen.width);
+    // Assez large pour la plus longue description (bordures comprises),
+    // sans dépasser l'écran moins une marge : une ligne par raccourci, le
+    // calcul du défilement en dépend.
+    let needed = u16::try_from(help_content_width() + 2).unwrap_or(u16::MAX);
+    let width = needed
+        .min(screen.width.saturating_sub(4))
+        .max(48)
+        .min(screen.width);
     let height = screen.height.saturating_sub(4).max(6).min(screen.height);
     let x = screen.x + screen.width.saturating_sub(width) / 2;
     let y = screen.y + screen.height.saturating_sub(height) / 2;
