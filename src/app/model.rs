@@ -69,6 +69,13 @@ impl ResponseTab {
     }
 }
 
+/// État du popup d'aide des raccourcis clavier (`help-popup`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HelpPopup {
+    /// Ligne de défilement du contenu du popup d'aide.
+    pub scroll: u16,
+}
+
 /// Nombre maximal d'entrées conservées dans le journal d'historique.
 pub const HISTORY_LIMIT: usize = 200;
 
@@ -765,6 +772,8 @@ pub struct Model {
     pub environment_selected: usize,
     /// Variables secrètes transmises à `bru` (`secret-env-vars`).
     pub secrets: SecretsState,
+    /// Popup d'aide des raccourcis clavier, superposé à l'écran courant.
+    pub help: Option<HelpPopup>,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -883,6 +892,7 @@ impl Model {
             current_environment: None,
             environment_selected: 0,
             secrets: SecretsState::default(),
+            help: None,
         }
     }
 
@@ -890,6 +900,11 @@ impl Model {
     /// Conçu pour que `add-field-editing`/`add-response-filter` y ajoutent
     /// leur propre branche sans toucher à celle-ci.
     pub fn text_capture(&self) -> Option<TextCapture> {
+        // Le popup d'aide intercepte les touches tant qu'il est ouvert :
+        // aucune saisie de texte n'est active par-dessus.
+        if self.help.is_some() {
+            return None;
+        }
         // Une confirmation en attente reprend la main sur le clavier : ses
         // réponses (`y`, `n`, `Entrée`, `Échap`) ne doivent pas devenir du
         // texte de saisie.

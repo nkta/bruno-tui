@@ -5,11 +5,14 @@
 //! panneaux pour garder la sélection visible et borner le défilement.
 
 pub mod detail;
+pub mod help;
 pub mod hit;
 pub mod panels;
 pub mod status;
 pub mod theme;
 pub mod tree;
+
+pub use help::{help_max_scroll, help_popup_area};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -238,6 +241,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 }
             }
         },
+    }
+
+    if let Some(help) = &model.help {
+        let popup_area = help_popup_area(frame.area());
+        frame.render_widget(Clear, popup_area);
+        help::render_help_popup(help, frame, popup_area);
     }
 
     frame.render_widget(
@@ -588,6 +597,9 @@ fn status_line(model: &Model) -> String {
             }
         };
     }
+    if model.help.is_some() {
+        return "↑↓ défiler  Début/Fin  ? / Échap / q fermer".to_owned();
+    }
     if let Some(line) = filter_input_line(model) {
         return line;
     }
@@ -613,15 +625,15 @@ fn status_line(model: &Model) -> String {
     }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
-            "↑↓ naviguer  → déplier  ← replier  r lancer  / chercher  Tab détail  S secrets  q quitter  M souris"
+            "↑↓ naviguer  → déplier  ← replier  r lancer  / chercher  Tab détail  S secrets  ? aide  q quitter  M souris"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
-            "↑↓ défiler  Début/Fin  Entrée éditer  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
+            "↑↓ défiler  Début/Fin  Entrée éditer  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Response) => {
-            "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
+            "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Diagnostics) => {
@@ -1539,7 +1551,7 @@ mod tests {
         let status = &lines[29];
         assert!(
             status.contains(
-                "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  Échap arbre  q quitter"
+                "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter"
             ),
             "{status}"
         );
@@ -2185,5 +2197,36 @@ mod tests {
         assert!(line.contains("Échap annuler"), "{line}");
         assert!(line.contains("Ctrl+S sauvegarder"), "{line}");
         assert!(line.contains("● non enregistré"), "{line}");
+    }
+
+    #[test]
+    fn help_popup_rendering_and_status_line() {
+        use crate::app::model::HelpPopup;
+
+        let mut model = loaded_model((120, 30));
+
+        // Vérification des rappels de touches sur les focus principaux
+        model.focus = Focus::Tree;
+        assert!(status_line(&model).contains("? aide"));
+
+        model.focus = Focus::Detail;
+        assert!(status_line(&model).contains("? aide"));
+
+        model.focus = Focus::Response;
+        assert!(status_line(&model).contains("? aide"));
+
+        // Popup ouvert
+        model.help = Some(HelpPopup::default());
+        let help_status = status_line(&model);
+        assert!(
+            help_status.contains("? / Échap / q fermer"),
+            "{help_status}"
+        );
+
+        let screen = render(&model, 120, 30).join("\n");
+        assert!(screen.contains("Aide"), "{screen}");
+        assert!(screen.contains("Touche"), "{screen}");
+        assert!(screen.contains("Effet"), "{screen}");
+        assert!(screen.contains("Global"), "{screen}");
     }
 }

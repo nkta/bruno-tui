@@ -23,14 +23,14 @@ use super::view::detail::{
 use super::view::hit::{DragRow, Hit, drag_row, hit_test};
 use super::view::{
     detail::{detail_text, response_text},
-    environment_edit_popup_area, inner, layout_for,
+    environment_edit_popup_area, help_max_scroll, help_popup_area, inner, layout_for,
 };
 use crate::collection::TreeNode;
 use crate::runner::report::ResponseStatus;
 use crate::runner::{RunRequest, SecretString};
 use crate::secrets::{SecretLookup, is_valid_name};
 use crate::writer::{EntrySection, FieldEdit, FileStamp};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 
 /// Effet demandé par `update`, à exécuter par la boucle `run`, qui seule
@@ -127,6 +127,78 @@ pub fn update(model: &mut Model, message: Message) -> Command {
         };
     }
 
+    // Seules les entrées de l'utilisateur sont interceptées : les résultats
+    // asynchrones (exécution, chargement, copie, sauvegarde) doivent être
+    // traités même popup ouvert, sinon une exécution resterait active.
+    if model.help.is_some() && !is_background_result(&message) {
+        return match message {
+            Message::ForceQuit => {
+                model.help = None;
+                if model.editing.as_ref().is_some_and(EditSession::has_unsaved) {
+                    model.confirm = Some(super::model::PendingConfirm::QuitWithUnsavedEdit);
+                } else {
+                    model.exit = Some(Exit::Normal);
+                }
+                Command::None
+            }
+            Message::TerminalClosed(error) => {
+                model.exit = Some(Exit::TerminalError(error));
+                Command::None
+            }
+            Message::Resize { width, height } => {
+                model.size = (width, height);
+                scroll_tree_into_view(model);
+                model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
+                let max = help_max_scroll(model);
+                if let Some(help) = &mut model.help {
+                    help.scroll = help.scroll.min(max);
+                }
+                Command::None
+            }
+            Message::ToggleHelp | Message::FocusTree | Message::Quit => {
+                model.help = None;
+                Command::None
+            }
+            Message::Up => {
+                if let Some(help) = &mut model.help {
+                    help.scroll = help.scroll.saturating_sub(1);
+                }
+                Command::None
+            }
+            Message::Down => {
+                let max = help_max_scroll(model);
+                if let Some(help) = &mut model.help {
+                    help.scroll = help.scroll.saturating_add(1).min(max);
+                }
+                Command::None
+            }
+            Message::Home => {
+                if let Some(help) = &mut model.help {
+                    help.scroll = 0;
+                }
+                Command::None
+            }
+            Message::End => {
+                let max = help_max_scroll(model);
+                if let Some(help) = &mut model.help {
+                    help.scroll = max;
+                }
+                Command::None
+            }
+            Message::Mouse(input) => {
+                if input.kind == MouseKind::Press {
+                    let popup_area = help_popup_area(Rect::new(0, 0, model.size.0, model.size.1));
+                    let position = Position::new(input.column, input.row);
+                    if !popup_area.contains(position) {
+                        model.help = None;
+                    }
+                }
+                Command::None
+            }
+            _ => Command::None,
+        };
+    }
+
     match message {
         Message::Quit | Message::ForceQuit => {
             if model.editing.as_ref().is_some_and(EditSession::has_unsaved) {
@@ -196,6 +268,10 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                     }
                 }
             }
+            Command::None
+        }
+        Message::ToggleHelp => {
+            model.help = Some(super::model::HelpPopup::default());
             Command::None
         }
         Message::Add => {
@@ -774,6 +850,22 @@ fn cancel_run(model: &mut Model) {
 }
 
 /// Applique l'issue d'une exécution, en ignorant un identifiant obsolète.
+/// Message issu d'une tâche de fond plutôt que d'une action de
+/// l'utilisateur : il est toujours traité, quel que soit l'overlay ouvert.
+fn is_background_result(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::CollectionLoaded(_)
+            | Message::RunStarted { .. }
+            | Message::RunFinished(_)
+            | Message::ClipboardResult { .. }
+            | Message::EditSaved { .. }
+            | Message::EnvironmentSaved { .. }
+            | Message::MouseCaptureChanged { .. }
+            | Message::SecretsResolved { .. }
+    )
+}
+
 fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
     let matches_active = model
         .run
@@ -7922,5 +8014,139 @@ mod mouse_tests {
         click(&mut model, point);
         assert!(model.environment_editing.is_some());
         assert_eq!(model.focus, Focus::EnvironmentPicker);
+    }
+
+    #[test]
+    fn help_popup_does_not_swallow_run_finished() {
+        let mut model = loaded_model((100, 30));
+        model.run.active = Some(crate::app::model::ActiveRun {
+            id: crate::runner::RunId(3),
+            target: "simple-get.bru".into(),
+            recursive: false,
+            handle: None,
+        });
+        update(&mut model, Message::ToggleHelp);
+        update(
+            &mut model,
+            Message::RunFinished(crate::runner::RunEvent {
+                id: crate::runner::RunId(3),
+                outcome: crate::runner::RunOutcome::Failed(crate::runner::RunError::BruNotFound),
+            }),
+        );
+        assert!(model.help.is_some());
+        assert!(model.run.active.is_none());
+        assert!(model.run.last_failure.is_some());
+    }
+
+    #[test]
+    fn help_popup_lifecycle_open_and_close() {
+        let mut model = loaded_model((100, 30));
+        assert!(model.help.is_none());
+
+        // '?' ouvre le popup
+        update(&mut model, Message::ToggleHelp);
+        assert!(model.help.is_some());
+        assert_eq!(model.help.unwrap().scroll, 0);
+
+        // '?' le ferme
+        update(&mut model, Message::ToggleHelp);
+        assert!(model.help.is_none());
+
+        // Échap le ferme
+        update(&mut model, Message::ToggleHelp);
+        assert!(model.help.is_some());
+        update(&mut model, Message::FocusTree);
+        assert!(model.help.is_none());
+
+        // 'q' le ferme sans quitter l'application
+        update(&mut model, Message::ToggleHelp);
+        assert!(model.help.is_some());
+        update(&mut model, Message::Quit);
+        assert!(model.help.is_none());
+        assert!(model.exit.is_none());
+    }
+
+    #[test]
+    fn help_popup_navigation_and_scrolling() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleHelp);
+        assert!(model.help.is_some());
+
+        // Défilement vers le bas
+        update(&mut model, Message::Down);
+        assert_eq!(model.help.unwrap().scroll, 1);
+        update(&mut model, Message::Down);
+        assert_eq!(model.help.unwrap().scroll, 2);
+
+        // Défilement vers le haut
+        update(&mut model, Message::Up);
+        assert_eq!(model.help.unwrap().scroll, 1);
+
+        // Fin de liste
+        update(&mut model, Message::End);
+        let max = help_max_scroll(&model);
+        assert_eq!(model.help.unwrap().scroll, max);
+
+        // Début de liste
+        update(&mut model, Message::Home);
+        assert_eq!(model.help.unwrap().scroll, 0);
+    }
+
+    #[test]
+    fn help_popup_ignores_other_keys() {
+        let mut model = loaded_model((100, 30));
+        let selected_before = model.tree.selected;
+        update(&mut model, Message::ToggleHelp);
+        assert!(model.help.is_some());
+
+        // Les touches ordinaires (r, d, s, a, Tab, Entrée) sont ignorées
+        update(&mut model, Message::RunSelected);
+        assert!(model.run.active.is_none());
+
+        update(&mut model, Message::Delete);
+        update(&mut model, Message::Add);
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        assert_eq!(model.tree.selected, selected_before);
+        assert!(model.editing.is_none());
+        assert!(model.help.is_some());
+    }
+
+    #[test]
+    fn help_popup_ctrl_c_force_quits() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleHelp);
+        assert!(model.help.is_some());
+
+        update(&mut model, Message::ForceQuit);
+        assert!(model.help.is_none());
+        assert!(matches!(model.exit, Some(Exit::Normal)));
+    }
+
+    #[test]
+    fn help_popup_mouse_click_outside_closes_and_inside_keeps_open() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleHelp);
+        assert!(model.help.is_some());
+
+        let area = help_popup_area(Rect::new(0, 0, model.size.0, model.size.1));
+
+        // Clic à l'intérieur du popup d'aide : reste ouvert
+        let inside = MouseInput {
+            kind: MouseKind::Press,
+            column: area.x + 5,
+            row: area.y + 5,
+        };
+        update(&mut model, Message::Mouse(inside));
+        assert!(model.help.is_some());
+
+        // Clic en dehors du popup d'aide : ferme le popup
+        let outside = MouseInput {
+            kind: MouseKind::Press,
+            column: 0,
+            row: 0,
+        };
+        update(&mut model, Message::Mouse(outside));
+        assert!(model.help.is_none());
     }
 }
