@@ -2281,10 +2281,19 @@ fn navigate_campaign(model: &mut Model, message: Message) {
 /// Sélectionne une requête dans l'arbre en dépliant ses dossiers parents
 /// et donne le focus au panneau Détail.
 fn select_request_and_focus_detail(model: &mut Model, target_path: &std::path::Path) {
+    if select_request_in_tree(model, target_path) {
+        model.focus = Focus::Detail;
+    }
+}
+
+/// Sélectionne une requête dans l'arbre en dépliant ses dossiers parents.
+/// Renvoie `false` sans rien changer si une session d'édition verrouille
+/// la sélection courante.
+fn select_request_in_tree(model: &mut Model, target_path: &std::path::Path) -> bool {
     let current_path = model.selected_node().map(|node| node.path());
     if selection_locked(model) && current_path != Some(target_path) {
         model.last_status = Some(StatusMessage::EditLocked);
-        return;
+        return false;
     }
     for ancestor in target_path.ancestors().skip(1) {
         if !ancestor.as_os_str().is_empty() {
@@ -2303,7 +2312,7 @@ fn select_request_and_focus_detail(model: &mut Model, target_path: &std::path::P
     clear_detail_view_state(model);
     reset_filter_if_selection_changed(model, previous_path.as_deref());
     scroll_tree_into_view(model);
-    model.focus = Focus::Detail;
+    true
 }
 
 /// Navigue vers la requête en échec suivante (`forward = true`) ou précédente
@@ -2353,29 +2362,8 @@ fn navigate_failed_request(model: &mut Model, forward: bool) {
             .unwrap_or(&failed_requests[failed_requests.len() - 1].1)
     };
 
-    if selection_locked(model) && model.selected_node().map(|n| n.path()) != Some(target_path) {
-        model.last_status = Some(StatusMessage::EditLocked);
-        return;
-    }
-
-    for ancestor in target_path.ancestors().skip(1) {
-        if !ancestor.as_os_str().is_empty() {
-            model.tree.expanded.insert(ancestor.to_path_buf());
-        }
-    }
-    refresh_rows(model);
-
-    let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
-    if let Some(index) = model.tree.rows.iter().position(|row| {
-        model
-            .node_at(&row.address)
-            .is_some_and(|node| node.path() == target_path)
-    }) {
-        model.tree.selected = index;
-    }
-    clear_detail_view_state(model);
-    reset_filter_if_selection_changed(model, previous_path.as_deref());
-    scroll_tree_into_view(model);
+    let target_path = target_path.clone();
+    select_request_in_tree(model, &target_path);
 }
 
 // --- Recherche -----------------------------------------------------------
