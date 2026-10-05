@@ -18,6 +18,7 @@ use super::model::{
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::text_input::TextInput;
+use super::tree_filter::{TreeFilterState, filtered_rows, find_node_by_path, matches_tree_filter};
 use super::view::detail::{
     field_at_line, plain_lines, request_text_and_fields, response_plain_lines,
 };
@@ -240,6 +241,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             };
             reset_secrets_for_collection(model);
             model.tree.expanded.clear();
+            model.tree_filter = None;
             refresh_rows(model);
             model.tree.selected = 0;
             model.tree.offset = 0;
@@ -369,7 +371,12 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                     _ => false,
                 };
                 if !cancelled_selection {
-                    model.focus = Focus::Tree;
+                    if model.focus == Focus::Tree && has_active_tree_filter(model) {
+                        clear_tree_filter(model);
+                        scroll_tree_into_view(model);
+                    } else {
+                        model.focus = Focus::Tree;
+                    }
                 }
             }
             Command::None
@@ -501,6 +508,43 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             if let Some(filter) = &mut model.filter {
                 filter.editing = false;
             }
+            Command::None
+        }
+        Message::OpenTreeFilter => {
+            if model.focus == Focus::Tree && model.loaded().is_some() {
+                open_tree_filter(model);
+            }
+            Command::None
+        }
+        Message::TreeFilterInput(c) => {
+            if let Some(filter) = &mut model.tree_filter
+                && filter.editing
+            {
+                filter.draft.push(c);
+                refresh_rows(model);
+                scroll_tree_into_view(model);
+            }
+            Command::None
+        }
+        Message::TreeFilterBackspace => {
+            if let Some(filter) = &mut model.tree_filter
+                && filter.editing
+            {
+                filter.draft.pop();
+                if filter.draft.is_empty() {
+                    model.tree.expanded = filter.saved_expanded.clone();
+                }
+                refresh_rows(model);
+                scroll_tree_into_view(model);
+            }
+            Command::None
+        }
+        Message::ConfirmTreeFilter => {
+            confirm_tree_filter(model);
+            Command::None
+        }
+        Message::CancelTreeFilter => {
+            cancel_tree_filter(model);
             Command::None
         }
         Message::NextMatch => {
@@ -1040,13 +1084,62 @@ fn extract_failure_reason(result: &crate::runner::report::RequestResult) -> Stri
 
 /// Recalcule les lignes visibles de l'arbre.
 pub(crate) fn refresh_rows(model: &mut Model) {
+    let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
+    let pattern = current_tree_filter_pattern(model).map(str::to_owned);
+
     let rows = match &model.collection {
-        CollectionState::Loaded(collection) => visible_rows(&collection.tree, &model.tree.expanded),
+        CollectionState::Loaded(collection) => {
+            if let Some(p) = &pattern {
+                let mut expanded = std::collections::HashSet::new();
+                let rows = filtered_rows(&collection.tree, p, &mut expanded);
+                model.tree.expanded = expanded;
+                rows
+            } else {
+                visible_rows(&collection.tree, &model.tree.expanded)
+            }
+        }
         _ => Vec::new(),
     };
     model.tree.rows = rows;
-    let last = model.tree.rows.len().saturating_sub(1);
-    model.tree.selected = model.tree.selected.min(last);
+
+    if model.tree.rows.is_empty() {
+        model.tree.selected = 0;
+        model.tree.offset = 0;
+        if previous_path.is_some() {
+            clear_detail_view_state(model);
+        }
+        return;
+    }
+
+    if let Some(p) = &pattern {
+        // Garde la sélection sur le même nœud si possible, sinon sur la première correspondance.
+        let found_same = previous_path.as_ref().and_then(|path| {
+            model
+                .tree
+                .rows
+                .iter()
+                .position(|r| model.node_at(&r.address).is_some_and(|n| n.path() == path))
+        });
+
+        if let Some(pos) = found_same {
+            model.tree.selected = pos;
+        } else {
+            let first_match = model.tree.rows.iter().position(|r| {
+                model
+                    .node_at(&r.address)
+                    .is_some_and(|n| matches_tree_filter(n, p))
+            });
+            model.tree.selected = first_match.unwrap_or(0);
+        }
+    } else {
+        let last = model.tree.rows.len().saturating_sub(1);
+        model.tree.selected = model.tree.selected.min(last);
+    }
+
+    let new_path = model.selected_node().map(|n| n.path().to_path_buf());
+    if new_path != previous_path {
+        clear_detail_view_state(model);
+    }
 }
 
 fn navigate_tree(model: &mut Model, message: Message) {
@@ -1971,7 +2064,9 @@ fn expand_or_enter(model: &mut Model) {
 }
 
 fn collapse_or_parent(model: &mut Model) {
-    if let Some((path, true, _)) = selected_folder(model) {
+    if current_tree_filter_pattern(model).is_none()
+        && let Some((path, true, _)) = selected_folder(model)
+    {
         // Les lignes précédant le dossier ne changent pas : son indice reste
         // celui de la sélection.
         model.tree.expanded.remove(&path);
@@ -2387,6 +2482,15 @@ fn select_request_in_tree(model: &mut Model, target_path: &std::path::Path) -> b
         model.last_status = Some(StatusMessage::EditLocked);
         return false;
     }
+    if let Some(pattern) = current_tree_filter_pattern(model) {
+        let is_target_visible = model.loaded().is_some_and(|collection| {
+            find_node_by_path(&collection.tree, target_path)
+                .is_some_and(|node| matches_tree_filter(node, pattern))
+        });
+        if !is_target_visible {
+            clear_tree_filter(model);
+        }
+    }
     for ancestor in target_path.ancestors().skip(1) {
         if !ancestor.as_os_str().is_empty() {
             model.tree.expanded.insert(ancestor.to_path_buf());
@@ -2571,6 +2675,16 @@ fn search_tree(model: &mut Model, pattern: &str, forward: bool) -> bool {
         model.last_status = Some(StatusMessage::EditLocked);
         return true;
     }
+    let should_clear_filter = if let Some(p) = current_tree_filter_pattern(model) {
+        model.loaded().is_some_and(|col| {
+            !tree_node_at(&col.tree, &address).is_some_and(|node| matches_tree_filter(node, p))
+        })
+    } else {
+        false
+    };
+    if should_clear_filter {
+        clear_tree_filter(model);
+    }
     let Some(collection) = model.loaded() else {
         return false;
     };
@@ -2683,6 +2797,113 @@ fn reset_filter_if_selection_changed(model: &mut Model, previous_path: Option<&s
     if previous_path != current_path {
         model.filter = None;
     }
+}
+
+// --- Filtre de l'arbre Collection -----------------------------------------
+
+/// Motif actuellement actif pour filtrer l'arbre (en saisie non vide ou validé).
+pub(crate) fn current_tree_filter_pattern(model: &Model) -> Option<&str> {
+    let filter = model.tree_filter.as_ref()?;
+    if filter.editing {
+        if filter.draft.is_empty() {
+            None
+        } else {
+            Some(&filter.draft)
+        }
+    } else {
+        filter.pattern.as_deref().filter(|p| !p.is_empty())
+    }
+}
+
+/// Vrai si un filtre d'arbre validé (hors saisie) est actuellement actif.
+pub(crate) fn has_active_tree_filter(model: &Model) -> bool {
+    model
+        .tree_filter
+        .as_ref()
+        .is_some_and(|f| !f.editing && f.pattern.as_ref().is_some_and(|p| !p.is_empty()))
+}
+
+/// Vrai si l'arbre est actuellement sous l'effet d'un filtre (en saisie non vide ou validé).
+pub(crate) fn is_tree_filtered(model: &Model) -> bool {
+    current_tree_filter_pattern(model).is_some()
+}
+
+/// Motif validé rappelé dans le titre du panneau Collection.
+pub(crate) fn active_tree_filter_pattern(model: &Model) -> Option<&str> {
+    let filter = model.tree_filter.as_ref()?;
+    if filter.editing {
+        None
+    } else {
+        filter.pattern.as_deref().filter(|p| !p.is_empty())
+    }
+}
+
+/// Efface le filtre d'arbre actif et restaure l'état de dépliage d'avant le filtre.
+pub(crate) fn clear_tree_filter(model: &mut Model) {
+    if let Some(filter) = model.tree_filter.take() {
+        model.tree.expanded = filter.saved_expanded;
+        refresh_rows(model);
+    }
+}
+
+/// Ouvre la saisie du filtre d'arbre ('f').
+fn open_tree_filter(model: &mut Model) {
+    if let Some(filter) = &mut model.tree_filter {
+        filter.reopen();
+        model.tree.expanded = filter.saved_expanded.clone();
+    } else {
+        model.tree_filter = Some(TreeFilterState::new(model.tree.expanded.clone()));
+    }
+    refresh_rows(model);
+    scroll_tree_into_view(model);
+}
+
+/// Valide la saisie du filtre d'arbre (Entrée).
+fn confirm_tree_filter(model: &mut Model) {
+    let Some(filter) = &mut model.tree_filter else {
+        return;
+    };
+    if !filter.editing {
+        return;
+    }
+    if filter.draft.is_empty() {
+        // Valider un motif vide efface le filtre et restaure le dépliage initial
+        let saved_expanded = filter.saved_expanded.clone();
+        model.tree_filter = None;
+        model.tree.expanded = saved_expanded;
+        refresh_rows(model);
+        scroll_tree_into_view(model);
+    } else {
+        filter.pattern = Some(filter.draft.clone());
+        filter.editing = false;
+        filter.previous_pattern = None;
+        refresh_rows(model);
+        scroll_tree_into_view(model);
+    }
+}
+
+/// Annule la saisie du filtre d'arbre (Échap).
+fn cancel_tree_filter(model: &mut Model) {
+    let Some(filter) = &mut model.tree_filter else {
+        return;
+    };
+    if !filter.editing {
+        return;
+    }
+    if let Some(prev) = filter.previous_pattern.take() {
+        // Restaure le filtre précédent
+        filter.pattern = Some(prev);
+        filter.editing = false;
+        filter.draft = filter.pattern.clone().unwrap_or_default();
+        refresh_rows(model);
+    } else {
+        // Aucun filtre précédent : annule et restaure l'état non filtré
+        let saved_expanded = filter.saved_expanded.clone();
+        model.tree_filter = None;
+        model.tree.expanded = saved_expanded;
+        refresh_rows(model);
+    }
+    scroll_tree_into_view(model);
 }
 
 // --- Souris (`mouse-support`) ---------------------------------------------
@@ -7675,6 +7896,240 @@ mod tests {
             Path::new("grp/x.bru")
         );
         assert_eq!(model.focus, Focus::Diagnostics);
+    }
+
+    #[test]
+    fn tree_filter_open_type_and_backspace_filters_live() {
+        let mut model = loaded_model((100, 30));
+        let total_initial = model.tree.rows.len();
+        assert!(total_initial > 5);
+
+        // 'f' ouvre la saisie du filtre
+        update(&mut model, Message::OpenTreeFilter);
+        assert!(model.tree_filter.as_ref().expect("filtre présent").editing);
+        assert_eq!(model.tree_filter.as_ref().unwrap().draft, "");
+
+        // La saisie en direct filtre les requêtes
+        for c in "ping".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        assert_eq!(model.tree_filter.as_ref().unwrap().draft, "ping");
+        // "ping" correspond à simple-get.bru
+        assert_eq!(model.tree.rows.len(), 1);
+        assert_eq!(selected_name(&model), "ping");
+
+        // Backspace modifie le motif et recalcule en direct
+        update(&mut model, Message::TreeFilterBackspace);
+        assert_eq!(model.tree_filter.as_ref().unwrap().draft, "pin");
+        assert_eq!(model.tree.rows.len(), 1);
+    }
+
+    #[test]
+    fn tree_filter_matches_by_name_or_path_case_and_accent_insensitive() {
+        let mut model = loaded_model((100, 30));
+
+        // Filtrage insensible à la casse par nom
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "PING".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        assert_eq!(model.tree.rows.len(), 1);
+        assert_eq!(selected_name(&model), "ping");
+
+        // Filtrage par chemin : "grp/sub" ou "deep"
+        update(&mut model, Message::CancelTreeFilter);
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "deep".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        // "grp" et "grp/sub" sont des dossiers parents dépliés automatiquement ("Groupe", "Sous-groupe"), plus "deep"
+        let names: Vec<String> = model
+            .tree
+            .rows
+            .iter()
+            .map(|r| {
+                model
+                    .node_at(&r.address)
+                    .map(crate::app::view::tree::display_name)
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(names, vec!["Groupe", "Sous-groupe", "deep"]);
+    }
+
+    #[test]
+    fn tree_filter_confirm_keeps_filter_active() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "ping".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        update(&mut model, Message::ConfirmTreeFilter);
+
+        // La saisie est terminée mais le filtre reste actif
+        let filter = model.tree_filter.as_ref().expect("filtre actif");
+        assert!(!filter.editing);
+        assert_eq!(filter.pattern.as_deref(), Some("ping"));
+        assert_eq!(model.tree.rows.len(), 1);
+    }
+
+    #[test]
+    fn tree_filter_cancel_during_input_restores_previous_state() {
+        let mut model = loaded_model((100, 30));
+        let total_initial = model.tree.rows.len();
+
+        // 1. Annulation d'une première saisie -> retour à l'état non filtré
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "ping".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        assert_eq!(model.tree.rows.len(), 1);
+        update(&mut model, Message::CancelTreeFilter);
+        assert!(model.tree_filter.is_none());
+        assert_eq!(model.tree.rows.len(), total_initial);
+
+        // 2. Filtre actif ("ping"), nouvelle saisie de "inexistant", puis annulation
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "ping".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        update(&mut model, Message::ConfirmTreeFilter);
+        assert_eq!(model.tree.rows.len(), 1);
+
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "inexistant".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        assert!(model.tree.rows.is_empty());
+        update(&mut model, Message::CancelTreeFilter);
+
+        // Restaure le filtre précédent ("ping")
+        let filter = model
+            .tree_filter
+            .as_ref()
+            .expect("filtre précédent restauré");
+        assert!(!filter.editing);
+        assert_eq!(filter.pattern.as_deref(), Some("ping"));
+        assert_eq!(model.tree.rows.len(), 1);
+    }
+
+    #[test]
+    fn tree_filter_cleared_by_empty_confirm_or_escape_without_input() {
+        let mut model = loaded_model((100, 30));
+        let total_initial = model.tree.rows.len();
+
+        // Valider un motif vide efface le filtre actif
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "ping".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        update(&mut model, Message::ConfirmTreeFilter);
+        assert!(model.tree_filter.is_some());
+
+        update(&mut model, Message::OpenTreeFilter);
+        for _ in 0..4 {
+            update(&mut model, Message::TreeFilterBackspace);
+        }
+        update(&mut model, Message::ConfirmTreeFilter);
+        assert!(model.tree_filter.is_none());
+        assert_eq!(model.tree.rows.len(), total_initial);
+
+        // Échap en focus Collection sans saisie en cours efface le filtre actif
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "ping".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        update(&mut model, Message::ConfirmTreeFilter);
+        assert!(model.tree_filter.is_some());
+
+        model.focus = Focus::Tree;
+        update(&mut model, Message::FocusTree); // Échap en focus Tree
+        assert!(model.tree_filter.is_none());
+        assert_eq!(model.tree.rows.len(), total_initial);
+    }
+
+    #[test]
+    fn tree_filter_selection_preserves_node_or_jumps_to_first_match() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+        assert_eq!(selected_name(&model), "post-json");
+
+        // Si le filtre inclut le nœud sélectionné ("post"), il reste sélectionné
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "post".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        assert_eq!(selected_name(&model), "post-json");
+
+        // Si le filtre ne correspond pas au nœud ("ping"), la sélection passe à la 1re correspondance
+        update(&mut model, Message::CancelTreeFilter);
+        select(&mut model, "post-json.bru");
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "ping".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        assert_eq!(selected_name(&model), "ping");
+    }
+
+    #[test]
+    fn tree_filter_no_match_empties_rows() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "motif-totalement-introuvable".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        assert!(model.tree.rows.is_empty());
+        assert_eq!(model.tree.selected, 0);
+    }
+
+    #[test]
+    fn tree_filter_select_request_in_tree_clears_filter_if_target_is_hidden() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "ping".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        update(&mut model, Message::ConfirmTreeFilter);
+        assert!(model.tree_filter.is_some());
+
+        // Sélection d'une requête masquée ("grp/sub/deep.bru") efface le filtre
+        let target = Path::new("grp/sub/deep.bru");
+        assert!(select_request_in_tree(&mut model, target));
+        assert!(model.tree_filter.is_none());
+        assert_eq!(selected_name(&model), "deep");
+
+        // Sélection d'une requête visible conserve le filtre
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "deep".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        update(&mut model, Message::ConfirmTreeFilter);
+        assert!(model.tree_filter.is_some());
+
+        assert!(select_request_in_tree(&mut model, target));
+        assert!(model.tree_filter.is_some());
+        assert_eq!(selected_name(&model), "deep");
+    }
+
+    #[test]
+    fn tree_filter_restores_saved_expanded_state_on_exit() {
+        let mut model = loaded_model((100, 30));
+        // Initialement, "grp" n'est pas dans expanded
+        let initial_expanded = model.tree.expanded.clone();
+        assert!(!initial_expanded.contains(Path::new("grp")));
+
+        // Le filtre déplie temporairement "grp" et "grp/sub"
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "deep".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        update(&mut model, Message::ConfirmTreeFilter);
+        assert_eq!(model.tree.rows.len(), 3);
+
+        // Désactivation du filtre restaure l'état d'expansion d'origine
+        update(&mut model, Message::FocusTree);
+        assert!(model.tree_filter.is_none());
+        assert_eq!(model.tree.expanded, initial_expanded);
     }
 }
 

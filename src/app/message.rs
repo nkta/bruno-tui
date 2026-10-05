@@ -35,6 +35,8 @@ pub enum TextCapture {
     /// Saisie de la valeur d'un champ en session d'édition.
     Input,
     Filter,
+    /// Saisie du motif de filtre de l'arbre Collection.
+    TreeFilter,
     /// Nom d'une variable secrète à ajouter, en clair.
     SecretName,
     /// Valeur d'une variable secrète, masquée.
@@ -152,6 +154,16 @@ pub enum Message {
     ConfirmFilter,
     /// `Échap` pendant une saisie de filtre.
     CancelFilter,
+    /// `f`, hors saisie.
+    OpenTreeFilter,
+    /// Caractère tapé pendant une saisie de filtre d'arbre.
+    TreeFilterInput(char),
+    /// `Retour arrière` pendant une saisie de filtre d'arbre.
+    TreeFilterBackspace,
+    /// `Entrée` pendant une saisie de filtre d'arbre.
+    ConfirmTreeFilter,
+    /// `Échap` pendant une saisie de filtre d'arbre.
+    CancelTreeFilter,
     /// `n`, hors saisie.
     NextMatch,
     /// `N`, hors saisie.
@@ -342,6 +354,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('c') => Message::Rename,
         KeyCode::Char('/') => Message::StartSearch,
         KeyCode::Char('|') => Message::OpenFilter,
+        KeyCode::Char('f') => Message::OpenTreeFilter,
         KeyCode::Char('n') => Message::NextMatch,
         KeyCode::Char('N') => Message::PreviousMatch,
         KeyCode::Char('v') => Message::ToggleVisual,
@@ -362,6 +375,7 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::Search => search_capture_message(key),
         TextCapture::Input => input_capture_message(key),
         TextCapture::Filter => filter_capture_message(key),
+        TextCapture::TreeFilter => tree_filter_capture_message(key),
         TextCapture::SecretName | TextCapture::SecretValue => secret_capture_message(key),
         TextCapture::MethodPicker => method_picker_capture_message(key),
     }
@@ -433,6 +447,16 @@ fn filter_capture_message(key: KeyEvent) -> Option<Message> {
         KeyCode::Backspace => Some(Message::FilterBackspace),
         KeyCode::Enter => Some(Message::ConfirmFilter),
         KeyCode::Esc => Some(Message::CancelFilter),
+        _ => None,
+    }
+}
+
+fn tree_filter_capture_message(key: KeyEvent) -> Option<Message> {
+    match key.code {
+        KeyCode::Char(c) => Some(Message::TreeFilterInput(c)),
+        KeyCode::Backspace => Some(Message::TreeFilterBackspace),
+        KeyCode::Enter => Some(Message::ConfirmTreeFilter),
+        KeyCode::Esc => Some(Message::CancelTreeFilter),
         _ => None,
     }
 }
@@ -509,6 +533,7 @@ mod tests {
             ),
             (KeyCode::Char('/'), none, "StartSearch"),
             (KeyCode::Char('|'), none, "OpenFilter"),
+            (KeyCode::Char('f'), none, "OpenTreeFilter"),
             (KeyCode::Char('n'), none, "NextMatch"),
             (KeyCode::Char('N'), KeyModifiers::SHIFT, "PreviousMatch"),
             (KeyCode::Char('v'), none, "ToggleVisual"),
@@ -812,6 +837,7 @@ mod tests {
             Some(TextCapture::Search),
             Some(TextCapture::Input),
             Some(TextCapture::Filter),
+            Some(TextCapture::TreeFilter),
             Some(TextCapture::SecretName),
             Some(TextCapture::SecretValue),
             Some(TextCapture::MethodPicker),
@@ -867,6 +893,46 @@ mod tests {
     }
 
     #[test]
+    fn tree_filter_capture_redirects_navigation_keys_to_input() {
+        let none = KeyModifiers::NONE;
+        for (code, expected) in [
+            (KeyCode::Char('j'), "TreeFilterInput"),
+            (KeyCode::Char('q'), "TreeFilterInput"),
+            (KeyCode::Char('?'), "TreeFilterInput"),
+            (KeyCode::Char('f'), "TreeFilterInput"),
+            (KeyCode::Backspace, "TreeFilterBackspace"),
+            (KeyCode::Enter, "ConfirmTreeFilter"),
+            (KeyCode::Esc, "CancelTreeFilter"),
+        ] {
+            assert_eq!(
+                name_capturing(key(code, none), TextCapture::TreeFilter).as_deref(),
+                Some(expected),
+                "{code:?}"
+            );
+        }
+        // Un caractère composé (Alt) reste un caractère pendant la saisie.
+        assert_eq!(
+            name_capturing(
+                key(KeyCode::Char('e'), KeyModifiers::ALT),
+                TextCapture::TreeFilter
+            )
+            .as_deref(),
+            Some("TreeFilterInput")
+        );
+        // Ctrl+C reste prioritaire même en saisie.
+        assert_eq!(
+            name_capturing(
+                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                TextCapture::TreeFilter
+            )
+            .as_deref(),
+            Some("ForceQuit")
+        );
+        assert!(name_capturing(key(KeyCode::Tab, none), TextCapture::TreeFilter).is_none());
+        assert!(name_capturing(key(KeyCode::PageDown, none), TextCapture::TreeFilter).is_none());
+    }
+
+    #[test]
     fn question_mark_is_typed_text_during_text_capture() {
         let none = KeyModifiers::NONE;
         let event = || key(KeyCode::Char('?'), none);
@@ -881,6 +947,10 @@ mod tests {
         assert_eq!(
             name_capturing(event(), TextCapture::Filter).as_deref(),
             Some("FilterInput")
+        );
+        assert_eq!(
+            name_capturing(event(), TextCapture::TreeFilter).as_deref(),
+            Some("TreeFilterInput")
         );
         assert_eq!(
             name_capturing(event(), TextCapture::SecretName).as_deref(),

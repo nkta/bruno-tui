@@ -16,6 +16,7 @@ pub mod model;
 pub mod mouse;
 pub mod search;
 pub mod text_input;
+pub mod tree_filter;
 pub mod update;
 pub mod view;
 

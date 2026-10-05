@@ -24,6 +24,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 use super::model::{
     CollectionState, EditState, Focus, Model, PendingConfirm, RunFailure, StatusMessage,
 };
+use super::update::{active_tree_filter_pattern, is_tree_filtered};
 use crate::collection::TreeNode;
 
 /// Largeur minimale du terminal : exactement la somme des planchers de
@@ -479,6 +480,13 @@ fn filter_input_line(model: &Model) -> Option<String> {
     filter.editing.then(|| format!("|{}", filter.draft))
 }
 
+/// Ligne de saisie du filtre de l'arbre Collection, tant qu'elle est ouverte :
+/// remplace la barre d'état, à la place des rappels de touches habituels.
+fn tree_filter_input_line(model: &Model) -> Option<String> {
+    let filter = model.tree_filter.as_ref()?;
+    filter.editing.then(|| format!("f{}", filter.draft))
+}
+
 /// Ligne de saisie de recherche, tant qu'elle est ouverte : remplace la
 /// barre d'état, à la place des rappels de touches habituels.
 fn search_input_line(model: &Model) -> Option<String> {
@@ -605,6 +613,9 @@ fn status_line(model: &Model) -> String {
     if model.help.is_some() {
         return "↑↓ défiler  Début/Fin  ? / Échap / q fermer".to_owned();
     }
+    if let Some(line) = tree_filter_input_line(model) {
+        return line;
+    }
     if let Some(line) = filter_input_line(model) {
         return line;
     }
@@ -630,7 +641,7 @@ fn status_line(model: &Model) -> String {
     }
     match (&model.collection, model.focus) {
         (CollectionState::Loaded(_), Focus::Tree) => {
-            "↑↓ naviguer  → déplier  ← replier  r lancer  / chercher  Tab détail  S secrets  ? aide  q quitter  M souris"
+            "↑↓ naviguer  →/← déplier  r lancer  f filtrer  / chercher  Tab détail  S secrets  ? aide  q quitter  M souris"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
@@ -676,10 +687,26 @@ pub(crate) fn panel(title: &'static str, focused: bool) -> Block<'static> {
 }
 
 fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
-    let block = panel(" Collection ", model.focus == Focus::Tree);
+    let title = if let Some(pattern) = active_tree_filter_pattern(model) {
+        format!(" Collection — filtre : {pattern} ")
+    } else {
+        " Collection ".to_string()
+    };
+    let block = Block::bordered()
+        .title(title)
+        .border_style(if model.focus == Focus::Tree {
+            theme::FOCUS
+        } else {
+            theme::BORDER
+        });
     let state = &model.tree;
     if state.rows.is_empty() {
-        frame.render_widget(Paragraph::new("collection vide").block(block), area);
+        let msg = if is_tree_filtered(model) {
+            "Aucune requête ne correspond"
+        } else {
+            "collection vide"
+        };
+        frame.render_widget(Paragraph::new(msg).block(block), area);
         return;
     }
     let height = usize::from(inner(area).height);
@@ -2301,5 +2328,39 @@ mod tests {
         assert!(screen.contains("Touche"), "{screen}");
         assert!(screen.contains("Effet"), "{screen}");
         assert!(screen.contains("Global"), "{screen}");
+    }
+
+    #[test]
+    fn tree_filter_status_line_and_panel_rendering() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::Tree;
+
+        // Rappel "f filtrer" présent en focus Tree
+        let normal_status = status_line(&model);
+        assert!(normal_status.contains("f filtrer"), "{normal_status}");
+
+        // Saisie en cours : rendu "f{draft}" dans la barre d'état (sur le modèle de search_input_line)
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "ping".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        let input_status = status_line(&model);
+        assert_eq!(input_status, "fping");
+
+        // Validation du filtre : rappel dans le titre du panneau
+        update(&mut model, Message::ConfirmTreeFilter);
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Collection — filtre : ping"), "{screen}");
+
+        // Sans correspondance : message explicatif
+        update(&mut model, Message::OpenTreeFilter);
+        for c in "xyz-introuvable".chars() {
+            update(&mut model, Message::TreeFilterInput(c));
+        }
+        let empty_screen = render(&model, 100, 30).join("\n");
+        assert!(
+            empty_screen.contains("Aucune requête ne correspond"),
+            "{empty_screen}"
+        );
     }
 }

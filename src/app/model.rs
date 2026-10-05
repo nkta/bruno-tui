@@ -21,6 +21,7 @@ use super::filter::FilterState;
 use super::message::TextCapture;
 use super::search::SearchState;
 use super::text_input::TextInput;
+use super::tree_filter::TreeFilterState;
 
 /// État du chargement de la collection.
 #[derive(Debug)]
@@ -763,6 +764,8 @@ pub struct Model {
     pub run: RunState,
     /// État du filtre de réponse, `None` tant que `|` n'a pas été ouvert.
     pub filter: Option<FilterState>,
+    /// État du filtre de l'arbre Collection, `None` tant que `f` n'a pas été ouvert.
+    pub tree_filter: Option<TreeFilterState>,
     /// État de la recherche, `None` tant que `/` n'a jamais été pressé.
     pub search: Option<SearchState>,
     /// Sélection visuelle active dans le détail.
@@ -917,6 +920,7 @@ impl Model {
             exit: None,
             run: RunState::default(),
             filter: None,
+            tree_filter: None,
             search: None,
             detail_selection: None,
             response_selection: None,
@@ -986,6 +990,9 @@ impl Model {
         }
         if self.filter.as_ref().is_some_and(|f| f.editing) {
             return Some(TextCapture::Filter);
+        }
+        if self.tree_filter.as_ref().is_some_and(|f| f.editing) {
+            return Some(TextCapture::TreeFilter);
         }
         None
     }

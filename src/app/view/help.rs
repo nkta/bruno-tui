@@ -87,6 +87,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "annuler l'exécution en cours",
             },
             HelpEntry {
+                key: "f",
+                effect: "filtrer l'arbre",
+            },
+            HelpEntry {
                 key: "/",
                 effect: "chercher dans la collection",
             },

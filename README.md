@@ -39,6 +39,7 @@ d'édition non enregistrée demande confirmation.
 | `Début`/`g`, `Fin`/`G` | début, fin de la liste |
 | `PageUp`/`PageDown` | page précédente/suivante |
 | `r` | lancer la requête (ou récursivement un dossier) ; `Ctrl+X` annule |
+| `f` | filtrer l'arbre de la collection (en direct ; Entrée valide, Échap annule ou efface) |
 | `M` | activer/désactiver la capture souris |
 | `D` | panneau Diagnostics (erreurs de chargement) |
 | `H` | panneau Historique des exécutions |
