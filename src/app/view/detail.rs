@@ -877,19 +877,152 @@ fn push_checks<I: IntoIterator<Item = Line<'static>>>(
     }
 }
 
+/// Découpe une chaîne JSON entre guillemets et renvoie sa longueur en octets.
+fn scan_json_string(s: &str) -> usize {
+    let mut chars = s.char_indices();
+    chars.next(); // saute le premier '"'
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '\\' {
+            chars.next(); // saute le caractère échappé
+        } else if ch == '"' {
+            return idx + ch.len_utf8();
+        }
+    }
+    s.len()
+}
+
+/// Découpe un nombre JSON et renvoie sa longueur en octets.
+fn scan_json_number(s: &str) -> usize {
+    let mut len = 0;
+    for (idx, ch) in s.char_indices() {
+        if ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | 'e' | 'E') {
+            len = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    len
+}
+
+/// Vérifie si `s` commence par le mot-clé `kw` délimité (fin de chaîne ou caractère non-identifiant).
+fn is_keyword(s: &str, kw: &str) -> bool {
+    if let Some(rest) = s.strip_prefix(kw) {
+        match rest.chars().next() {
+            Some(ch) => !ch.is_alphanumeric() && ch != '_',
+            None => true,
+        }
+    } else {
+        false
+    }
+}
+
+/// Colore syntaxiquement une ligne de texte JSON (clés, chaînes, nombres,
+/// booléens, null, ponctuation) tout en lui appliquant le préfixe de deux
+/// espaces standard du panneau de réponse.
+pub fn highlight_json_line(line: &str) -> Line<'static> {
+    let mut spans = vec![Span::raw("  ")];
+    let mut cursor = 0;
+
+    while cursor < line.len() {
+        let rest = &line[cursor..];
+
+        // 1. Espaces blancs (indentation ou séparateurs)
+        let ws_len = rest
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t' || *c == '\r')
+            .map(|c| c.len_utf8())
+            .sum::<usize>();
+        if ws_len > 0 {
+            spans.push(Span::raw(rest[..ws_len].to_owned()));
+            cursor += ws_len;
+            continue;
+        }
+
+        // 2. Chaîne (clé d'objet ou valeur chaîne)
+        if rest.starts_with('"') {
+            let str_len = scan_json_string(rest);
+            let str_val = &rest[..str_len];
+            let after = &rest[str_len..];
+            let is_key = after.trim_start().starts_with(':');
+            let style = if is_key {
+                theme::JSON_KEY
+            } else {
+                theme::JSON_STRING
+            };
+            spans.push(Span::styled(str_val.to_owned(), style));
+            cursor += str_len;
+            continue;
+        }
+
+        // 3. Booléens
+        if is_keyword(rest, "true") {
+            spans.push(Span::styled("true", theme::JSON_BOOLEAN));
+            cursor += 4;
+            continue;
+        }
+        if is_keyword(rest, "false") {
+            spans.push(Span::styled("false", theme::JSON_BOOLEAN));
+            cursor += 5;
+            continue;
+        }
+
+        // 4. Null
+        if is_keyword(rest, "null") {
+            spans.push(Span::styled("null", theme::JSON_NULL));
+            cursor += 4;
+            continue;
+        }
+
+        let Some(first_ch) = rest.chars().next() else {
+            break;
+        };
+
+        // 5. Nombres
+        let is_number_start = first_ch.is_ascii_digit()
+            || (first_ch == '-'
+                && rest[first_ch.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit()));
+        if is_number_start {
+            let num_len = scan_json_number(rest);
+            if num_len > 0 {
+                spans.push(Span::styled(rest[..num_len].to_owned(), theme::JSON_NUMBER));
+                cursor += num_len;
+                continue;
+            }
+        }
+
+        // 6. Ponctuation
+        if matches!(first_ch, '{' | '}' | '[' | ']' | ':' | ',') {
+            spans.push(Span::styled(first_ch.to_string(), theme::JSON_PUNCTUATION));
+            cursor += first_ch.len_utf8();
+            continue;
+        }
+
+        // 7. Autre caractère
+        spans.push(Span::raw(first_ch.to_string()));
+        cursor += first_ch.len_utf8();
+    }
+
+    Line::from(spans)
+}
+
 /// Corps de réponse, sans filtre appliqué : une chaîne s'affiche telle
-/// quelle (pas de guillemets ajoutés), un objet ou un tableau est mis en
-/// forme indentée par le même moteur jq qui évalue un filtre explicite
-/// (`response-tabs`), plutôt que sérialisé sur une seule ligne compacte.
+/// quelle sans coloration, un objet ou un tableau est mis en forme indentée
+/// et coloré syntaxiquement (clés, chaînes, nombres, booléens, null, ponctuation).
 fn body_lines(data: &Value) -> Vec<Line<'static>> {
-    let text = match data {
-        Value::Null => return vec![Line::raw("  aucun")],
-        Value::String(text) => text.clone(),
-        _ => crate::app::filter::pretty_print(data),
-    };
-    text.split('\n')
-        .map(|l| Line::raw(format!("  {l}")))
-        .collect()
+    match data {
+        Value::Null => vec![Line::raw("  aucun")],
+        Value::String(text) => text
+            .split('\n')
+            .map(|l| Line::raw(format!("  {l}")))
+            .collect(),
+        _ => {
+            let text = crate::app::filter::pretty_print(data);
+            text.split('\n').map(highlight_json_line).collect()
+        }
+    }
 }
 
 /// Ligne affichant le filtre en cours d'édition ou appliqué.
@@ -929,8 +1062,13 @@ fn body_tab_lines(outcome: &RequestOutcome, filter: Option<&FilterState>) -> Vec
         match &f.applied {
             Some(FilterResult::Output(outputs)) => {
                 for out in outputs {
+                    let is_json = serde_json::from_str::<Value>(out).is_ok();
                     for line in out.lines() {
-                        lines.push(Line::raw(format!("  {line}")));
+                        if is_json {
+                            lines.push(highlight_json_line(line));
+                        } else {
+                            lines.push(Line::raw(format!("  {line}")));
+                        }
                     }
                 }
             }
@@ -1971,5 +2109,311 @@ mod tests {
                 .collect();
             assert_eq!(rendered, "  aucun");
         }
+    }
+
+    /// La coloration syntaxique JSON applique les styles distincts de `theme` à
+    /// chaque catégorie syntaxique (clés, chaînes, nombres, booléens, null, ponctuation).
+    #[test]
+    fn json_highlighting_applies_distinct_styles_to_all_syntax_categories() {
+        let line =
+            r#"{"nom": "Alice", "age": 30, "actif": true, "autre": null, "notes": [-1.5, false]}"#;
+        let highlighted = highlight_json_line(line);
+
+        // Préfixe de 2 espaces au début
+        assert_eq!(highlighted.spans[0].content.as_ref(), "  ");
+
+        // Recherche des spans par catégorie
+        let find_span = |text: &str| {
+            highlighted
+                .spans
+                .iter()
+                .find(|s| s.content.as_ref() == text)
+                .unwrap_or_else(|| panic!("span « {text} » introuvable"))
+        };
+
+        // Clés d'objet
+        assert_eq!(find_span("\"nom\"").style, theme::JSON_KEY);
+        assert_eq!(find_span("\"age\"").style, theme::JSON_KEY);
+        assert_eq!(find_span("\"actif\"").style, theme::JSON_KEY);
+        assert_eq!(find_span("\"autre\"").style, theme::JSON_KEY);
+        assert_eq!(find_span("\"notes\"").style, theme::JSON_KEY);
+
+        // Chaîne valeur
+        assert_eq!(find_span("\"Alice\"").style, theme::JSON_STRING);
+
+        // Nombres (positif entier, négatif flottant)
+        assert_eq!(find_span("30").style, theme::JSON_NUMBER);
+        assert_eq!(find_span("-1.5").style, theme::JSON_NUMBER);
+
+        // Booléens
+        assert_eq!(find_span("true").style, theme::JSON_BOOLEAN);
+        assert_eq!(find_span("false").style, theme::JSON_BOOLEAN);
+
+        // Null
+        assert_eq!(find_span("null").style, theme::JSON_NULL);
+
+        // Ponctuation
+        assert_eq!(find_span("{").style, theme::JSON_PUNCTUATION);
+        assert_eq!(find_span("}").style, theme::JSON_PUNCTUATION);
+        assert_eq!(find_span("[").style, theme::JSON_PUNCTUATION);
+        assert_eq!(find_span("]").style, theme::JSON_PUNCTUATION);
+        assert_eq!(find_span(":").style, theme::JSON_PUNCTUATION);
+        assert_eq!(find_span(",").style, theme::JSON_PUNCTUATION);
+    }
+
+    /// Le texte des lignes colorées reste strictement identique au texte brut
+    /// (même indentation, même préfixe "  ").
+    #[test]
+    fn json_highlighting_preserves_plain_text_identically() {
+        let lines = [
+            r#"{"#,
+            r#"  "utilisateur": {"#,
+            r#"    "id": 101,"#,
+            r#"    "nom": "Bob \"Le Bricoleur\"",#,
+            r#"    "valide": false,"#,
+            r#"    "meta": null"#,
+            r#"  },"#,
+            r#"  "scores": [99, 100]"#,
+            r#"}"#,
+        ];
+
+        for l in lines {
+            let highlighted = highlight_json_line(l);
+            let reconstructed: String = highlighted
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            let expected = format!("  {l}");
+            assert_eq!(
+                reconstructed, expected,
+                "le texte reconstitué doit être strictement identique"
+            );
+        }
+    }
+
+    /// Une réponse dont le corps est une chaîne (Value::String, ex. HTML ou texte)
+    /// ou Null reste affichée sans coloration.
+    #[test]
+    fn string_and_null_body_responses_remain_uncolored() {
+        // Value::String : texte HTML sans coloration
+        let html_content = "<html>\n  <body>\n    <h1>Titre</h1>\n  </body>\n</html>";
+        let string_data = Value::String(html_content.to_owned());
+        let lines = body_lines(&string_data);
+        assert_eq!(lines.len(), 5);
+        for (i, line) in lines.iter().enumerate() {
+            // Style par défaut, aucun span stylé avec les couleurs JSON
+            for span in &line.spans {
+                assert_eq!(
+                    span.style,
+                    Style::default(),
+                    "ligne {i} ne doit pas avoir de style JSON"
+                );
+            }
+        }
+        let text: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            text,
+            "  <html>\n    <body>\n      <h1>Titre</h1>\n    </body>\n  </html>"
+        );
+
+        // Value::Null : affiche «   aucun »
+        let null_lines = body_lines(&Value::Null);
+        assert_eq!(null_lines.len(), 1);
+        let null_text: String = null_lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(null_text, "  aucun");
+    }
+
+    /// Une réponse JSON structurée porte la coloration syntaxique dans `response_text`,
+    /// et `response_plain_lines` produit exactement le même texte brut.
+    #[test]
+    fn json_body_response_is_colored_in_response_text() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+
+        let text = response_text(&model);
+        // Vérifie qu'au moins une ligne contient des spans avec les styles JSON
+        let has_json_key = text
+            .lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.style == theme::JSON_KEY));
+        let has_json_punct = text
+            .lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.style == theme::JSON_PUNCTUATION));
+        let has_json_num = text
+            .lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.style == theme::JSON_NUMBER));
+        let has_json_null = text
+            .lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.style == theme::JSON_NULL));
+
+        assert!(
+            has_json_key,
+            "les clés JSON doivent être stylées avec JSON_KEY"
+        );
+        assert!(
+            has_json_punct,
+            "la ponctuation JSON doit être stylée avec JSON_PUNCTUATION"
+        );
+        assert!(
+            has_json_num,
+            "les nombres JSON doivent être stylés avec JSON_NUMBER"
+        );
+        assert!(has_json_null, "null doit être stylé avec JSON_NULL");
+
+        // Vérifie que response_plain_lines donne le texte brut indenté
+        let plain = response_plain_lines(&model).join("\n");
+        assert!(plain.contains("  \"a\": ["), "{plain}");
+        assert!(plain.contains("    1,"), "{plain}");
+        assert!(plain.contains("    2"), "{plain}");
+        assert!(plain.contains("  \"b\": null"), "{plain}");
+    }
+
+    /// Le résultat d'un filtre jq est coloré syntaxiquement quand c'est du JSON,
+    /// et reste brut sans coloration quand ce n'est pas du JSON.
+    #[test]
+    fn jq_filter_json_result_is_colored_while_non_json_is_raw() {
+        use crate::app::message::Message;
+        use crate::app::test_support::runner_probe_model;
+        use crate::app::update::update;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+
+        // 1. Filtre jq produisant un tableau JSON `.a`
+        update(&mut model, Message::OpenFilter);
+        for c in ".a".chars() {
+            update(&mut model, Message::FilterInput(c));
+        }
+        update(&mut model, Message::ConfirmFilter);
+
+        let resp = response_text(&model);
+        // Les lignes du résultat filtré doivent contenir des styles JSON
+        let has_num = resp
+            .lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.style == theme::JSON_NUMBER));
+        let has_bracket = resp.lines.iter().any(|l| {
+            l.spans.iter().any(|s| {
+                s.style == theme::JSON_PUNCTUATION && (s.content == "[" || s.content == "]")
+            })
+        });
+        assert!(has_num, "le filtre .a doit colorer les nombres 1 et 2");
+        assert!(has_bracket, "le filtre .a doit colorer les crochets");
+
+        // 2. Filtre jq produisant une sortie non-JSON brute
+        let target = model.selected_node().unwrap().path().to_owned();
+        model.filter = Some(FilterState {
+            target,
+            editing: false,
+            draft: "custom".into(),
+            applied: Some(FilterResult::Output(vec!["ceci n'est pas du json".into()])),
+        });
+
+        let resp_non_json = response_text(&model);
+        let non_json_line = resp_non_json
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.contains("ceci n'est pas du json"))
+            })
+            .expect("ligne non-JSON attendue");
+        // Ne doit avoir aucun style JSON
+        for span in &non_json_line.spans {
+            assert_ne!(span.style, theme::JSON_KEY);
+            assert_ne!(span.style, theme::JSON_STRING);
+            assert_ne!(span.style, theme::JSON_NUMBER);
+        }
+    }
+
+    /// La recherche, la surbrillance des correspondances, la sélection visuelle
+    /// et la copie continuent de fonctionner parfaitement avec la coloration JSON.
+    #[test]
+    fn json_highlighting_works_with_search_selection_and_yank() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "json.bru");
+
+        // 1. Recherche : trouver la ligne contenant "null"
+        let plain_lines = response_plain_lines(&model);
+        let null_line_idx = plain_lines
+            .iter()
+            .position(|l| l.contains("null"))
+            .expect("ligne null");
+        let null_col = plain_lines[null_line_idx].find("null").expect("colonne");
+
+        // Simuler une correspondance de recherche
+        model.response_match = Some((
+            u16::try_from(null_line_idx).unwrap(),
+            null_col..null_col + 4,
+        ));
+
+        let rendered = render_response_text(&model);
+        let match_line = &rendered.lines[null_line_idx];
+        // Le span correspondant à "null" doit avoir le fond MATCH_HIGHLIGHT
+        // tout en conservant le style fg de JSON_NULL
+        let match_span = match_line
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "null")
+            .expect("span null");
+        assert_eq!(
+            match_span.style.bg, MATCH_HIGHLIGHT.bg,
+            "le fond doit être celui de la surbrillance de recherche"
+        );
+        assert_eq!(
+            match_span.style.fg,
+            theme::JSON_NULL.fg,
+            "la couleur fg syntaxique doit être conservée"
+        );
+
+        // 2. Sélection visuelle : appliquer SELECTION_TINT sur une ligne
+        model.response_match = None;
+        let line_u16 = u16::try_from(null_line_idx).unwrap();
+        model.response_selection = Some(crate::app::model::DetailSelection {
+            anchor: line_u16,
+            head: Some(line_u16),
+        });
+        let selected_rendered = render_response_text(&model);
+        let selected_line = &selected_rendered.lines[null_line_idx];
+        let key_span = selected_line
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "\"b\"")
+            .expect("span clé \"b\"");
+        assert_eq!(
+            key_span.style.bg, SELECTION_TINT.bg,
+            "le fond doit être celui de la sélection visuelle"
+        );
+        assert_eq!(
+            key_span.style.fg,
+            theme::JSON_KEY.fg,
+            "la couleur fg syntaxique doit être conservée pendant la sélection"
+        );
+
+        // 3. Copie (yank) : response_plain_lines produit le texte brut sans couleur
+        let copied = plain_lines[null_line_idx].clone();
+        assert_eq!(copied, "    \"b\": null");
     }
 }

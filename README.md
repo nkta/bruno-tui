@@ -116,7 +116,10 @@ restent gérées par le panneau Secrets (`S`).
 ## Panneau Réponse
 
 Affiche le résultat de la dernière exécution de la requête sélectionnée,
-en trois onglets (Corps, En-têtes, Tests).
+en trois onglets (Corps, En-têtes, Tests). Le corps JSON (brut ou issu d'un
+filtre `jq`) bénéficie d'une coloration syntaxique (clés, chaînes, nombres,
+booléens, null, ponctuation), tandis qu'un corps textuel ou HTML reste
+affiché sans coloration.
 
 | Touche | Effet |
 |---|---|

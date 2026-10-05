@@ -57,6 +57,19 @@ pub const EMPTY_MESSAGE: Style = Style::new().add_modifier(Modifier::DIM.union(M
 /// sans dépendre d'une bordure de widget (`improve-edit-field-legibility`).
 pub const EDITABLE_BODY: Style = Style::new().bg(Color::Rgb(28, 34, 56));
 
+/// Clé d'un objet JSON dans le corps de réponse.
+pub const JSON_KEY: Style = Style::new().fg(Color::Rgb(130, 170, 255));
+/// Valeur chaîne de caractères JSON dans le corps de réponse.
+pub const JSON_STRING: Style = Style::new().fg(Color::Rgb(160, 225, 160));
+/// Valeur numérique JSON dans le corps de réponse.
+pub const JSON_NUMBER: Style = Style::new().fg(Color::Rgb(255, 175, 95));
+/// Valeur booléenne JSON (`true`, `false`) dans le corps de réponse.
+pub const JSON_BOOLEAN: Style = Style::new().fg(Color::Rgb(215, 140, 235));
+/// Valeur `null` JSON dans le corps de réponse.
+pub const JSON_NULL: Style = Style::new().fg(Color::Rgb(230, 120, 140));
+/// Ponctuation syntaxique JSON (`{`, `}`, `[`, `]`, `:`, `,`) dans le corps de réponse.
+pub const JSON_PUNCTUATION: Style = Style::new().fg(Color::Rgb(180, 190, 205));
+
 /// Style du badge de statut du panneau Statut : texte gras de la couleur
 /// du fond sur fond de la couleur de catégorie ; style neutre sans fond
 /// pour une classe sans catégorie (`visual-theme`).
@@ -114,6 +127,12 @@ mod tests {
             BORDER,
             REDIRECT,
             CLIENT_ERROR,
+            JSON_KEY,
+            JSON_STRING,
+            JSON_NUMBER,
+            JSON_BOOLEAN,
+            JSON_NULL,
+            JSON_PUNCTUATION,
         ] {
             assert!(style.fg.is_some());
         }
@@ -150,5 +169,27 @@ mod tests {
         let neutral = status_badge(StatusClass::Neutral);
         assert_eq!(neutral, LABEL);
         assert!(neutral.bg.is_none());
+    }
+
+    /// Les catégories syntaxiques JSON ont toutes des couleurs de premier plan
+    /// distinctes entre elles.
+    #[test]
+    fn json_syntax_categories_have_distinct_colors() {
+        let styles = [
+            ("key", JSON_KEY),
+            ("string", JSON_STRING),
+            ("number", JSON_NUMBER),
+            ("boolean", JSON_BOOLEAN),
+            ("null", JSON_NULL),
+            ("punctuation", JSON_PUNCTUATION),
+        ];
+        for (i, (name1, s1)) in styles.iter().enumerate() {
+            for (name2, s2) in styles.iter().skip(i + 1) {
+                assert_ne!(
+                    s1.fg, s2.fg,
+                    "styles JSON non distincts : {name1} vs {name2}"
+                );
+            }
+        }
     }
 }
