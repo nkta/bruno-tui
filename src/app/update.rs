@@ -127,7 +127,10 @@ pub fn update(model: &mut Model, message: Message) -> Command {
         };
     }
 
-    if model.help.is_some() {
+    // Seules les entrées de l'utilisateur sont interceptées : les résultats
+    // asynchrones (exécution, chargement, copie, sauvegarde) doivent être
+    // traités même popup ouvert, sinon une exécution resterait active.
+    if model.help.is_some() && !is_background_result(&message) {
         return match message {
             Message::ForceQuit => {
                 model.help = None;
@@ -847,6 +850,22 @@ fn cancel_run(model: &mut Model) {
 }
 
 /// Applique l'issue d'une exécution, en ignorant un identifiant obsolète.
+/// Message issu d'une tâche de fond plutôt que d'une action de
+/// l'utilisateur : il est toujours traité, quel que soit l'overlay ouvert.
+fn is_background_result(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::CollectionLoaded(_)
+            | Message::RunStarted { .. }
+            | Message::RunFinished(_)
+            | Message::ClipboardResult { .. }
+            | Message::EditSaved { .. }
+            | Message::EnvironmentSaved { .. }
+            | Message::MouseCaptureChanged { .. }
+            | Message::SecretsResolved { .. }
+    )
+}
+
 fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
     let matches_active = model
         .run
@@ -7995,6 +8014,28 @@ mod mouse_tests {
         click(&mut model, point);
         assert!(model.environment_editing.is_some());
         assert_eq!(model.focus, Focus::EnvironmentPicker);
+    }
+
+    #[test]
+    fn help_popup_does_not_swallow_run_finished() {
+        let mut model = loaded_model((100, 30));
+        model.run.active = Some(crate::app::model::ActiveRun {
+            id: crate::runner::RunId(3),
+            target: "simple-get.bru".into(),
+            recursive: false,
+            handle: None,
+        });
+        update(&mut model, Message::ToggleHelp);
+        update(
+            &mut model,
+            Message::RunFinished(crate::runner::RunEvent {
+                id: crate::runner::RunId(3),
+                outcome: crate::runner::RunOutcome::Failed(crate::runner::RunError::BruNotFound),
+            }),
+        );
+        assert!(model.help.is_some());
+        assert!(model.run.active.is_none());
+        assert!(model.run.last_failure.is_some());
     }
 
     #[test]
