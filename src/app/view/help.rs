@@ -313,6 +313,23 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
         ],
     },
+    HelpSection {
+        title: "Campagne (TNR)",
+        entries: &[
+            HelpEntry {
+                key: "C",
+                effect: "ouvrir / fermer le bilan de la dernière campagne",
+            },
+            HelpEntry {
+                key: "Entrée / →",
+                effect: "sélectionner la requête en échec et ouvrir son détail",
+            },
+            HelpEntry {
+                key: "] / [",
+                effect: "requête en échec suivante / précédente",
+            },
+        ],
+    },
 ];
 
 /// Largeur maximale requise par la colonne touche, bornée pour garder
@@ -425,7 +442,7 @@ mod tests {
 
     #[test]
     fn sections_count_and_expected_titles() {
-        assert_eq!(HELP_SECTIONS.len(), 7);
+        assert_eq!(HELP_SECTIONS.len(), 8);
         let titles: Vec<&str> = HELP_SECTIONS.iter().map(|s| s.title).collect();
         assert_eq!(
             titles,
@@ -437,6 +454,7 @@ mod tests {
                 "Réponse",
                 "Environnement (panneau et popup)",
                 "Diagnostics / Historique / Secrets",
+                "Campagne (TNR)",
             ]
         );
     }

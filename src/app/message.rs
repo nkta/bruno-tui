@@ -210,6 +210,12 @@ pub enum Message {
     ToggleEnvironmentPicker,
     /// `S`, hors saisie : ouvre ou ferme le panneau des variables secrètes.
     ToggleSecrets,
+    /// `C`, hors saisie : ouvre ou ferme le panneau de campagne.
+    ToggleCampaign,
+    /// `]`, hors saisie : sélectionne la requête en échec suivante.
+    NextFailedRequest,
+    /// `[`, hors saisie : sélectionne la requête en échec précédente.
+    PreviousFailedRequest,
     /// `a`, hors saisie : ajoute une variable dans le panneau des variables
     /// secrètes, ou une entrée en sélection de champ.
     Add,
@@ -327,6 +333,9 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('H') => Message::ToggleHistory,
         KeyCode::Char('E') => Message::ToggleEnvironmentPicker,
         KeyCode::Char('S') => Message::ToggleSecrets,
+        KeyCode::Char('C') => Message::ToggleCampaign,
+        KeyCode::Char(']') => Message::NextFailedRequest,
+        KeyCode::Char('[') => Message::PreviousFailedRequest,
         KeyCode::Char('s') => Message::SaveEdit,
         KeyCode::Char('a') => Message::Add,
         KeyCode::Char('d') => Message::Delete,
@@ -510,6 +519,10 @@ mod tests {
             (KeyCode::Char('s'), none, "SaveEdit"),
             (KeyCode::Char('S'), none, "ToggleSecrets"),
             (KeyCode::Char('S'), KeyModifiers::SHIFT, "ToggleSecrets"),
+            (KeyCode::Char('C'), none, "ToggleCampaign"),
+            (KeyCode::Char('C'), KeyModifiers::SHIFT, "ToggleCampaign"),
+            (KeyCode::Char(']'), none, "NextFailedRequest"),
+            (KeyCode::Char('['), none, "PreviousFailedRequest"),
             (KeyCode::Char('a'), none, "Add"),
             (KeyCode::Char('d'), none, "Delete"),
             (KeyCode::Char('c'), none, "Rename"),

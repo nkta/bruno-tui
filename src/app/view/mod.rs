@@ -197,6 +197,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
             Focus::Secrets => {
                 panels::render_secrets(model, frame, areas.body);
             }
+            Focus::Campaign => {
+                panels::render_campaign(model, frame, areas.body);
+            }
             Focus::Tree | Focus::Detail | Focus::Response | Focus::EnvironmentPicker => {
                 render_tree(model, frame, areas.tree);
                 let detail_block = panel(" Détail ", model.focus == Focus::Detail);
@@ -504,6 +507,8 @@ fn status_message_text(message: &StatusMessage) -> String {
         }
         StatusMessage::NoResponseBody => "Aucun corps de réponse à ouvrir".to_owned(),
         StatusMessage::EditorError(reason) => format!("Échec de l'éditeur : {reason}"),
+        StatusMessage::CampaignFinished(text) => text.clone(),
+        StatusMessage::NoFailedRequests => "Aucune requête en échec".to_owned(),
     }
 }
 
@@ -644,6 +649,9 @@ fn status_line(model: &Model) -> String {
         }
         (CollectionState::Loaded(_), Focus::EnvironmentPicker) => {
             "↑↓ naviguer  Entrée activer  e éditer  Échap arbre".to_owned()
+        }
+        (CollectionState::Loaded(_), Focus::Campaign) => {
+            "↑↓ naviguer  Entrée/→ aller au détail  Échap arbre".to_owned()
         }
         (CollectionState::Loaded(_), Focus::Secrets) => secrets_hint(model).to_owned(),
         _ => "q quitter".to_owned(),
@@ -1511,6 +1519,58 @@ mod tests {
             .position(|l| l.contains("aucune exécution"))
             .expect("message « aucune exécution » présent");
         assert_eq!(row, 14, "message pas centré :\n{}", lines.join("\n"));
+
+        let mut campaign_model = loaded_model((100, 30));
+        campaign_model.focus = Focus::Campaign;
+        let lines = render(&campaign_model, 100, 30);
+        let row = lines
+            .iter()
+            .position(|l| l.contains("Aucune campagne lancée"))
+            .expect("message « Aucune campagne lancée » présent");
+        assert_eq!(row, 14, "message pas centré :\n{}", lines.join("\n"));
+    }
+
+    #[test]
+    fn campaign_panel_renders_header_and_failures() {
+        use crate::app::model::{CampaignFailure, CampaignSummary};
+        use std::path::PathBuf;
+
+        let mut model = loaded_model((100, 30));
+        model.campaign = Some(CampaignSummary {
+            target: PathBuf::from("my-suite"),
+            total: 15,
+            passed: 12,
+            failed: 3,
+            skipped: 0,
+            duration_secs: 1.42,
+            failures: vec![
+                CampaignFailure {
+                    path: PathBuf::from("req1.bru"),
+                    name: "Premier échec".into(),
+                    http_code: Some(500),
+                    reason: "Internal server error".into(),
+                },
+                CampaignFailure {
+                    path: PathBuf::from("folder/req2.bru"),
+                    name: "Deuxième échec".into(),
+                    http_code: None,
+                    reason: "connect ECONNREFUSED".into(),
+                },
+            ],
+        });
+        model.focus = Focus::Campaign;
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Campagne"), "{screen}");
+        assert!(screen.contains("my-suite"), "{screen}");
+        assert!(screen.contains("12/15 réussis"), "{screen}");
+        assert!(screen.contains("3 échecs"), "{screen}");
+        assert!(screen.contains("1.42s"), "{screen}");
+        assert!(screen.contains("req1.bru"), "{screen}");
+        assert!(screen.contains("Premier échec"), "{screen}");
+        assert!(screen.contains("500"), "{screen}");
+        assert!(screen.contains("Internal server error"), "{screen}");
+        assert!(screen.contains("folder/req2.bru"), "{screen}");
+        assert!(screen.contains("connect ECONNREFUSED"), "{screen}");
     }
 
     #[test]
@@ -1530,6 +1590,14 @@ mod tests {
         let status = &lines[29];
         assert!(
             status.contains("↑↓ naviguer  r rejouer  Échap arbre"),
+            "{status}"
+        );
+
+        model.focus = Focus::Campaign;
+        let lines = render(&model, 100, 30);
+        let status = &lines[29];
+        assert!(
+            status.contains("↑↓ naviguer  Entrée/→ aller au détail  Échap arbre"),
             "{status}"
         );
 
@@ -1842,7 +1910,12 @@ mod tests {
 
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
-        for focus in [Focus::History, Focus::Diagnostics, Focus::Secrets] {
+        for focus in [
+            Focus::History,
+            Focus::Diagnostics,
+            Focus::Secrets,
+            Focus::Campaign,
+        ] {
             model.focus = focus;
             let screen = render(&model, 100, 30).join("\n");
             assert!(!screen.contains(" Statut "), "{focus:?} :\n{screen}");

@@ -40,6 +40,7 @@ pub enum Focus {
     History,
     EnvironmentPicker,
     Secrets,
+    Campaign,
 }
 
 /// Onglet actif du panneau Réponse (`response-tabs`).
@@ -98,6 +99,38 @@ pub enum HistoryOutcome {
     },
     Failed(String),
     Cancelled,
+}
+
+/// Résumé de la dernière campagne d'exécution récursive de TNR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CampaignSummary {
+    /// Dossier cible de la campagne.
+    pub target: PathBuf,
+    /// Nombre total de requêtes exécutées.
+    pub total: usize,
+    /// Nombre de requêtes réussies.
+    pub passed: usize,
+    /// Nombre de requêtes en échec.
+    pub failed: usize,
+    /// Nombre de requêtes ignorées (skipped).
+    pub skipped: usize,
+    /// Durée totale d'exécution en secondes.
+    pub duration_secs: f64,
+    /// Liste ordonnée des requêtes en échec.
+    pub failures: Vec<CampaignFailure>,
+}
+
+/// Information sur une requête en échec lors d'une campagne.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CampaignFailure {
+    /// Chemin du fichier de la requête (relatif à la racine de la collection).
+    pub path: PathBuf,
+    /// Nom déclaré de la requête.
+    pub name: String,
+    /// Code de réponse HTTP s'il existe.
+    pub http_code: Option<u16>,
+    /// Première raison d'échec constatée.
+    pub reason: String,
 }
 
 /// Motif d'arrêt de la boucle.
@@ -774,6 +807,10 @@ pub struct Model {
     pub secrets: SecretsState,
     /// Popup d'aide des raccourcis clavier, superposé à l'écran courant.
     pub help: Option<HelpPopup>,
+    /// Résumé de la dernière campagne d'exécution récursive.
+    pub campaign: Option<CampaignSummary>,
+    /// Indice sélectionné dans le panneau Campagne.
+    pub campaign_selected: usize,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -857,6 +894,10 @@ pub enum StatusMessage {
     NoResponseBody,
     /// Échec lors du lancement de l'éditeur externe.
     EditorError(String),
+    /// Fin d'une campagne d'exécution récursive.
+    CampaignFinished(String),
+    /// Aucune requête en échec dans la collection.
+    NoFailedRequests,
 }
 
 impl Model {
@@ -893,6 +934,8 @@ impl Model {
             environment_selected: 0,
             secrets: SecretsState::default(),
             help: None,
+            campaign: None,
+            campaign_selected: 0,
         }
     }
 

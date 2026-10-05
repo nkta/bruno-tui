@@ -44,6 +44,8 @@ d'édition non enregistrée demande confirmation.
 | `H` | panneau Historique des exécutions |
 | `S` | panneau Variables secrètes |
 | `?` | aide des raccourcis (popup centré) |
+| `C` | panneau Campagne (bilan TNR de la dernière exécution récursive) |
+| `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
 
 ## Édition d'une requête
 
@@ -145,8 +147,12 @@ sélectionnée a un résultat avec un corps non vide.
   celles demandées par `--secret` ; `a` ajoute un nom, `Entrée` saisit sa
   valeur, `d` l'oublie. Une valeur secrète n'est jamais écrite sur disque
   ni affichée en clair.
+- **Campagne** (`C`) : bilan de la dernière exécution récursive (campagne de
+  TNR) ; en-tête avec cible, taux de succès et durée, puis liste des requêtes
+  en échec avec code HTTP et raison d'échec ; `Entrée` ou `→` sélectionne
+  la requête dans l'arbre et donne le focus au Détail.
 
-Aucun de ces trois panneaux ne prend le clic pour l'instant — seul le
+Aucun de ces panneaux ne prend le clic pour l'instant — seul le
 clavier y navigue.
 
 ## Aide des raccourcis
@@ -154,7 +160,8 @@ clavier y navigue.
 À tout moment hors saisie de texte, la touche `?` ouvre un popup centré
 rappelant l'ensemble des raccourcis clavier de l'application, organisés par
 section : Global, Collection, Détail, Édition d'une requête, Réponse,
-Environnement (panneau et popup), et Diagnostics / Historique / Secrets.
+Environnement (panneau et popup), Diagnostics / Historique / Secrets, et
+Campagne (TNR).
 
 | Touche | Effet |
 |---|---|
