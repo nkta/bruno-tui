@@ -69,7 +69,10 @@ pub fn row_line(node: &TreeNode, depth: usize, expanded: bool, status: RunStatus
         TreeNode::Request(request) => {
             let mut spans = vec![
                 indent,
-                Span::styled(format!("{:<6} ", request.view.method), theme::METHOD),
+                Span::styled(
+                    format!("{:<6} ", request.view.method),
+                    theme::method_style(&request.view.method),
+                ),
                 Span::raw(display_name(node)),
             ];
             match status {

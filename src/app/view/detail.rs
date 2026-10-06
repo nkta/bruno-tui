@@ -668,7 +668,7 @@ pub fn request_text_and_fields(
     });
     let mut method_value = Line::from(Span::styled(
         method_val.to_owned(),
-        theme::METHOD.add_modifier(Modifier::BOLD),
+        theme::method_style(method_val).add_modifier(Modifier::BOLD),
     ));
     if is_field_cursor(session, &method_field) {
         method_value = tint_line(method_value, FIELD_CURSOR_STYLE);

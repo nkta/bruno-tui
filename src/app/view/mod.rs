@@ -455,7 +455,7 @@ fn breadcrumb_line(model: &Model) -> Line<'static> {
         TreeNode::Request(request) => {
             spans.push(Span::styled(
                 format!("{} ", request.view.method.to_ascii_uppercase()),
-                theme::METHOD,
+                theme::method_style(&request.view.method),
             ));
             spans.push(Span::styled(detail::request_name(request), theme::FOCUS));
         }
@@ -887,8 +887,20 @@ fn secrets_hint(model: &Model) -> &'static str {
 }
 
 pub(crate) fn panel(title: &'static str, focused: bool) -> Block<'static> {
-    let style = if focused { theme::FOCUS } else { theme::BORDER };
-    theme::bordered().title(title).border_style(style)
+    titled_panel(title.to_owned(), focused)
+}
+
+/// Panneau bordé : bordure et titre en couleur de focus quand il a le
+/// focus ; sinon bordure discrète et titre gris lisible.
+fn titled_panel(title: String, focused: bool) -> Block<'static> {
+    let (border, title_style) = if focused {
+        (theme::FOCUS, theme::FOCUS)
+    } else {
+        (theme::BORDER, theme::PANEL_TITLE)
+    };
+    theme::bordered()
+        .title(Span::styled(title, title_style))
+        .border_style(border)
 }
 
 fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
@@ -901,12 +913,7 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
         Some(pattern) => format!("{} — filtre : {pattern} ", base.trim_end()),
         None => base.to_owned(),
     };
-    let style = if model.focus == Focus::Tree {
-        theme::FOCUS
-    } else {
-        theme::BORDER
-    };
-    let block = theme::bordered().title(title).border_style(style);
+    let block = titled_panel(title, model.focus == Focus::Tree);
     let state = &model.tree;
     if state.rows.is_empty() {
         let msg = if is_tree_filtered(model) {
@@ -2001,15 +2008,16 @@ mod tests {
             "bordure du panneau non focalisé"
         );
 
-        // Titre : porte la même couleur que la bordure du même panneau.
+        // Titre : couleur de focus si focalisé, gris lisible sinon,
+        // distinct de la bordure discrète.
         assert_eq!(
             buffer[(areas.tree.x + 1, areas.tree.y)].fg,
             focus_fg,
             "titre du panneau focalisé"
         );
         assert_eq!(
-            buffer[(areas.detail.x + 1, areas.detail.y)].fg,
-            border_fg,
+            Some(buffer[(areas.detail.x + 1, areas.detail.y)].fg),
+            theme::PANEL_TITLE.fg,
             "titre du panneau non focalisé"
         );
     }

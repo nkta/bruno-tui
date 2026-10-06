@@ -9,31 +9,41 @@ use ratatui::widgets::{Block, BorderType};
 
 use super::status::StatusClass;
 
-/// Couleur d'accent orange : focus, titres de section, sélection.
-const ACCENT: Color = Color::Rgb(235, 170, 100);
+// Palette inspirée du thème sombre de Bruno bureau : fond gris très
+// sombre, bordures discrètes, couleur réservée à l'information.
+
+/// Gris de surface, un cran plus clair que le fond : champs, sélection,
+/// gouttière, liste déroulante.
+const SURFACE: Color = Color::Rgb(45, 45, 48);
+/// Couleur d'accent : focus et titres de section.
+const ACCENT: Color = Color::Rgb(214, 170, 90);
 
 /// Fond de l'application, posé une seule fois sur toute la zone du
-/// terminal au début de `view()` : gris ardoise, texte crème par défaut.
+/// terminal au début de `view()` : gris très sombre, texte gris clair.
 pub const BACKGROUND: Style = Style::new()
-    .bg(Color::Rgb(40, 46, 56))
-    .fg(Color::Rgb(225, 220, 205));
-/// Bordure d'un panneau qui n'a pas le focus : vert sauge.
-pub const BORDER: Style = Style::new().fg(Color::Rgb(140, 185, 150));
+    .bg(Color::Rgb(30, 30, 30))
+    .fg(Color::Rgb(212, 212, 212));
+/// Bordure d'un panneau qui n'a pas le focus : gris discret.
+pub const BORDER: Style = Style::new().fg(Color::Rgb(68, 68, 72));
+/// Titre d'un panneau sans focus : gris lisible, plus clair que sa
+/// bordure.
+pub const PANEL_TITLE: Style = Style::new().fg(Color::Rgb(150, 150, 155));
 /// Ligne sélectionnée d'une liste (arbre, historique, environnements...) :
-/// fond orange, texte de la couleur du fond de l'application.
-pub const SELECTION: Style = match BACKGROUND.bg {
-    Some(background) => Style::new()
-        .bg(ACCENT)
-        .fg(background)
-        .add_modifier(Modifier::BOLD),
-    None => Style::new().bg(ACCENT).add_modifier(Modifier::BOLD),
-};
+/// fond gris de surface, texte blanc en gras.
+pub const SELECTION: Style = Style::new()
+    .bg(Color::Rgb(58, 58, 62))
+    .fg(Color::Rgb(245, 245, 245))
+    .add_modifier(Modifier::BOLD);
+/// Gouttière des numéros de ligne de la réponse.
+pub const GUTTER: Style = Style::new()
+    .bg(Color::Rgb(37, 37, 38))
+    .fg(Color::Rgb(110, 110, 115));
 /// Méthode HTTP (`GET`, `POST`, ...), dans l'arbre et le détail.
-pub const METHOD: Style = Style::new().fg(Color::Rgb(120, 200, 150));
+pub const METHOD: Style = Style::new().fg(Color::Rgb(115, 195, 115));
 /// Dernier résultat connu d'une requête : succès.
-pub const SUCCESS: Style = Style::new().fg(Color::Rgb(150, 205, 120));
+pub const SUCCESS: Style = Style::new().fg(Color::Rgb(115, 195, 115));
 /// Dernier résultat connu d'une requête : échec.
-pub const FAILURE: Style = Style::new().fg(Color::Rgb(230, 110, 110));
+pub const FAILURE: Style = Style::new().fg(Color::Rgb(240, 105, 90));
 /// Requête dont l'exécution est en cours.
 pub const RUNNING: Style = Style::new().fg(Color::Blue);
 /// Réponse de redirection (3xx), dans le panneau Statut. Distinct de
@@ -53,7 +63,9 @@ pub const FOCUS: Style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 pub const TITLE: Style = Style::new().add_modifier(Modifier::BOLD);
 /// Titre de section, dans le panneau de détail : second niveau, distinct
 /// du titre de nœud par sa couleur d'accent orange.
-pub const SECTION: Style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+pub const SECTION: Style = Style::new()
+    .fg(Color::Rgb(160, 160, 165))
+    .add_modifier(Modifier::BOLD);
 /// Libellé d'un champ (« Chemin », « Méthode », ...), dans le panneau de
 /// détail : atténué pour que la valeur qui le suit ressorte davantage.
 pub const LABEL: Style = Style::new().add_modifier(Modifier::DIM);
@@ -63,29 +75,43 @@ pub const EMPTY_MESSAGE: Style = Style::new().add_modifier(Modifier::DIM.union(M
 /// Zone de corps éditable, dans le panneau de détail : fond légèrement
 /// plus clair que [`BACKGROUND`] pour la distinguer comme zone de saisie,
 /// sans dépendre d'une bordure de widget (`improve-edit-field-legibility`).
-pub const EDITABLE_BODY: Style = Style::new().bg(Color::Rgb(52, 59, 71));
+pub const EDITABLE_BODY: Style = Style::new().bg(SURFACE);
 
 /// Clé d'un objet JSON dans le corps de réponse.
-pub const JSON_KEY: Style = Style::new().fg(Color::Rgb(130, 170, 255));
+pub const JSON_KEY: Style = Style::new().fg(Color::Rgb(156, 220, 254));
 /// Valeur chaîne de caractères JSON dans le corps de réponse.
-pub const JSON_STRING: Style = Style::new().fg(Color::Rgb(160, 225, 160));
+pub const JSON_STRING: Style = Style::new().fg(Color::Rgb(206, 145, 120));
 /// Valeur numérique JSON dans le corps de réponse.
-pub const JSON_NUMBER: Style = Style::new().fg(Color::Rgb(255, 175, 95));
+pub const JSON_NUMBER: Style = Style::new().fg(Color::Rgb(181, 206, 168));
 /// Valeur booléenne JSON (`true`, `false`) dans le corps de réponse.
-pub const JSON_BOOLEAN: Style = Style::new().fg(Color::Rgb(215, 140, 235));
+pub const JSON_BOOLEAN: Style = Style::new().fg(Color::Rgb(86, 156, 214));
 /// Valeur `null` JSON dans le corps de réponse.
-pub const JSON_NULL: Style = Style::new().fg(Color::Rgb(230, 120, 140));
+pub const JSON_NULL: Style = Style::new().fg(Color::Rgb(197, 134, 192));
 /// Ponctuation syntaxique JSON (`{`, `}`, `[`, `]`, `:`, `,`) dans le corps de réponse.
-pub const JSON_PUNCTUATION: Style = Style::new().fg(Color::Rgb(180, 190, 205));
+pub const JSON_PUNCTUATION: Style = Style::new().fg(Color::Rgb(212, 212, 212));
 
 /// Fil d'Ariane du pied de page : bande légèrement plus claire que le
 /// fond.
-pub const BREADCRUMB: Style = Style::new().bg(Color::Rgb(52, 59, 71));
+pub const BREADCRUMB: Style = Style::new().bg(SURFACE);
 /// Environnement actif dans l'en-tête, en liste déroulante encadrée.
 pub const ENV_CHIP: Style = Style::new()
-    .bg(Color::Rgb(52, 59, 71))
-    .fg(Color::Rgb(140, 185, 150))
+    .bg(SURFACE)
+    .fg(Color::Rgb(235, 235, 235))
     .add_modifier(Modifier::BOLD);
+
+/// Couleur d'une méthode HTTP, comme Bruno bureau : `GET` vert, `POST`
+/// violet, `PUT` orange, `PATCH` bleu, `DELETE` rouge, les autres gris.
+pub fn method_style(method: &str) -> Style {
+    let color = match method.to_ascii_uppercase().as_str() {
+        "GET" => return METHOD,
+        "POST" => Color::Rgb(185, 140, 250),
+        "PUT" => Color::Rgb(230, 160, 80),
+        "PATCH" => Color::Rgb(120, 170, 240),
+        "DELETE" => Color::Rgb(240, 105, 90),
+        _ => Color::Rgb(170, 170, 175),
+    };
+    Style::new().fg(color)
+}
 
 /// Cadre commun à tous les panneaux : bordure arrondie.
 pub fn bordered() -> Block<'static> {
@@ -172,9 +198,20 @@ mod tests {
     }
 
     #[test]
-    fn selection_is_readable_on_the_accent_color() {
-        assert_eq!(SELECTION.bg, Some(ACCENT));
-        assert_eq!(SELECTION.fg, BACKGROUND.bg);
+    fn selection_and_gutter_stand_out_from_the_background() {
+        assert_ne!(SELECTION.bg, BACKGROUND.bg);
+        assert_ne!(GUTTER.bg, BACKGROUND.bg);
+    }
+
+    #[test]
+    fn main_methods_have_distinct_colors() {
+        let methods = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+        for (i, a) in methods.iter().enumerate() {
+            for b in &methods[i + 1..] {
+                assert_ne!(method_style(a).fg, method_style(b).fg, "{a} vs {b}");
+            }
+        }
+        assert_eq!(method_style("get"), METHOD);
     }
 
     #[test]
