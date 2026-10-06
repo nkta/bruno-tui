@@ -310,6 +310,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 if let Some(session) = &model.environment_editing {
                     let popup_area = environment_edit_popup_area(frame.area(), session);
                     frame.render_widget(Clear, popup_area);
+                    frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
                     panels::render_environment_edit_popup(
                         session,
                         model.focus == Focus::EnvironmentPicker,
@@ -324,6 +325,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     if let Some(help) = &model.help {
         let popup_area = help_popup_area(frame.area());
         frame.render_widget(Clear, popup_area);
+        frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
         help::render_help_popup(help, frame, popup_area);
     }
 
@@ -399,6 +401,9 @@ fn render_boxed_detail(model: &Model, frame: &mut Frame, area: Rect, block: Bloc
     let total_height = detail::content_height(&text.lines, &boxes, inner_area.width, wraps);
     let virtual_area = Rect::new(0, 0, inner_area.width, total_height.max(1));
     let mut virtual_buf = Buffer::empty(virtual_area);
+    // Le tampon virtuel part de cellules vierges : il reprend le fond de
+    // l'application pour ne pas trouer le panneau une fois recopié.
+    virtual_buf.set_style(virtual_area, theme::BACKGROUND);
     detail::compose(&text.lines, &boxes, wraps, &mut virtual_buf);
 
     let scroll = model.detail_scroll;
@@ -759,7 +764,7 @@ fn secrets_hint(model: &Model) -> &'static str {
 
 pub(crate) fn panel(title: &'static str, focused: bool) -> Block<'static> {
     let style = if focused { theme::FOCUS } else { theme::BORDER };
-    Block::bordered().title(title).border_style(style)
+    theme::bordered().title(title).border_style(style)
 }
 
 fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
@@ -777,7 +782,7 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
     } else {
         theme::BORDER
     };
-    let block = Block::bordered().title(title).border_style(style);
+    let block = theme::bordered().title(title).border_style(style);
     let state = &model.tree;
     if state.rows.is_empty() {
         let msg = if is_tree_filtered(model) {
@@ -811,7 +816,7 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+            .highlight_style(theme::SELECTION),
         area,
         &mut list_state,
     );

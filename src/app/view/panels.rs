@@ -69,7 +69,7 @@ pub fn render_diagnostics(model: &Model, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+            .highlight_style(theme::SELECTION),
         area,
         &mut list_state,
     );
@@ -95,7 +95,7 @@ pub fn render_history(model: &Model, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+            .highlight_style(theme::SELECTION),
         area,
         &mut list_state,
     );
@@ -187,7 +187,7 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
     let selected = Some(model.campaign_selected.min(campaign.failures.len() - 1));
     let mut list_state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        List::new(items).highlight_style(theme::SELECTION),
         list_area,
         &mut list_state,
     );
@@ -228,7 +228,7 @@ pub fn render_environment_picker(model: &Model, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+            .highlight_style(theme::SELECTION),
         area,
         &mut list_state,
     );
@@ -339,7 +339,7 @@ pub fn render_environment_edit_popup(
     frame.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+            .highlight_style(theme::SELECTION),
         area,
         &mut list_state,
     );
@@ -429,7 +429,7 @@ pub fn render_secrets(model: &Model, frame: &mut Frame, area: Rect) {
     let selected = Some(model.secrets.selected.min(rows.len() - 1));
     let mut list_state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(
-        List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        List::new(items).highlight_style(theme::SELECTION),
         list_area,
         &mut list_state,
     );

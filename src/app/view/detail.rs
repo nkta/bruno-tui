@@ -10,7 +10,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 use serde_json::Value;
 
 use super::theme;
@@ -346,8 +346,8 @@ fn render_section_box(
     rect: Rect,
     buf: &mut Buffer,
 ) {
-    let block = Block::bordered()
-        .title(format!(" {title} "))
+    let block = theme::bordered()
+        .title(Span::styled(format!(" {title} "), theme::SECTION))
         .border_style(theme::BORDER);
     let inner_rect = block.inner(rect);
     block.render(rect, buf);

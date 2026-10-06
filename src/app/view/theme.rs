@@ -5,20 +5,35 @@
 //! style d'un panneau à l'autre.
 
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, BorderType};
 
 use super::status::StatusClass;
 
+/// Couleur d'accent orange : focus, titres de section, sélection.
+const ACCENT: Color = Color::Rgb(235, 170, 100);
+
 /// Fond de l'application, posé une seule fois sur toute la zone du
-/// terminal au début de `view()`.
-pub const BACKGROUND: Style = Style::new().bg(Color::Rgb(18, 22, 40));
-/// Bordure d'un panneau qui n'a pas le focus.
-pub const BORDER: Style = Style::new().fg(Color::Rgb(90, 150, 110));
+/// terminal au début de `view()` : gris ardoise, texte crème par défaut.
+pub const BACKGROUND: Style = Style::new()
+    .bg(Color::Rgb(40, 46, 56))
+    .fg(Color::Rgb(225, 220, 205));
+/// Bordure d'un panneau qui n'a pas le focus : vert sauge.
+pub const BORDER: Style = Style::new().fg(Color::Rgb(140, 185, 150));
+/// Ligne sélectionnée d'une liste (arbre, historique, environnements...) :
+/// fond orange, texte de la couleur du fond de l'application.
+pub const SELECTION: Style = match BACKGROUND.bg {
+    Some(background) => Style::new()
+        .bg(ACCENT)
+        .fg(background)
+        .add_modifier(Modifier::BOLD),
+    None => Style::new().bg(ACCENT).add_modifier(Modifier::BOLD),
+};
 /// Méthode HTTP (`GET`, `POST`, ...), dans l'arbre et le détail.
 pub const METHOD: Style = Style::new().fg(Color::Rgb(120, 200, 150));
 /// Dernier résultat connu d'une requête : succès.
-pub const SUCCESS: Style = Style::new().fg(Color::Green);
+pub const SUCCESS: Style = Style::new().fg(Color::Rgb(150, 205, 120));
 /// Dernier résultat connu d'une requête : échec.
-pub const FAILURE: Style = Style::new().fg(Color::Red);
+pub const FAILURE: Style = Style::new().fg(Color::Rgb(230, 110, 110));
 /// Requête dont l'exécution est en cours.
 pub const RUNNING: Style = Style::new().fg(Color::Blue);
 /// Réponse de redirection (3xx), dans le panneau Statut. Distinct de
@@ -32,20 +47,13 @@ pub const CLIENT_ERROR: Style = Style::new().fg(Color::Yellow);
 /// l'exécution.
 pub const LOAD_ERROR: Style = Style::new().fg(Color::Magenta);
 /// Bordure du panneau ayant le focus, distinct de [`RUNNING`].
-pub const FOCUS: Style = Style::new()
-    .fg(Color::Rgb(224, 138, 60))
-    .add_modifier(Modifier::BOLD);
+pub const FOCUS: Style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 /// Titre du nœud sélectionné, dans le panneau de détail : le plus mis en
 /// valeur des trois niveaux de hiérarchie du détail.
 pub const TITLE: Style = Style::new().add_modifier(Modifier::BOLD);
 /// Titre de section, dans le panneau de détail : second niveau, distinct
-/// du titre de nœud par la couleur en plus du soulignement. Même teinte
-/// que [`METHOD`] : aucune exigence de `visual-theme` n'impose qu'elles
-/// soient distinctes, seule la distinction entre les trois niveaux du
-/// détail (titre/section/libellé) est exigée.
-pub const SECTION: Style = Style::new()
-    .fg(Color::Rgb(120, 200, 150))
-    .add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED));
+/// du titre de nœud par sa couleur d'accent orange.
+pub const SECTION: Style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 /// Libellé d'un champ (« Chemin », « Méthode », ...), dans le panneau de
 /// détail : atténué pour que la valeur qui le suit ressorte davantage.
 pub const LABEL: Style = Style::new().add_modifier(Modifier::DIM);
@@ -55,7 +63,7 @@ pub const EMPTY_MESSAGE: Style = Style::new().add_modifier(Modifier::DIM.union(M
 /// Zone de corps éditable, dans le panneau de détail : fond légèrement
 /// plus clair que [`BACKGROUND`] pour la distinguer comme zone de saisie,
 /// sans dépendre d'une bordure de widget (`improve-edit-field-legibility`).
-pub const EDITABLE_BODY: Style = Style::new().bg(Color::Rgb(28, 34, 56));
+pub const EDITABLE_BODY: Style = Style::new().bg(Color::Rgb(52, 59, 71));
 
 /// Clé d'un objet JSON dans le corps de réponse.
 pub const JSON_KEY: Style = Style::new().fg(Color::Rgb(130, 170, 255));
@@ -69,6 +77,11 @@ pub const JSON_BOOLEAN: Style = Style::new().fg(Color::Rgb(215, 140, 235));
 pub const JSON_NULL: Style = Style::new().fg(Color::Rgb(230, 120, 140));
 /// Ponctuation syntaxique JSON (`{`, `}`, `[`, `]`, `:`, `,`) dans le corps de réponse.
 pub const JSON_PUNCTUATION: Style = Style::new().fg(Color::Rgb(180, 190, 205));
+
+/// Cadre commun à tous les panneaux : bordure arrondie.
+pub fn bordered() -> Block<'static> {
+    Block::bordered().border_type(BorderType::Rounded)
+}
 
 /// Style du badge de statut du panneau Statut : texte gras de la couleur
 /// du fond sur fond de la couleur de catégorie ; style neutre sans fond
@@ -146,6 +159,13 @@ mod tests {
     #[test]
     fn background_has_a_color() {
         assert!(BACKGROUND.bg.is_some());
+        assert!(BACKGROUND.fg.is_some());
+    }
+
+    #[test]
+    fn selection_is_readable_on_the_accent_color() {
+        assert_eq!(SELECTION.bg, Some(ACCENT));
+        assert_eq!(SELECTION.fg, BACKGROUND.bg);
     }
 
     #[test]
