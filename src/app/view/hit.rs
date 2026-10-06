@@ -12,8 +12,9 @@ use super::detail::{
     SectionBox, detail_section_boxes, detail_text, is_box_border, line_width,
     response_gutter_width, response_text,
 };
+use super::detail::{URL_BAR_METHOD_SUFFIX, url_bar_values};
 use super::{detail_wraps, inner, layout_for, response_text_area};
-use crate::app::model::{DragPanel, Model};
+use crate::app::model::{DragPanel, EditableField, Model};
 
 /// Cible d'un événement souris.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,31 +26,52 @@ pub enum Hit {
     Detail { line: Option<u16> },
     /// Réponse : même principe que le détail.
     Response { line: Option<u16> },
-    /// Bouton « Lancer » sur la bordure basse du détail.
+    /// Bouton « Lancer » de la barre d'URL.
     RunButton,
+    /// Barre d'URL : champ Méthode ou URL sous le pointeur.
+    UrlBar { field: EditableField },
 }
 
 /// Libellé du bouton « Lancer » du panneau Détail.
 pub const RUN_BUTTON: &str = " ▶ Lancer (r) ";
 
-/// Zone du bouton « Lancer », sur la bordure basse du détail, calée à
-/// droite : présent seulement sur une requête, hors session d'édition, et
-/// si le panneau est assez large. Partagée par le rendu et le clic.
-pub fn run_button_area(model: &Model, detail: Rect) -> Option<Rect> {
+/// Zone du bouton « Lancer », calée à droite sur la ligne intérieure de
+/// la barre d'URL `url_bar` : présent seulement sur une requête, hors
+/// session d'édition, et si la barre est assez large. Partagée par le
+/// rendu et le clic.
+pub fn run_button_area(model: &Model, url_bar: Rect) -> Option<Rect> {
     let is_request = matches!(
         model.selected_node(),
         Some(crate::collection::TreeNode::Request(_))
     );
     let width = u16::try_from(Line::raw(RUN_BUTTON).width()).ok()?;
-    if !is_request || model.editing.is_some() || detail.width < width + 4 || detail.height < 3 {
+    if !is_request || model.editing.is_some() || url_bar.width < width + 4 || url_bar.height < 3 {
         return None;
     }
+    let inner_area = inner(url_bar);
     Some(Rect::new(
-        detail.right() - 2 - width,
-        detail.bottom() - 1,
+        inner_area.right() - width,
+        inner_area.y,
         width,
         1,
     ))
+}
+
+/// Champ de la barre d'URL sous `position` : la méthode et sa flèche, ou
+/// l'URL sur le reste de la ligne intérieure.
+fn url_bar_field(model: &Model, url_bar: Rect, position: Position) -> Option<EditableField> {
+    let inner_area = inner(url_bar);
+    if !inner_area.contains(position) {
+        return None;
+    }
+    let (method, _) = url_bar_values(model)?;
+    let method_width = Line::raw(format!("{method}{URL_BAR_METHOD_SUFFIX}")).width();
+    let column = usize::from(position.x - inner_area.x);
+    Some(if column < method_width {
+        EditableField::Method
+    } else {
+        EditableField::Url
+    })
 }
 
 /// Position verticale du pointeur pendant un glisser, relativement à
@@ -78,8 +100,11 @@ pub fn hit_test(model: &Model, column: u16, row: u16) -> Option<Hit> {
             .filter(|index| *index < model.tree.rows.len());
         return Some(Hit::Tree { row: index });
     }
-    if run_button_area(model, areas.detail).is_some_and(|button| button.contains(position)) {
+    if run_button_area(model, areas.url_bar).is_some_and(|button| button.contains(position)) {
         return Some(Hit::RunButton);
+    }
+    if let Some(field) = url_bar_field(model, areas.url_bar, position) {
+        return Some(Hit::UrlBar { field });
     }
     if areas.detail.contains(position) {
         return Some(Hit::Detail {

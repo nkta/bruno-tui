@@ -630,6 +630,125 @@ pub fn request_text_with_session(
     request_text_and_fields(request, session).0
 }
 
+/// Séparateur entre la méthode et l'URL dans la barre d'URL : la flèche
+/// rappelle que la méthode se choisit dans une liste.
+pub const URL_BAR_METHOD_SUFFIX: &str = " ▾  ";
+
+/// Méthode et URL de la requête sélectionnée pour la barre d'URL, valeurs
+/// en cours d'édition comprises ; `None` hors requête.
+pub fn url_bar_values(model: &Model) -> Option<(String, String)> {
+    let Some(TreeNode::Request(request)) = model.selected_node() else {
+        return None;
+    };
+    let session = model.editing.as_ref().filter(|s| s.path == request.path);
+    let method = session.map_or(request.view.method.as_str(), |s| {
+        field_value(s, &EditableField::Method)
+    });
+    let url = session.map_or(request.view.url.as_str(), |s| {
+        field_value(s, &EditableField::Url)
+    });
+    Some((method.to_ascii_uppercase(), url.to_owned()))
+}
+
+/// Ligne de la barre d'URL : méthode colorée, flèche, puis l'URL avec
+/// ses variables `{{…}}` en vert comme dans Bruno bureau (simple repérage
+/// visuel, aucune variable n'est résolue).
+pub fn url_bar_line(method: &str, url: &str) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(
+            method.to_owned(),
+            theme::method_style(method).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(URL_BAR_METHOD_SUFFIX, theme::LABEL),
+    ];
+    let mut rest = url;
+    while let Some(start) = rest.find("{{") {
+        let Some(len) = rest[start..].find("}}").map(|end| end + 2) else {
+            break;
+        };
+        if start > 0 {
+            spans.push(Span::raw(rest[..start].to_owned()));
+        }
+        spans.push(Span::styled(
+            rest[start..start + len].to_owned(),
+            theme::METHOD,
+        ));
+        rest = &rest[start + len..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::raw(rest.to_owned()));
+    }
+    Line::from(spans)
+}
+
+/// Lignes Méthode et URL du détail, avec leurs champs éditables et, pendant
+/// le choix de la méthode, la boîte du sélecteur.
+fn push_method_and_url(
+    lines: &mut Vec<Line<'static>>,
+    field_lines: &mut Vec<FieldLine>,
+    boxes: &mut Vec<SectionBox>,
+    view: &crate::collection::RequestView,
+    session: Option<&EditSession>,
+) {
+    let method_field = EditableField::Method;
+    let method_val = session.map_or(view.method.as_str(), |s| field_value(s, &method_field));
+    let method_label = Span::styled(METHOD_LABEL, theme::LABEL);
+    field_lines.push(FieldLine {
+        field: method_field,
+        line: lines.len(),
+        count: 1,
+        prefix_width: method_label.width(),
+    });
+    let mut method_value = Line::from(Span::styled(
+        method_val.to_owned(),
+        theme::method_style(method_val).add_modifier(Modifier::BOLD),
+    ));
+    if is_field_cursor(session, &method_field) {
+        method_value = tint_line(method_value, FIELD_CURSOR_STYLE);
+    }
+    let mut method_line = Line::from(method_label);
+    method_line.spans.extend(method_value.spans);
+    lines.push(method_line);
+
+    if let Some(session) = session
+        && let EditState::MethodPicker { selected } = &session.state
+    {
+        boxed_section(
+            lines,
+            field_lines,
+            boxes,
+            "Méthode".to_owned(),
+            |lines, _| {
+                for (index, name) in crate::collection::ast::METHODS.iter().enumerate() {
+                    let mut line = Line::raw(format!("  {}", name.to_ascii_uppercase()));
+                    if index == *selected {
+                        line = tint_line(line, FIELD_CURSOR_STYLE);
+                    }
+                    lines.push(line);
+                }
+            },
+        );
+    }
+
+    let url_field = EditableField::Url;
+    let url_val = session.map_or(view.url.as_str(), |s| field_value(s, &url_field));
+    let (url_val, _) = skip_columns(url_val, value_hscroll(session, &url_field));
+    let url_label = Span::styled(URL_LABEL, theme::LABEL);
+    field_lines.push(FieldLine {
+        field: url_field,
+        line: lines.len(),
+        count: 1,
+        prefix_width: url_label.width(),
+    });
+    let mut url_value = Line::raw(url_val.to_owned());
+    if is_field_cursor(session, &url_field) {
+        url_value = tint_line(url_value, FIELD_CURSOR_STYLE);
+    }
+    let mut url_line = Line::from(url_label);
+    url_line.spans.extend(url_value.spans);
+    lines.push(url_line);
+}
+
 /// Nom affiché d'une requête : celui du bloc `meta`, sinon le nom du
 /// fichier sans extension.
 pub fn request_name(request: &RequestNode) -> String {
@@ -666,64 +785,12 @@ pub fn request_text_and_fields(
     // la ligne avec l'URL empêcherait de résoudre un clic entre les deux
     // champs, `field_at_line` (mouse-support) ne connaissant que la ligne,
     // jamais la colonne.
-    let method_field = EditableField::Method;
-    let method_val = session.map_or(view.method.as_str(), |s| field_value(s, &method_field));
-    let method_label = Span::styled(METHOD_LABEL, theme::LABEL);
-    field_lines.push(FieldLine {
-        field: method_field,
-        line: lines.len(),
-        count: 1,
-        prefix_width: method_label.width(),
-    });
-    let mut method_value = Line::from(Span::styled(
-        method_val.to_owned(),
-        theme::method_style(method_val).add_modifier(Modifier::BOLD),
-    ));
-    if is_field_cursor(session, &method_field) {
-        method_value = tint_line(method_value, FIELD_CURSOR_STYLE);
+    // Hors édition, méthode et URL sont dans la barre d'URL ; pendant une
+    // session, elles reviennent ici pour être parcourues et modifiées
+    // comme les autres champs.
+    if session.is_some() {
+        push_method_and_url(&mut lines, &mut field_lines, &mut boxes, view, session);
     }
-    let mut method_line = Line::from(method_label);
-    method_line.spans.extend(method_value.spans);
-    lines.push(method_line);
-
-    if let Some(session) = session
-        && let EditState::MethodPicker { selected } = &session.state
-    {
-        boxed_section(
-            &mut lines,
-            &mut field_lines,
-            &mut boxes,
-            "Méthode".to_owned(),
-            |lines, _| {
-                for (index, name) in crate::collection::ast::METHODS.iter().enumerate() {
-                    let mut line = Line::raw(format!("  {}", name.to_ascii_uppercase()));
-                    if index == *selected {
-                        line = tint_line(line, FIELD_CURSOR_STYLE);
-                    }
-                    lines.push(line);
-                }
-            },
-        );
-    }
-
-    let url_field = EditableField::Url;
-    let url_val = session.map_or(view.url.as_str(), |s| field_value(s, &url_field));
-    let (url_val, _) = skip_columns(url_val, value_hscroll(session, &url_field));
-    let url_label = Span::styled(URL_LABEL, theme::LABEL);
-    field_lines.push(FieldLine {
-        field: url_field,
-        line: lines.len(),
-        count: 1,
-        prefix_width: url_label.width(),
-    });
-    let mut url_value = Line::raw(url_val.to_owned());
-    if is_field_cursor(session, &url_field) {
-        url_value = tint_line(url_value, FIELD_CURSOR_STYLE);
-    }
-    let mut url_line = Line::from(url_label);
-    url_line.spans.extend(url_value.spans);
-    lines.push(url_line);
-
     lines.push(field(
         "Auth",
         view.auth
@@ -1673,21 +1740,50 @@ mod tests {
 
     /// Garde-fou : chaque boîte de section ajoute 2 lignes de bordure par
     /// rapport à l'ancienne ligne de titre unique
-    /// (`add-boxed-detail-sections`) ; +1 pour la ligne Méthode, désormais
-    /// séparée de l'URL (`add-method-editing`).
+    /// (`add-boxed-detail-sections`) ; hors édition, Méthode et URL sont
+    /// dans la barre d'URL, pas dans le détail.
     #[test]
     fn request_detail_line_count_is_unchanged() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
-        assert_eq!(detail_text(&model).lines.len(), 32);
+        assert_eq!(detail_text(&model).lines.len(), 30);
+    }
+
+    /// Barre d'URL : méthode, flèche, puis l'URL avec ses variables
+    /// repérées en vert ; Méthode et URL réapparaissent dans le détail
+    /// pendant une session d'édition.
+    #[test]
+    fn url_bar_shows_method_and_url_outside_the_detail() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+        let (method, url) = url_bar_values(&model).expect("requête");
+        assert_eq!(
+            (method.as_str(), url.as_str()),
+            ("POST", "https://{{host}}/items")
+        );
+        let line = url_bar_line(&method, &url);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "POST ▾  https://{{host}}/items");
+        let variable = line
+            .spans
+            .iter()
+            .find(|s| s.content == "{{host}}")
+            .expect("variable isolée");
+        assert_eq!(variable.style, theme::METHOD);
+        assert!(!plain(&detail_text(&model)).contains("https://{{host}}/items"));
+
+        session_on(&mut model, "post-json.bru");
+        let text = plain(&detail_text(&model));
+        assert!(
+            text.contains("Méthode : POST\nURL : https://{{host}}/items"),
+            "{text}"
+        );
     }
 
     #[test]
     fn post_json_request() {
         let text = detail_of("post-json.bru");
         for expected in [
-            "POST",
-            "https://{{host}}/items",
             "Content-Type: application/json",
             "Corps (json)",
             "\"s\": \"}\"",
@@ -1805,10 +1901,7 @@ mod tests {
     #[test]
     fn simple_get_without_body() {
         let text = detail_of("simple-get.bru");
-        assert!(
-            text.contains("Méthode : GET\nURL : https://{{host}}/ping"),
-            "{text}"
-        );
+        assert!(!text.contains("https://{{host}}/ping"), "{text}");
         assert!(
             text.contains("Corps") && text.contains("Auth : none"),
             "{text}"

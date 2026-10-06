@@ -47,6 +47,8 @@ const MIN_RESPONSE_WIDTH: u16 = 18;
 /// Hauteur de terminal à partir de laquelle le pied de page porte le fil
 /// d'Ariane et le panneau Environnement sa forme complète.
 const FULL_MIN_TERMINAL_HEIGHT: u16 = 20;
+/// Hauteur de la barre d'URL (une ligne intérieure, bordée).
+const URL_BAR_HEIGHT: u16 = 3;
 /// Largeur maximale du panneau Environnement en surimpression.
 const ENV_PANEL_MAX_WIDTH: u16 = 44;
 /// Hauteur du panneau Environnement en forme complète (4 lignes
@@ -74,6 +76,10 @@ pub struct Areas {
     /// Arbre, détail et réponse réunis.
     pub body: Rect,
     pub tree: Rect,
+    /// Barre d'URL, au-dessus du détail et de la réponse : requête
+    /// ouverte en titre, méthode et URL, bouton « Lancer ». Présente aussi
+    /// en plein écran sur le détail.
+    pub url_bar: Rect,
     pub detail: Rect,
     /// Panneau Environnement, en surimpression en haut à droite du corps :
     /// dessiné et cliquable seulement quand il a le focus (touche `E`).
@@ -122,6 +128,7 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             title,
             body,
             tree: body,
+            url_bar: Rect::default(),
             detail: Rect::default(),
             environment: Rect::default(),
             response: Rect::default(),
@@ -132,7 +139,13 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             title,
             body,
             tree: Rect::default(),
-            detail: body,
+            url_bar: Rect::new(body.x, body.y, body.width, URL_BAR_HEIGHT),
+            detail: Rect::new(
+                body.x,
+                body.y + URL_BAR_HEIGHT,
+                body.width,
+                body_height - URL_BAR_HEIGHT,
+            ),
             environment: Rect::default(),
             response: Rect::default(),
             status,
@@ -142,6 +155,7 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             title,
             body,
             tree: Rect::default(),
+            url_bar: Rect::default(),
             detail: Rect::default(),
             environment: Rect::default(),
             response: body,
@@ -164,12 +178,22 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             // Environnement : surimpression calée en haut à droite, sous
             // la liste déroulante de l'en-tête, comme dans Bruno bureau.
             let env_width = response_width.min(ENV_PANEL_MAX_WIDTH);
+            // Barre d'URL sur toute la largeur à droite de l'arbre, comme
+            // dans Bruno bureau ; détail et réponse en dessous.
+            let panels_y = body.y + URL_BAR_HEIGHT;
+            let panels_height = body_height - URL_BAR_HEIGHT;
             Some(Areas {
                 title,
                 body,
                 tree: Rect::new(body.x, body.y, tree_width, body_height),
-                detail: Rect::new(body.x + tree_width, body.y, detail_width, body_height),
-                response: Rect::new(response_x, body.y, response_width, body_height),
+                url_bar: Rect::new(
+                    body.x + tree_width,
+                    body.y,
+                    body.width - tree_width,
+                    URL_BAR_HEIGHT,
+                ),
+                detail: Rect::new(body.x + tree_width, panels_y, detail_width, panels_height),
+                response: Rect::new(response_x, panels_y, response_width, panels_height),
                 environment: Rect::new(
                     body.right() - env_width,
                     body.y,
@@ -255,19 +279,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     } else {
                         TITLE_DETAIL
                     };
-                    let mut detail_block = panel(title, model.focus == Focus::Detail);
-                    if let Some(TreeNode::Request(request)) = model.selected_node() {
-                        // Onglet de la requête ouverte : méthode et nom
-                        // en pastille orange, à la suite du titre.
-                        detail_block = detail_block.title(Span::styled(
-                            format!(
-                                " {} {} ",
-                                request.view.method.to_ascii_uppercase(),
-                                detail::request_name(request)
-                            ),
-                            theme::SELECTION,
-                        ));
-                    }
+                    let detail_block = panel(title, model.focus == Focus::Detail);
                     match model.selected_node() {
                         Some(TreeNode::Request(_)) => {
                             render_boxed_detail(model, frame, areas.detail, detail_block);
@@ -286,16 +298,10 @@ pub fn view(model: &Model, frame: &mut Frame) {
                             frame.render_widget(detail, areas.detail);
                         }
                     }
-                    if let Some(button) = hit::run_button_area(model, areas.detail) {
-                        frame.render_widget(
-                            Paragraph::new(Span::styled(
-                                hit::RUN_BUTTON,
-                                theme::SUCCESS.fg.map_or(theme::SUCCESS, theme::badge_on),
-                            )),
-                            button,
-                        );
-                    }
                     render_insert_cursor(model, frame, areas.detail);
+                }
+                if areas.url_bar.width > 0 && areas.url_bar.height > 0 {
+                    render_url_bar(model, frame, areas.url_bar);
                 }
                 if areas.response.width > 0 && areas.response.height > 0 {
                     render_response(model, frame, areas.response);
@@ -931,6 +937,45 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
+/// Barre d'URL : requête ouverte en titre (l'onglet de Bruno bureau),
+/// méthode et URL sur la ligne intérieure, bouton « Lancer » à droite.
+/// Jamais focalisable : bordure ordinaire.
+fn render_url_bar(model: &Model, frame: &mut Frame, area: Rect) {
+    let mut block = theme::bordered().border_style(theme::BORDER);
+    match model.selected_node() {
+        Some(TreeNode::Request(request)) => {
+            block = block.title(Span::styled(
+                format!(
+                    " {} {} ",
+                    request.view.method.to_ascii_uppercase(),
+                    detail::request_name(request)
+                ),
+                theme::SELECTION,
+            ));
+        }
+        _ => block = block.title(Span::styled(" Requête ", theme::PANEL_TITLE)),
+    }
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+    let line = match detail::url_bar_values(model) {
+        Some((method, url)) => detail::url_bar_line(&method, &url),
+        None => Line::from(Span::styled(
+            "sélectionner une requête dans l'arbre",
+            theme::EMPTY_MESSAGE,
+        )),
+    };
+    frame.render_widget(Paragraph::new(line), inner_area);
+    if let Some(button) = hit::run_button_area(model, area) {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                hit::RUN_BUTTON,
+                theme::SUCCESS.fg.map_or(theme::SUCCESS, theme::badge_on),
+            )),
+            button,
+        );
+    }
+}
+
 /// Zone du texte de la réponse : l'intérieur du panneau sous la ligne
 /// des onglets et du statut. Partagée par le rendu, le défilement et le
 /// clic.
@@ -1172,16 +1217,18 @@ mod tests {
             60
         );
         assert_eq!(areas.tree.height, 9);
-        // La réponse occupe toute la hauteur ; l'Environnement compact
-        // est en surimpression.
-        assert_eq!(areas.response.height, 9);
+        // Barre d'URL au-dessus ; la réponse occupe le reste de la
+        // hauteur ; l'Environnement compact est en surimpression.
+        assert_eq!(areas.url_bar.height, URL_BAR_HEIGHT);
+        assert_eq!(areas.response.height, 9 - URL_BAR_HEIGHT);
         assert!(response_text_area(areas.response).height >= 1);
         assert_eq!(areas.environment.height, 3);
         assert!(areas.environment_panel_compact());
     }
 
-    /// La réponse occupe toute la colonne de droite ; l'Environnement est
-    /// une surimpression calée en haut à droite du corps.
+    /// La barre d'URL couvre détail et réponse ; la réponse occupe sa
+    /// colonne sous la barre ; l'Environnement est une surimpression calée
+    /// en haut à droite du corps.
     #[test]
     fn response_fills_the_column_and_environment_overlays_it() {
         for (size, env_height) in [
@@ -1192,8 +1239,12 @@ mod tests {
         ] {
             let areas = layout_for(size, None).expect("taille suffisante");
             let (env, response) = (areas.environment, areas.response);
-            assert_eq!(response.y, areas.body.y, "{size:?}");
-            assert_eq!(response.height, areas.body.height, "{size:?}");
+            let bar = areas.url_bar;
+            assert_eq!((bar.x, bar.y), (areas.detail.x, areas.body.y), "{size:?}");
+            assert_eq!(bar.right(), areas.body.right(), "{size:?}");
+            assert_eq!(response.y, bar.bottom(), "{size:?}");
+            assert_eq!(areas.detail.y, bar.bottom(), "{size:?}");
+            assert_eq!(response.bottom(), areas.body.bottom(), "{size:?}");
             assert_eq!(response.right(), areas.body.right(), "{size:?}");
             assert_eq!(env.height, env_height, "{size:?}");
             assert_eq!(
@@ -1208,7 +1259,7 @@ mod tests {
             );
             assert!(env.width <= response.width, "{size:?}");
             assert_eq!(areas.tree.height, areas.body.height, "{size:?}");
-            assert_eq!(areas.detail.height, areas.body.height, "{size:?}");
+            assert_eq!(areas.detail.height, response.height, "{size:?}");
         }
     }
 
@@ -1948,8 +1999,9 @@ mod tests {
         ] {
             assert!(screen.contains(name), "{name} :\n{screen}");
         }
+        // L'arbre et la barre d'URL restent visibles à côté.
         assert!(
-            lines[1].contains("Collection") && lines[1].contains("Détail"),
+            lines[1].contains("Collection") && lines[1].contains("Requête"),
             "{}",
             lines[1]
         );
@@ -2670,7 +2722,11 @@ mod tests {
         let detail_zoom = layout_for(size, Some(Focus::Detail)).expect("detail zoom");
         assert_eq!(detail_zoom.body, normal.body);
         assert_eq!(detail_zoom.tree, Rect::default());
-        assert_eq!(detail_zoom.detail, normal.body);
+        // La barre d'URL reste au-dessus du détail en plein écran.
+        assert_eq!(detail_zoom.url_bar.y, normal.body.y);
+        assert_eq!(detail_zoom.url_bar.width, normal.body.width);
+        assert_eq!(detail_zoom.detail.y, detail_zoom.url_bar.bottom());
+        assert_eq!(detail_zoom.detail.bottom(), normal.body.bottom());
         assert_eq!(detail_zoom.environment, Rect::default());
         assert_eq!(detail_zoom.response, Rect::default());
 

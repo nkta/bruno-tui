@@ -3117,6 +3117,8 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
         }
         // Traité dans `update`, qui doit renvoyer la commande d'exécution.
         Hit::RunButton => {}
+        // Clic sur la méthode ou l'URL : édition directe de ce champ.
+        Hit::UrlBar { field } => begin_input_at(model, field),
     }
 }
 
@@ -3339,11 +3341,7 @@ fn mouse_wheel(model: &mut Model, input: MouseInput, up: bool) {
                 scroll_response(model, step());
             }
         }
-        Hit::RunButton => {
-            for _ in 0..WHEEL_LINES {
-                scroll_detail(model, step());
-            }
-        }
+        Hit::RunButton | Hit::UrlBar { .. } => {}
     }
 }
 
@@ -3738,16 +3736,17 @@ mod tests {
         assert_eq!(model.focus, Focus::Detail);
         update(&mut model, Message::End);
         let max = model.detail_scroll;
-        assert!(max > 0, "le détail de scripted doit dépasser 8 lignes");
+        let page = inner(layout_for(model.size, None).expect("taille").detail).height;
+        assert!(max > 0, "le détail de scripted doit dépasser {page} lignes");
         assert_eq!(max, detail_max_scroll(&model));
         update(&mut model, Message::Down);
         assert_eq!(model.detail_scroll, max);
         update(&mut model, Message::PageUp);
-        assert_eq!(model.detail_scroll, max.saturating_sub(8));
+        assert_eq!(model.detail_scroll, max.saturating_sub(page));
         update(&mut model, Message::Home);
         assert_eq!(model.detail_scroll, 0);
         update(&mut model, Message::PageDown);
-        assert_eq!(model.detail_scroll, 8.min(max));
+        assert_eq!(model.detail_scroll, page.min(max));
 
         let before = model.tree.selected;
         update(&mut model, Message::FocusTree);
@@ -8265,15 +8264,16 @@ mod mouse_tests {
         event(model, MouseKind::Release, point);
     }
 
-    /// Un clic sur le bouton « Lancer » du détail lance la requête
+    /// Un clic sur le bouton « Lancer » de la barre d'URL lance la requête
     /// sélectionnée ; le bouton disparaît pendant une session d'édition.
     #[test]
     fn run_button_click_starts_the_selected_request() {
         use crate::app::view::hit::run_button_area;
         let mut model = model_on("simple-get.bru", (100, 30));
         let areas = layout_for(model.size, None).expect("layout");
-        let button = run_button_area(&model, areas.detail).expect("bouton sur une requête");
-        assert_eq!(button.y, areas.detail.bottom() - 1);
+        let button = run_button_area(&model, areas.url_bar).expect("bouton sur une requête");
+        assert_eq!(button.y, areas.url_bar.y + 1);
+        assert_eq!(button.right(), areas.url_bar.right() - 1);
         assert_eq!(hit_test(&model, button.x, button.y), Some(Hit::RunButton));
         let command = event(&mut model, MouseKind::Press, (button.x, button.y));
         assert!(matches!(command, Command::StartRun { .. }), "{command:?}");
@@ -8281,7 +8281,7 @@ mod mouse_tests {
         let mut editing = model_on("simple-get.bru", (100, 30));
         update(&mut editing, Message::NextFocus);
         update(&mut editing, Message::StartEdit);
-        assert!(run_button_area(&editing, areas.detail).is_none());
+        assert!(run_button_area(&editing, areas.url_bar).is_none());
     }
 
     fn row_of(model: &Model, path: &str) -> usize {
@@ -8310,7 +8310,11 @@ mod mouse_tests {
     /// Position écran de la ligne logique `line` du détail ou de la réponse.
     fn line_point(model: &Model, detail: bool, line: u16) -> (u16, u16) {
         let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
-        let area = inner(if detail { areas.detail } else { areas.response });
+        let area = if detail {
+            inner(areas.detail)
+        } else {
+            response_text_area(areas.response)
+        };
         (area.y..area.bottom())
             .map(|y| (area.x + 1, y))
             .find(|(x, y)| {
@@ -8335,7 +8339,28 @@ mod mouse_tests {
         u16::try_from(location.line).expect("petit")
     }
 
+    /// Position écran d'un champ : hors session, Méthode et URL sont dans
+    /// la barre d'URL ; les autres champs, et tous pendant une session,
+    /// dans le détail.
     fn field_point(model: &Model, field: EditableField) -> (u16, u16) {
+        if model.editing.is_none() && matches!(field, EditableField::Method | EditableField::Url) {
+            let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
+            let bar = inner(areas.url_bar);
+            let (method, _) = crate::app::view::detail::url_bar_values(model).expect("requête");
+            let url_x = bar.x
+                + u16::try_from(
+                    Line::raw(format!(
+                        "{method}{}",
+                        crate::app::view::detail::URL_BAR_METHOD_SUFFIX
+                    ))
+                    .width(),
+                )
+                .expect("petit");
+            return match field {
+                EditableField::Method => (bar.x, bar.y),
+                _ => (url_x + 1, bar.y),
+            };
+        }
         line_point(model, true, field_line(model, field))
     }
 
@@ -8481,7 +8506,8 @@ mod mouse_tests {
         let point = tree_point(&model, "post-json.bru");
         click(&mut model, point);
         assert_eq!(selected_name(&model), "post-json");
-        assert!(plain_lines(&model).iter().any(|l| l.contains("POST")));
+        let (method, _) = crate::app::view::detail::url_bar_values(&model).expect("requête");
+        assert_eq!(method, "POST");
 
         let response = inner(
             layout_for(model.size, model.zoomed_panel())
@@ -8767,7 +8793,7 @@ mod mouse_tests {
     #[test]
     fn drag_started_on_a_field_opens_no_session() {
         let mut model = model_on("post-json.bru", (140, 40));
-        let url = field_line(&model, EditableField::Url);
+        let url = field_line(&model, EditableField::HeaderValue(0));
         let start = line_point(&model, true, url);
         let end = line_point(&model, true, url + 1);
         event(&mut model, MouseKind::Press, start);
