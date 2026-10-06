@@ -171,9 +171,11 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             })
         }
         _ => {
-            let tree_width = (area.width * 35 / 100).max(MIN_TREE_WIDTH);
+            // La réponse reçoit la plus large colonne : c'est elle qu'on lit
+            // le plus (arbre 30 %, détail 45 % du reste, réponse le solde).
+            let tree_width = (area.width * 30 / 100).max(MIN_TREE_WIDTH);
             let remaining = area.width - tree_width;
-            let detail_width = (remaining * 50 / 100).max(MIN_DETAIL_WIDTH);
+            let detail_width = (remaining * 45 / 100).max(MIN_DETAIL_WIDTH);
             let response_width = (remaining - detail_width).max(MIN_RESPONSE_WIDTH);
             let response_x = body.x + tree_width + detail_width;
             let status_panel_height = if full_size {
@@ -1065,13 +1067,13 @@ mod tests {
             "{}",
             lines[0]
         );
-        // Colonnes de l'arbre : 35 % de 100, bordures exclues.
+        // Colonnes de l'arbre : 30 % de 100, bordures exclues.
         let tree: Vec<String> = lines[2..13]
             .iter()
             .map(|l| {
                 l.chars()
                     .skip(1)
-                    .take(33)
+                    .take(28)
                     .collect::<String>()
                     .trim_end()
                     .to_owned()
