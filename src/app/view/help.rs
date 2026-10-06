@@ -116,6 +116,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "début, fin du détail",
             },
             HelpEntry {
+                key: "←/h, →/l",
+                effect: "onglet précédent/suivant de la requête (hors édition)",
+            },
+            HelpEntry {
                 key: "Entrée / e",
                 effect: "ouvrir une session d'édition",
             },
@@ -244,7 +248,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
         entries: &[
             HelpEntry {
                 key: "E",
-                effect: "donner le focus au panneau Environnement",
+                effect: "ouvrir / fermer le panneau Environnement (aussi : clic sur la liste en haut à droite)",
             },
             HelpEntry {
                 key: "↑/k, ↓/j",

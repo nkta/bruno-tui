@@ -17,8 +17,8 @@ use super::theme;
 use super::tree::file_name;
 use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
-    EditSession, EditState, EditableField, InputTarget, Model, RequestOutcome, ResponseTab,
-    add_row_label, field_enabled, field_value,
+    EditSession, EditState, EditableField, InputTarget, Model, RequestOutcome, RequestTab,
+    ResponseTab, add_row_label, field_enabled, field_value,
 };
 use crate::app::update::{response_selection_range, selection_range};
 use crate::collection::{
@@ -58,7 +58,7 @@ pub fn detail_text(model: &Model) -> Text<'static> {
     match model.selected_node() {
         Some(TreeNode::Request(request)) => {
             let session = model.editing.as_ref().filter(|s| s.path == request.path);
-            request_text_with_session(request, session)
+            request_text_and_fields(request, session, model.shown_request_tab()).0
         }
         Some(TreeNode::Folder(folder)) => folder_text(folder),
         Some(TreeNode::Error(error)) => error_text(error),
@@ -74,7 +74,7 @@ pub fn detail_section_boxes(model: &Model) -> Vec<SectionBox> {
         return Vec::new();
     };
     let session = model.editing.as_ref().filter(|s| s.path == request.path);
-    request_text_and_fields(request, session).2
+    request_text_and_fields(request, session, model.shown_request_tab()).2
 }
 
 /// Texte de la réponse du nœud sélectionné : le résultat de la dernière
@@ -622,14 +622,6 @@ fn editable_entries(
     lines.push(line);
 }
 
-/// Construit le texte de détail d'une requête en tenant compte de la session d'édition (D8).
-pub fn request_text_with_session(
-    request: &RequestNode,
-    session: Option<&EditSession>,
-) -> Text<'static> {
-    request_text_and_fields(request, session).0
-}
-
 /// Séparateur entre la méthode et l'URL dans la barre d'URL : la flèche
 /// rappelle que la méthode se choisit dans une liste.
 pub const URL_BAR_METHOD_SUFFIX: &str = " ▾  ";
@@ -767,6 +759,7 @@ pub fn request_name(request: &RequestNode) -> String {
 pub fn request_text_and_fields(
     request: &RequestNode,
     session: Option<&EditSession>,
+    tab: RequestTab,
 ) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     let view = &request.view;
     // En session, URL, en-têtes et paramètres viennent de l'aperçu des
@@ -774,141 +767,258 @@ pub fn request_text_and_fields(
     let shown = session.map_or(view, |s| &s.preview);
     let mut field_lines = Vec::new();
     let mut boxes = Vec::new();
-    let node_name = request_name(request);
-    let mut lines = vec![
-        title(node_name),
-        field("Chemin", request.path.display().to_string()),
-        Line::default(),
-    ];
+    let mut lines = Vec::new();
 
-    // Champ Méthode sur sa propre ligne (`add-method-editing`) : partager
-    // la ligne avec l'URL empêcherait de résoudre un clic entre les deux
-    // champs, `field_at_line` (mouse-support) ne connaissant que la ligne,
-    // jamais la colonne.
     // Hors édition, méthode et URL sont dans la barre d'URL ; pendant une
-    // session, elles reviennent ici pour être parcourues et modifiées
-    // comme les autres champs.
+    // session, elles reviennent en tête du détail, quel que soit
+    // l'onglet, pour être parcourues et modifiées comme les autres
+    // champs. Méthode sur sa propre ligne (`add-method-editing`) : un clic
+    // se résout à la ligne, jamais à la colonne.
     if session.is_some() {
         push_method_and_url(&mut lines, &mut field_lines, &mut boxes, view, session);
+        lines.push(Line::default());
     }
-    lines.push(field(
-        "Auth",
-        view.auth
-            .as_ref()
-            .map_or("non déclarée", auth_label)
-            .to_owned(),
-    ));
-    lines.push(Line::default());
 
-    boxed_section(
-        &mut lines,
-        &mut field_lines,
-        &mut boxes,
-        "En-têtes".to_owned(),
-        |lines, field_lines| {
-            editable_entries(
-                lines,
-                field_lines,
-                &shown.headers,
-                session,
-                EntrySection::Headers,
+    // Contenu de l'onglet affiché seulement (`RequestTab`).
+    match tab {
+        RequestTab::Params => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Paramètres de requête".to_owned(),
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        &shown.query_params,
+                        session,
+                        EntrySection::QueryParams,
+                    );
+                },
             );
-        },
-    );
-
-    boxed_section(
-        &mut lines,
-        &mut field_lines,
-        &mut boxes,
-        "Paramètres de requête".to_owned(),
-        |lines, field_lines| {
-            editable_entries(
-                lines,
-                field_lines,
-                &shown.query_params,
-                session,
-                EntrySection::QueryParams,
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Paramètres de chemin".to_owned(),
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        &shown.path_params,
+                        session,
+                        EntrySection::PathParams,
+                    );
+                },
             );
-        },
-    );
-
-    boxed_section(
-        &mut lines,
-        &mut field_lines,
-        &mut boxes,
-        "Paramètres de chemin".to_owned(),
-        |lines, field_lines| {
-            editable_entries(
-                lines,
-                field_lines,
-                &shown.path_params,
-                session,
-                EntrySection::PathParams,
-            );
-        },
-    );
-
-    lines.push(Line::default());
-    let corps_title = match &view.body {
-        Some(body) => format!("Corps ({})", body_label(&body.kind)),
-        None => "Corps".to_owned(),
-    };
-    boxed_section(
-        &mut lines,
-        &mut field_lines,
-        &mut boxes,
-        corps_title,
-        |lines, field_lines| match &view.body {
-            None => lines.push(Line::raw("  aucun")),
-            Some(body) => match &body.content {
-                BodyContent::Text(text) => {
-                    let field = EditableField::BodyText;
-                    let is_cursor = is_field_cursor(session, &field);
-                    let is_editable = EditableField::list_for(view).contains(&field);
-                    let val = session.map_or(text.as_str(), |s| field_value(s, &field));
-                    let hscroll = value_hscroll(session, &field);
-                    let first = lines.len();
-                    for l in val.split('\n') {
-                        let (l, _) = skip_columns(l, hscroll);
-                        let mut line = Line::raw(format!("  {l}"));
-                        if is_editable {
-                            line = tint_line(line, theme::EDITABLE_BODY);
+        }
+        RequestTab::Body => {
+            let corps_title = match &view.body {
+                Some(body) => format!("Corps ({})", body_label(&body.kind)),
+                None => "Corps".to_owned(),
+            };
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                corps_title,
+                |lines, field_lines| match &view.body {
+                    None => lines.push(Line::raw("  aucun")),
+                    Some(body) => match &body.content {
+                        BodyContent::Text(text) => {
+                            let field = EditableField::BodyText;
+                            let is_cursor = is_field_cursor(session, &field);
+                            let is_editable = EditableField::list_for(view).contains(&field);
+                            let val = session.map_or(text.as_str(), |s| field_value(s, &field));
+                            let hscroll = value_hscroll(session, &field);
+                            let first = lines.len();
+                            for l in val.split('\n') {
+                                let (l, _) = skip_columns(l, hscroll);
+                                let mut line = Line::raw(format!("  {l}"));
+                                if is_editable {
+                                    line = tint_line(line, theme::EDITABLE_BODY);
+                                }
+                                if is_cursor {
+                                    line = tint_line(line, FIELD_CURSOR_STYLE);
+                                }
+                                lines.push(line);
+                            }
+                            if is_editable {
+                                field_lines.push(FieldLine {
+                                    field,
+                                    line: first,
+                                    count: lines.len() - first,
+                                    prefix_width: 2,
+                                });
+                            }
                         }
-                        if is_cursor {
-                            line = tint_line(line, FIELD_CURSOR_STYLE);
-                        }
-                        lines.push(line);
-                    }
-                    if is_editable {
-                        field_lines.push(FieldLine {
-                            field,
-                            line: first,
-                            count: lines.len() - first,
-                            prefix_width: 2,
-                        });
-                    }
-                }
-                BodyContent::Entries(values) => entries(lines, values),
-                BodyContent::Missing => lines.push(Line::raw("  bloc absent")),
-            },
-        },
-    );
-
-    lines.push(Line::default());
-    lines.push(field(
-        "Script pré-requête",
-        yes_no(view.has_pre_request_script),
-    ));
-    lines.push(field(
-        "Script post-réponse",
-        yes_no(view.has_post_response_script),
-    ));
-    lines.push(field("Tests", yes_no(view.has_tests)));
-    lines.push(field("Assertions", yes_no(view.has_assert)));
-    if !view.assertions.is_empty() {
-        entries(&mut lines, &view.assertions);
+                        BodyContent::Entries(values) => entries(lines, values),
+                        BodyContent::Missing => lines.push(Line::raw("  bloc absent")),
+                    },
+                },
+            );
+        }
+        RequestTab::Headers => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "En-têtes".to_owned(),
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        &shown.headers,
+                        session,
+                        EntrySection::Headers,
+                    );
+                },
+            );
+        }
+        RequestTab::Auth => lines.push(field(
+            "Auth",
+            view.auth
+                .as_ref()
+                .map_or("non déclarée", auth_label)
+                .to_owned(),
+        )),
+        RequestTab::Script => {
+            lines.push(field(
+                "Script pré-requête",
+                yes_no(view.has_pre_request_script),
+            ));
+            lines.push(field(
+                "Script post-réponse",
+                yes_no(view.has_post_response_script),
+            ));
+        }
+        RequestTab::Assert => {
+            lines.push(field("Assertions", yes_no(view.has_assert)));
+            if !view.assertions.is_empty() {
+                entries(&mut lines, &view.assertions);
+            }
+        }
+        RequestTab::Tests => lines.push(field("Tests", yes_no(view.has_tests))),
     }
     (Text::from(lines), field_lines, boxes)
+}
+
+/// Vrai si l'onglet `tab` n'a rien de déclaré pour cette requête : il est
+/// alors grisé dans la barre d'onglets.
+pub fn request_tab_is_empty(view: &crate::collection::RequestView, tab: RequestTab) -> bool {
+    match tab {
+        RequestTab::Params => view.query_params.is_empty() && view.path_params.is_empty(),
+        RequestTab::Body => view.body.is_none(),
+        RequestTab::Headers => view.headers.is_empty(),
+        RequestTab::Auth => view.auth.is_none(),
+        RequestTab::Script => !view.has_pre_request_script && !view.has_post_response_script,
+        RequestTab::Assert => !view.has_assert && view.assertions.is_empty(),
+        RequestTab::Tests => !view.has_tests,
+    }
+}
+
+/// Disposition de la barre d'onglets du détail dans `width` colonnes (la
+/// bordure haute sans ses coins) : espacement de deux colonnes, réduit à
+/// une si besoin ; si la barre ne tient toujours pas, elle défile pour
+/// garder l'onglet affiché visible, `‹`/`›` signalant les onglets cachés.
+/// Renvoie chaque onglet visible avec sa colonne, et les marques.
+struct TabLayout {
+    tabs: Vec<(RequestTab, usize)>,
+    gap: usize,
+    hidden_before: bool,
+    hidden_after: bool,
+}
+
+fn request_tab_layout(shown: RequestTab, width: u16) -> TabLayout {
+    let width = usize::from(width);
+    let label_width = |tab: RequestTab| Line::raw(tab.label()).width();
+    let total = |tabs: &[RequestTab], gap: usize| {
+        tabs.iter().map(|tab| label_width(*tab)).sum::<usize>()
+            + gap * tabs.len().saturating_sub(1)
+            + 2
+    };
+    let all = RequestTab::ALL;
+    let gap = if total(&all, 2) <= width { 2 } else { 1 };
+    // Fenêtre [first, last] : la plus longue qui contient l'onglet
+    // affiché et tient avec ses marques.
+    let shown_index = all.iter().position(|tab| *tab == shown).unwrap_or(0);
+    let fits = |first: usize, last: usize| {
+        let marks = usize::from(first > 0) * 2 + usize::from(last + 1 < all.len()) * 2;
+        total(&all[first..=last], gap) + marks <= width
+    };
+    let (mut first, mut last) = (0, all.len() - 1);
+    while !fits(first, last) && first < last {
+        // Retire en priorité du côté le plus éloigné de l'onglet affiché.
+        if last - shown_index >= shown_index - first && last > shown_index {
+            last -= 1;
+        } else if first < shown_index {
+            first += 1;
+        } else {
+            last -= 1;
+        }
+    }
+    let hidden_before = first > 0;
+    let mut x = 1 + if hidden_before { 2 } else { 0 };
+    let mut tabs = Vec::new();
+    for (offset, tab) in all[first..=last].iter().enumerate() {
+        if offset > 0 {
+            x += gap;
+        }
+        tabs.push((*tab, x));
+        x += label_width(*tab);
+    }
+    TabLayout {
+        tabs,
+        gap,
+        hidden_before,
+        hidden_after: last + 1 < all.len(),
+    }
+}
+
+/// Barre d'onglets du détail, posée sur sa bordure haute large de `width`
+/// colonnes (coins exclus) : l'onglet affiché clair et souligné, les
+/// autres en gris, les vides atténués.
+pub fn request_tab_bar(
+    view: &crate::collection::RequestView,
+    shown: RequestTab,
+    width: u16,
+) -> Line<'static> {
+    let layout = request_tab_layout(shown, width);
+    let mut spans = vec![Span::raw(" ")];
+    if layout.hidden_before {
+        spans.push(Span::styled("‹ ", theme::PANEL_TITLE));
+    }
+    for (index, (tab, _)) in layout.tabs.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" ".repeat(layout.gap)));
+        }
+        let style = if *tab == shown {
+            theme::ACTIVE_TAB
+        } else if request_tab_is_empty(view, *tab) {
+            theme::BORDER
+        } else {
+            theme::PANEL_TITLE
+        };
+        spans.push(Span::styled(tab.label(), style));
+    }
+    if layout.hidden_after {
+        spans.push(Span::styled(" ›", theme::PANEL_TITLE));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// Onglet sous la colonne `offset` de la bordure haute (comptée depuis
+/// son coin gauche), pour la même disposition que [`request_tab_bar`] ;
+/// `None` sur un espace ou une marque.
+pub fn request_tab_at(shown: RequestTab, width: u16, offset: u16) -> Option<RequestTab> {
+    let offset = usize::from(offset);
+    request_tab_layout(shown, width)
+        .tabs
+        .into_iter()
+        .find(|(tab, x)| (*x..*x + Line::raw(tab.label()).width()).contains(&offset))
+        .map(|(tab, _)| tab)
 }
 
 /// Champ éditable affiché à la ligne logique `line` du détail de la
@@ -919,7 +1029,7 @@ pub fn field_at_line(model: &Model, line: u16) -> Option<EditableField> {
         return None;
     };
     let session = model.editing.as_ref().filter(|s| s.path == request.path);
-    let (_, fields, _) = request_text_and_fields(request, session);
+    let (_, fields, _) = request_text_and_fields(request, session, model.shown_request_tab());
     let line = usize::from(line);
     fields
         .into_iter()
@@ -933,12 +1043,13 @@ pub fn field_at_line(model: &Model, line: u16) -> Option<EditableField> {
 pub fn cursor_position_in_detail(
     request: &RequestNode,
     session: &EditSession,
+    tab: RequestTab,
 ) -> Option<(usize, usize)> {
     let EditState::Input(input) = &session.state else {
         return None;
     };
     let field = session.current_field()?;
-    let (_, field_lines, _) = request_text_and_fields(request, Some(session));
+    let (_, field_lines, _) = request_text_and_fields(request, Some(session), tab);
     let location = field_lines.iter().find(|l| l.field == field)?;
     let (line, _) = input.cursor_line_col();
     let before = input.text_before_cursor_on_line();
@@ -1444,10 +1555,25 @@ mod tests {
             .join("\n")
     }
 
+    /// Texte du détail sur l'onglet `tab`.
+    fn detail_text_on(model: &mut crate::app::model::Model, tab: RequestTab) -> Text<'static> {
+        model.request_tab = tab;
+        detail_text(model)
+    }
+
+    /// Texte du détail de `path`, tous onglets mis bout à bout dans
+    /// l'ordre des onglets.
     fn detail_of(path: &str) -> String {
         let mut model = loaded_model((100, 30));
         select(&mut model, path);
-        plain(&detail_text(&model))
+        RequestTab::ALL
+            .into_iter()
+            .map(|tab| {
+                model.request_tab = tab;
+                plain(&detail_text(&model))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Colonne du premier caractère de `needle` sur la ligne d'écran `y`,
@@ -1487,6 +1613,7 @@ mod tests {
     fn title_border_and_label_styles_are_all_distinct() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
+        model.request_tab = RequestTab::Headers;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
         terminal
@@ -1543,8 +1670,12 @@ mod tests {
         let Some(TreeNode::Request(request)) = model.selected_node() else {
             panic!("requête attendue");
         };
-        let position = cursor_position_in_detail(request, model.editing.as_ref().expect("session"))
-            .expect("position");
+        let position = cursor_position_in_detail(
+            request,
+            model.editing.as_ref().expect("session"),
+            model.shown_request_tab(),
+        )
+        .expect("position");
         update(model, Message::CancelInput);
         position
     }
@@ -1566,6 +1697,7 @@ mod tests {
 
         let mut model = loaded_model((300, 40));
         session_on(&mut model, "post-json.bru");
+        model.request_tab = RequestTab::Headers;
         let text = detail_text(&model);
         // URL : sur sa propre ligne (`add-method-editing`), curseur juste
         // après le libellé.
@@ -1594,6 +1726,8 @@ mod tests {
                 InputKey::Right,
             ],
         );
+        // Le corps est dans l'onglet Corps, que la session affiche.
+        let text = detail_text_on(&mut model, RequestTab::Body);
         assert_eq!(line, text_line(&text, "\"a\": {"));
         assert_eq!(col, 3);
 
@@ -1616,6 +1750,7 @@ mod tests {
     fn header_key_style_differs_from_value_style_without_session() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
+        model.request_tab = RequestTab::Headers;
         let text = detail_text(&model);
         let line = text
             .lines
@@ -1638,6 +1773,7 @@ mod tests {
     fn disabled_header_key_style_differs_from_value_style_in_session() {
         let mut model = loaded_model((100, 30));
         session_on(&mut model, "scripted.bru");
+        model.request_tab = RequestTab::Headers;
         let text = detail_text(&model);
         let line = text
             .lines
@@ -1706,6 +1842,7 @@ mod tests {
     fn editable_body_lines_get_the_editable_body_background() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
+        model.request_tab = RequestTab::Body;
         let text = detail_text(&model);
         let line = text
             .lines
@@ -1722,6 +1859,7 @@ mod tests {
     fn request_without_body_has_no_editable_body_background() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
+        model.request_tab = RequestTab::Body;
         let text = detail_text(&model);
         assert!(
             text.lines.iter().all(|l| l
@@ -1738,15 +1876,66 @@ mod tests {
         assert_eq!(concatenated(&text.lines[corps_index + 1]), "  aucun");
     }
 
-    /// Garde-fou : chaque boîte de section ajoute 2 lignes de bordure par
-    /// rapport à l'ancienne ligne de titre unique
-    /// (`add-boxed-detail-sections`) ; hors édition, Méthode et URL sont
-    /// dans la barre d'URL, pas dans le détail.
+    /// Garde-fou : le détail n'affiche que l'onglet choisi ; chaque boîte
+    /// de section ajoute 2 lignes de bordure (`add-boxed-detail-sections`) ;
+    /// hors édition, Méthode et URL sont dans la barre d'URL.
     #[test]
-    fn request_detail_line_count_is_unchanged() {
+    fn request_detail_shows_only_the_chosen_tab() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
-        assert_eq!(detail_text(&model).lines.len(), 30);
+        // Params : deux boîtes vides (bordures + « aucun »).
+        assert_eq!(detail_text(&model).lines.len(), 6);
+        model.request_tab = RequestTab::Headers;
+        let headers = plain(&detail_text(&model));
+        assert!(
+            headers.contains("Content-Type: application/json"),
+            "{headers}"
+        );
+        assert!(!headers.contains("Paramètres"), "{headers}");
+        model.request_tab = RequestTab::Auth;
+        assert_eq!(detail_text(&model).lines.len(), 1);
+    }
+
+    /// Barre d'onglets : onglet affiché en `ACTIVE_TAB`, onglets vides
+    /// atténués ; le clic se résout au libellé.
+    #[test]
+    fn request_tab_bar_marks_shown_and_empty_tabs() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        let bar = request_tab_bar(&request.view, RequestTab::Auth, 80);
+        let style_of = |label: &str| {
+            bar.spans
+                .iter()
+                .find(|s| s.content == label)
+                .map(|s| s.style)
+                .expect("onglet présent")
+        };
+        assert_eq!(style_of("Auth"), theme::ACTIVE_TAB);
+        assert_eq!(style_of("Corps"), theme::BORDER, "pas de corps : atténué");
+        assert_eq!(
+            request_tab_at(RequestTab::Auth, 80, 1),
+            Some(RequestTab::Params)
+        );
+        assert_eq!(request_tab_at(RequestTab::Auth, 80, 7), None, "espace");
+        assert_eq!(
+            request_tab_at(RequestTab::Auth, 80, 9),
+            Some(RequestTab::Body)
+        );
+
+        // Étroit : l'onglet affiché reste visible, les autres défilent.
+        for shown in RequestTab::ALL {
+            for width in [20u16, 30, 46] {
+                let bar = request_tab_bar(&request.view, shown, width);
+                assert!(bar.width() <= usize::from(width), "{shown:?} {width}");
+                assert!(
+                    bar.spans.iter().any(|s| s.content == shown.label()),
+                    "{shown:?} {width}"
+                );
+            }
+        }
     }
 
     /// Barre d'URL : méthode, flèche, puis l'URL avec ses variables
@@ -1787,7 +1976,6 @@ mod tests {
             "Content-Type: application/json",
             "Corps (json)",
             "\"s\": \"}\"",
-            "Chemin : post-json.bru",
         ] {
             assert!(text.contains(expected), "`{expected}` absent :\n{text}");
         }
@@ -2249,12 +2437,14 @@ mod tests {
         let Some(TreeNode::Request(request)) = model.selected_node() else {
             panic!("requête attendue");
         };
-        let (text, fields, _) = request_text_and_fields(request, None);
         for section in [
             EntrySection::Headers,
             EntrySection::QueryParams,
             EntrySection::PathParams,
         ] {
+            // Chaque section est dans son onglet.
+            let tab = RequestTab::of_field(EditableField::AddRow(section)).expect("onglet");
+            let (text, fields, _) = request_text_and_fields(request, None, tab);
             let field_line = fields
                 .iter()
                 .find(|fl| fl.field == EditableField::AddRow(section))

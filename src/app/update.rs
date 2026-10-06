@@ -11,8 +11,8 @@ use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
     CampaignFailure, CampaignSummary, CollectionState, DetailSelection, Drag, DragPanel,
     EditSession, EditState, EditableField, EnvironmentEditSession, EnvironmentEditState, Exit,
-    Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, ResponseTab, SecretError, SecretInput,
-    StatusMessage, all_rows, environment_name_at, field_enabled, field_value,
+    Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, RequestTab, ResponseTab, SecretError,
+    SecretInput, StatusMessage, all_rows, environment_name_at, field_enabled, field_value,
     field_value_committed, secret_env_vars, secret_lookups, secret_rows, section_entries,
     selected_response_body, tree_node_at, visible_rows,
 };
@@ -93,6 +93,17 @@ pub enum Command {
 
 /// Applique un message au modèle.
 pub fn update(model: &mut Model, message: Message) -> Command {
+    let command = apply(model, message);
+    // Pendant une session d'édition, l'onglet affiché du détail suit le
+    // champ sous le curseur : il devient l'onglet choisi, pour que le
+    // détail ne saute pas d'onglet à la fin de la session.
+    if model.editing.is_some() {
+        model.request_tab = model.shown_request_tab();
+    }
+    command
+}
+
+fn apply(model: &mut Model, message: Message) -> Command {
     // Un statut (copie, campagne terminée…) masque le rappel des touches :
     // il ne dure que jusqu'à l'action suivante de l'utilisateur. Le
     // traitement du message peut ensuite en poser un nouveau.
@@ -713,6 +724,12 @@ pub fn update(model: &mut Model, message: Message) -> Command {
                         Message::Up => move_method_picker(model, -1),
                         Message::Down => move_method_picker(model, 1),
                         _ => {}
+                    },
+                    // Hors session : ←/→ changent d'onglet de requête.
+                    None => match navigation {
+                        Message::Left => select_request_tab(model, model.request_tab.previous()),
+                        Message::Right => select_request_tab(model, model.request_tab.next()),
+                        other => scroll_detail(model, other),
                     },
                     _ => scroll_detail(model, navigation),
                 },
@@ -1906,7 +1923,8 @@ fn scroll_edit_into_view(model: &mut Model) {
     let Some(field) = session.current_field() else {
         return;
     };
-    let (_, field_lines, _) = request_text_and_fields(request, Some(session));
+    let (_, field_lines, _) =
+        request_text_and_fields(request, Some(session), model.shown_request_tab());
     let Some(location) = field_lines.iter().find(|l| l.field == field) else {
         return;
     };
@@ -2317,6 +2335,18 @@ fn reset_response_tab_view_state(model: &mut Model) {
     model.response_scroll = 0;
     model.response_match = None;
     model.response_selection = None;
+}
+
+/// Affiche l'onglet `tab` du détail d'une requête, défilement, sélection
+/// et correspondance de recherche remis à zéro comme pour la réponse.
+fn select_request_tab(model: &mut Model, tab: RequestTab) {
+    if model.request_tab == tab {
+        return;
+    }
+    model.request_tab = tab;
+    model.detail_scroll = 0;
+    model.detail_match = None;
+    model.detail_selection = None;
 }
 
 fn previous_response_tab(model: &mut Model) {
@@ -3025,7 +3055,7 @@ fn input_field_lines(model: &Model) -> Option<std::ops::Range<usize>> {
         return None;
     }
     let field = session.current_field()?;
-    let (_, fields, _) = request_text_and_fields(request, Some(session));
+    let (_, fields, _) = request_text_and_fields(request, Some(session), model.shown_request_tab());
     let location = fields.into_iter().find(|l| l.field == field)?;
     Some(location.line..location.line + location.count)
 }
@@ -3119,6 +3149,13 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
         Hit::RunButton => {}
         // Clic sur la méthode ou l'URL : édition directe de ce champ.
         Hit::UrlBar { field } => begin_input_at(model, field),
+        // Clic sur un onglet du détail, hors session d'édition.
+        Hit::RequestTab(tab) => {
+            model.focus = Focus::Detail;
+            if model.editing.is_none() {
+                select_request_tab(model, tab);
+            }
+        }
     }
 }
 
@@ -3341,7 +3378,7 @@ fn mouse_wheel(model: &mut Model, input: MouseInput, up: bool) {
                 scroll_response(model, step());
             }
         }
-        Hit::RunButton | Hit::UrlBar { .. } => {}
+        Hit::RunButton | Hit::UrlBar { .. } | Hit::RequestTab(_) => {}
     }
 }
 
@@ -3755,10 +3792,50 @@ mod tests {
         assert_eq!(model.detail_scroll, 0);
     }
 
+    /// ←/→ changent l'onglet du détail hors session ; en session, l'onglet
+    /// affiché suit le champ sous le curseur et le reste après la session.
+    #[test]
+    fn request_tabs_follow_arrows_and_the_edit_cursor() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+        update(&mut model, Message::NextFocus);
+        assert_eq!(model.focus, Focus::Detail);
+        assert_eq!(model.shown_request_tab(), RequestTab::Params);
+        update(&mut model, Message::Right);
+        assert_eq!(model.shown_request_tab(), RequestTab::Body);
+        update(&mut model, Message::Left);
+        update(&mut model, Message::Left);
+        assert_eq!(model.shown_request_tab(), RequestTab::Tests);
+
+        // Session : Méthode puis URL gardent l'onglet choisi ; le premier
+        // en-tête affiche l'onglet En-têtes.
+        update(&mut model, Message::StartEdit);
+        assert_eq!(model.shown_request_tab(), RequestTab::Tests);
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model.editing.as_ref().and_then(EditSession::current_field),
+            Some(EditableField::HeaderValue(0))
+        );
+        assert_eq!(model.shown_request_tab(), RequestTab::Headers);
+        assert!(
+            plain_lines(&model)
+                .iter()
+                .any(|l| l.contains("Content-Type"))
+        );
+        // ←/→ ne changent pas d'onglet pendant la session.
+        update(&mut model, Message::Right);
+        assert_eq!(model.shown_request_tab(), RequestTab::Headers);
+        update(&mut model, Message::FocusTree);
+        assert!(model.editing.is_none());
+        assert_eq!(model.request_tab, RequestTab::Headers);
+    }
+
     #[test]
     fn last_detail_line_is_reachable() {
         let mut model = loaded_model((100, 12));
         select(&mut model, "scripted.bru");
+        model.request_tab = RequestTab::Assert;
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::End);
         let lines = crate::app::test_support::render(&model, 100, 12);
@@ -5066,6 +5143,8 @@ mod tests {
         // ce qui force un vrai défilement pour rendre la ligne visible.
         let mut model = loaded_model((100, 12));
         select(&mut model, "scripted.bru");
+        // L'assertion cherchée est dans l'onglet Assert.
+        model.request_tab = RequestTab::Assert;
         update(&mut model, Message::NextFocus);
         assert_eq!(model.focus, Focus::Detail);
         let expected_line = plain_line_index_containing(&model, "res.body.ok: isTrue");
@@ -6646,7 +6725,8 @@ mod tests {
         let Some(TreeNode::Request(request)) = model.selected_node() else {
             panic!("requête attendue");
         };
-        let (_, lines, _) = request_text_and_fields(request, model.editing.as_ref());
+        let (_, lines, _) =
+            request_text_and_fields(request, model.editing.as_ref(), model.shown_request_tab());
         let body = lines
             .iter()
             .find(|l| l.field == EditableField::BodyText)
@@ -8326,12 +8406,25 @@ mod mouse_tests {
             .unwrap_or_else(|| panic!("ligne {line} non visible"))
     }
 
-    fn field_line(model: &Model, field: EditableField) -> u16 {
+    /// Ligne logique d'un champ dans le détail, après avoir affiché son
+    /// onglet (hors session ; en session, l'onglet suit le curseur).
+    fn field_line(model: &mut Model, field: EditableField) -> u16 {
+        // L'onglet choisi n'est affiché que hors session, ou en session
+        // quand le curseur est sur la méthode ou l'URL.
+        let chosen_is_shown = model
+            .editing
+            .as_ref()
+            .and_then(EditSession::current_field)
+            .and_then(RequestTab::of_field)
+            .is_none();
+        if chosen_is_shown && let Some(tab) = RequestTab::of_field(field) {
+            model.request_tab = tab;
+        }
         let Some(TreeNode::Request(request)) = model.selected_node() else {
             panic!("requête attendue");
         };
         let session = model.editing.as_ref().filter(|s| s.path == request.path);
-        let (_, fields, _) = request_text_and_fields(request, session);
+        let (_, fields, _) = request_text_and_fields(request, session, model.shown_request_tab());
         let location = fields
             .into_iter()
             .find(|l| l.field == field)
@@ -8342,7 +8435,7 @@ mod mouse_tests {
     /// Position écran d'un champ : hors session, Méthode et URL sont dans
     /// la barre d'URL ; les autres champs, et tous pendant une session,
     /// dans le détail.
-    fn field_point(model: &Model, field: EditableField) -> (u16, u16) {
+    fn field_point(model: &mut Model, field: EditableField) -> (u16, u16) {
         if model.editing.is_none() && matches!(field, EditableField::Method | EditableField::Url) {
             let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
             let bar = inner(areas.url_bar);
@@ -8361,7 +8454,8 @@ mod mouse_tests {
                 _ => (url_x + 1, bar.y),
             };
         }
-        line_point(model, true, field_line(model, field))
+        let line = field_line(model, field);
+        line_point(model, true, line)
     }
 
     fn input_text(model: &Model) -> Option<String> {
@@ -8630,7 +8724,7 @@ mod mouse_tests {
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Left));
         let before = model.editing.clone().map(|s| s.state);
-        let point = field_point(&model, EditableField::Url);
+        let point = field_point(&mut model, EditableField::Url);
         click(&mut model, point);
         event(&mut model, MouseKind::Press, point);
         event(&mut model, MouseKind::Drag, (point.0, point.1 + 2));
@@ -8732,7 +8826,10 @@ mod mouse_tests {
 
     #[test]
     fn drag_selects_lines_and_keeps_fixed_bounds() {
-        let mut model = model_on("scripted.bru", (140, 14));
+        // Onglet Corps de post-json : assez de lignes pour défiler.
+        let mut model = model_on("post-json.bru", (140, 11));
+        model.request_tab = RequestTab::Body;
+        assert!(detail_max_scroll(&model) >= 3, "détail assez long");
         let start = line_point(&model, true, 1);
         let end = line_point(&model, true, 3);
         event(&mut model, MouseKind::Press, start);
@@ -8793,7 +8890,7 @@ mod mouse_tests {
     #[test]
     fn drag_started_on_a_field_opens_no_session() {
         let mut model = model_on("post-json.bru", (140, 40));
-        let url = field_line(&model, EditableField::HeaderValue(0));
+        let url = field_line(&mut model, EditableField::HeaderValue(0));
         let start = line_point(&model, true, url);
         let end = line_point(&model, true, url + 1);
         event(&mut model, MouseKind::Press, start);
@@ -8806,7 +8903,7 @@ mod mouse_tests {
     #[test]
     fn orphan_release_does_nothing() {
         let mut model = model_on("post-json.bru", (140, 40));
-        let point = field_point(&model, EditableField::Url);
+        let point = field_point(&mut model, EditableField::Url);
         event(&mut model, MouseKind::Release, point);
         assert!(model.editing.is_none());
         assert_eq!(model.focus, Focus::Tree);
@@ -8817,7 +8914,7 @@ mod mouse_tests {
     #[test]
     fn click_on_the_url_opens_the_session_in_input() {
         let mut model = model_on("post-json.bru", (140, 40));
-        let point = field_point(&model, EditableField::Url);
+        let point = field_point(&mut model, EditableField::Url);
         click(&mut model, point);
         assert_eq!(model.focus, Focus::Detail);
         assert_eq!(current_field(&model), Some(EditableField::Url));
@@ -8837,7 +8934,7 @@ mod mouse_tests {
     #[test]
     fn click_elsewhere_closes_the_method_picker_without_leaving_the_mouse_inert() {
         let mut model = model_on("post-json.bru", (140, 40));
-        let method_point = field_point(&model, EditableField::Method);
+        let method_point = field_point(&mut model, EditableField::Method);
         click(&mut model, method_point);
         assert!(matches!(
             model.editing.as_ref().expect("session").state,
@@ -8861,7 +8958,7 @@ mod mouse_tests {
         );
 
         // Second clic, sur l'URL : la souris n'est pas restée bloquée.
-        let url_point = field_point(&model, EditableField::Url);
+        let url_point = field_point(&mut model, EditableField::Url);
         click(&mut model, url_point);
         assert_eq!(current_field(&model), Some(EditableField::Url));
         assert_eq!(
@@ -8870,10 +8967,22 @@ mod mouse_tests {
         );
     }
 
+    /// Clic sur un onglet de la bordure haute du détail : l'affiche et
+    /// donne le focus au détail.
+    #[test]
+    fn click_on_a_request_tab_shows_it() {
+        let mut model = model_on("post-json.bru", (100, 30));
+        let detail = layout_for(model.size, None).expect("taille").detail;
+        // « Corps » commence à la colonne 9 de la barre d'onglets.
+        click(&mut model, (detail.x + 10, detail.y));
+        assert_eq!(model.focus, Focus::Detail);
+        assert_eq!(model.request_tab, RequestTab::Body);
+    }
+
     #[test]
     fn click_on_a_field_from_field_select_and_from_another_input() {
         let mut model = session_on_post_json();
-        let point = field_point(&model, EditableField::HeaderValue(0));
+        let point = field_point(&mut model, EditableField::HeaderValue(0));
         click(&mut model, point);
         assert_eq!(current_field(&model), Some(EditableField::HeaderValue(0)));
         assert_eq!(input_text(&model).as_deref(), Some("application/json"));
@@ -8883,7 +8992,7 @@ mod mouse_tests {
         move_to(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('!')));
-        let point = field_point(&model, EditableField::HeaderValue(0));
+        let point = field_point(&mut model, EditableField::HeaderValue(0));
         click(&mut model, point);
         let session = model.editing.as_ref().expect("session");
         assert!(session.dirty);
@@ -8899,7 +9008,7 @@ mod mouse_tests {
     #[test]
     fn click_on_the_body_and_on_non_field_lines() {
         let mut model = model_on("post-json.bru", (140, 40));
-        let body = field_line(&model, EditableField::BodyText);
+        let body = field_line(&mut model, EditableField::BodyText);
         let point = line_point(&model, true, body + 2);
         click(&mut model, point);
         assert_eq!(current_field(&model), Some(EditableField::BodyText));
@@ -8907,7 +9016,7 @@ mod mouse_tests {
 
         // Titre de section des en-têtes : focus seul.
         let mut model = model_on("post-json.bru", (140, 40));
-        let header = field_line(&model, EditableField::HeaderValue(0));
+        let header = field_line(&mut model, EditableField::HeaderValue(0));
         let point = line_point(&model, true, header - 1);
         click(&mut model, point);
         assert_eq!(model.focus, Focus::Detail);
@@ -8930,6 +9039,7 @@ mod mouse_tests {
         update(&mut model, Message::CollectionLoaded(BruLoader.load(&root)));
         model.mouse.capture = true;
         select(&mut model, "form-body.bru");
+        model.request_tab = RequestTab::Body;
         let lines = plain_lines(&model);
         let body = lines
             .iter()
@@ -8948,7 +9058,7 @@ mod mouse_tests {
     #[test]
     fn click_on_empty_section_row_without_session_starts_add() {
         let mut model = model_on("simple-get.bru", (140, 40));
-        let point = field_point(&model, EditableField::AddRow(EntrySection::Headers));
+        let point = field_point(&mut model, EditableField::AddRow(EntrySection::Headers));
         click(&mut model, point);
         assert_eq!(model.focus, Focus::Detail);
         let session = model.editing.as_ref().expect("session");
@@ -8973,7 +9083,7 @@ mod mouse_tests {
             EntrySection::PathParams,
         ] {
             let mut model = model_on("simple-get.bru", (140, 40));
-            let point = field_point(&model, EditableField::AddRow(section));
+            let point = field_point(&mut model, EditableField::AddRow(section));
             click(&mut model, point);
             assert_eq!(model.focus, Focus::Detail);
             let session = model.editing.as_ref().expect("session");
@@ -8992,7 +9102,7 @@ mod mouse_tests {
     #[test]
     fn click_under_existing_entry_without_session_only_focuses_detail() {
         let mut model = model_on("post-json.bru", (140, 40));
-        let header = field_line(&model, EditableField::HeaderValue(0));
+        let header = field_line(&mut model, EditableField::HeaderValue(0));
         let point = line_point(&model, true, header + 1);
         click(&mut model, point);
         assert_eq!(model.focus, Focus::Detail);

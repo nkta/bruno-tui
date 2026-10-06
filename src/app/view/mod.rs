@@ -279,7 +279,27 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     } else {
                         TITLE_DETAIL
                     };
-                    let detail_block = panel(title, model.focus == Focus::Detail);
+                    let mut detail_block = panel(title, model.focus == Focus::Detail);
+                    if let Some(TreeNode::Request(request)) = model.selected_node() {
+                        // Onglets de requête sur la bordure haute, comme
+                        // les onglets de Bruno bureau : ils remplacent le
+                        // titre « Détail ».
+                        let mut tabs = detail::request_tab_bar(
+                            &request.view,
+                            model.shown_request_tab(),
+                            areas.detail.width.saturating_sub(2),
+                        );
+                        if model.zoomed_panel() == Some(Focus::Detail) {
+                            tabs.spans
+                                .push(Span::styled("[plein écran — z] ", theme::PANEL_TITLE));
+                        }
+                        let border = if model.focus == Focus::Detail {
+                            theme::FOCUS
+                        } else {
+                            theme::BORDER
+                        };
+                        detail_block = theme::bordered().title(tabs).border_style(border);
+                    }
                     match model.selected_node() {
                         Some(TreeNode::Request(_)) => {
                             render_boxed_detail(model, frame, areas.detail, detail_block);
@@ -552,7 +572,9 @@ fn render_insert_cursor(model: &Model, frame: &mut Frame, detail_area: Rect) {
     if req.path != session.path {
         return;
     }
-    let Some((line_index, col_index)) = detail::cursor_position_in_detail(req, session) else {
+    let Some((line_index, col_index)) =
+        detail::cursor_position_in_detail(req, session, model.shown_request_tab())
+    else {
         return;
     };
     let inner_area = inner(detail_area);
@@ -834,7 +856,7 @@ fn status_line(model: &Model) -> String {
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
-            "↑↓ défiler  Début/Fin  Entrée éditer  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter  z plein écran"
+            "↑↓ défiler  ←→ onglet  Entrée éditer  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter  z plein écran"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Response) => {
@@ -1406,6 +1428,8 @@ mod tests {
     fn selection_and_match_are_highlighted_distinctly_on_screen() {
         let mut model = loaded_model((100, 12));
         select(&mut model, "scripted.bru");
+        // L'assertion cherchée est dans l'onglet Assert.
+        model.request_tab = crate::app::model::RequestTab::Assert;
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartSearch);
         for c in "res.body.ok".chars() {
@@ -1463,10 +1487,10 @@ mod tests {
         let inner_area = inner(detail_area);
         let buffer = terminal.backend().buffer();
 
-        // Ligne 4 du détail = ligne URL, la méthode ayant sa propre ligne
+        // Ligne 1 du détail = ligne URL, la méthode ayant sa propre ligne
         // avant elle (`add-method-editing`) ; la valeur suit le libellé
         // « URL : » (6 colonnes).
-        let url_row = inner_area.y + 4;
+        let url_row = inner_area.y + 1;
         let url_cell = &buffer[(inner_area.x + 6, url_row)];
         assert!(
             url_cell.modifier.contains(Modifier::REVERSED),
@@ -1616,7 +1640,9 @@ mod tests {
         let next: String = (inner_area.x..inner_area.x + inner_area.width)
             .map(|x| buffer[(x, cursor.y + 1)].symbol())
             .collect();
-        assert!(next.contains("Auth"), "pas de retour à la ligne : {next}");
+        // Ligne suivante : la ligne vide qui sépare Méthode et URL de
+        // l'onglet, pas une suite de l'URL.
+        assert!(next.trim().is_empty(), "pas de retour à la ligne : {next}");
     }
 
     #[test]
@@ -1640,7 +1666,7 @@ mod tests {
 
         let detail_area = layout_for((100, 30), None).expect("layout").detail;
         let inner_area = inner(detail_area);
-        assert_eq!(cursor.y, inner_area.y + 4);
+        assert_eq!(cursor.y, inner_area.y + 1);
         assert!(cursor.x >= inner_area.x);
         assert!(cursor.x < inner_area.x + inner_area.width);
 
@@ -2445,7 +2471,6 @@ mod tests {
 
         update(&mut model, Message::Enter);
         let screen = render(&model, 240, 40).join("\n");
-        assert!(screen.contains("+ Ajouter un en-tête"), "{screen}");
         assert!(
             screen.contains("+ Ajouter un paramètre de requête"),
             "{screen}"
@@ -2454,6 +2479,9 @@ mod tests {
             screen.contains("+ Ajouter un paramètre de chemin"),
             "{screen}"
         );
+        model.request_tab = crate::app::model::RequestTab::Headers;
+        let screen = render(&model, 240, 40).join("\n");
+        assert!(screen.contains("+ Ajouter un en-tête"), "{screen}");
     }
 
     #[test]
@@ -2757,7 +2785,8 @@ mod tests {
         // Zoom Détail
         model.focus = Focus::Detail;
         let screen = render(&model, 100, 30).join("\n");
-        assert!(screen.contains("Détail [plein écran — z]"), "{screen}");
+        // Requête : les onglets remplacent le titre « Détail ».
+        assert!(screen.contains("Tests [plein écran — z]"), "{screen}");
         assert!(!screen.contains("Collection"), "{screen}");
         assert!(!screen.contains("Réponse"), "{screen}");
 

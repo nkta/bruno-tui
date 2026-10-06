@@ -71,6 +71,76 @@ impl ResponseTab {
     }
 }
 
+/// Onglet affiché du détail d'une requête, comme les onglets de requête
+/// de Bruno bureau. Pendant une session d'édition, l'onglet affiché suit
+/// le champ sous le curseur ([`Model::shown_request_tab`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RequestTab {
+    #[default]
+    Params,
+    Body,
+    Headers,
+    Auth,
+    Script,
+    Assert,
+    Tests,
+}
+
+impl RequestTab {
+    /// Tous les onglets, dans l'ordre d'affichage.
+    pub const ALL: [RequestTab; 7] = [
+        RequestTab::Params,
+        RequestTab::Body,
+        RequestTab::Headers,
+        RequestTab::Auth,
+        RequestTab::Script,
+        RequestTab::Assert,
+        RequestTab::Tests,
+    ];
+
+    /// Libellé de l'onglet.
+    pub fn label(self) -> &'static str {
+        match self {
+            RequestTab::Params => "Params",
+            RequestTab::Body => "Corps",
+            RequestTab::Headers => "En-têtes",
+            RequestTab::Auth => "Auth",
+            RequestTab::Script => "Script",
+            RequestTab::Assert => "Assert",
+            RequestTab::Tests => "Tests",
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    pub fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    pub fn previous(self) -> Self {
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    /// Onglet qui affiche `field` ; `None` pour la méthode et l'URL,
+    /// affichées en tête du détail quel que soit l'onglet.
+    pub fn of_field(field: EditableField) -> Option<Self> {
+        match field {
+            EditableField::Method | EditableField::Url => None,
+            EditableField::HeaderValue(_) | EditableField::AddRow(EntrySection::Headers) => {
+                Some(RequestTab::Headers)
+            }
+            EditableField::QueryParamValue(_)
+            | EditableField::PathParamValue(_)
+            | EditableField::AddRow(EntrySection::QueryParams | EntrySection::PathParams) => {
+                Some(RequestTab::Params)
+            }
+            EditableField::BodyText => Some(RequestTab::Body),
+        }
+    }
+}
+
 /// État du popup d'aide des raccourcis clavier (`help-popup`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HelpPopup {
@@ -756,6 +826,9 @@ pub struct Model {
     pub response_scroll: u16,
     /// Onglet actif du panneau Réponse.
     pub response_tab: ResponseTab,
+    /// Onglet choisi du détail d'une requête (voir
+    /// [`Model::shown_request_tab`] pour l'onglet réellement affiché).
+    pub request_tab: RequestTab,
     /// Taille du terminal (colonnes, lignes).
     pub size: (u16, u16),
     /// `Some` : la boucle doit s'arrêter.
@@ -918,6 +991,7 @@ impl Model {
             detail_scroll: 0,
             response_scroll: 0,
             response_tab: ResponseTab::Body,
+            request_tab: RequestTab::Params,
             size,
             exit: None,
             run: RunState::default(),
@@ -944,6 +1018,23 @@ impl Model {
             campaign_selected: 0,
             zoom: false,
         }
+    }
+
+    /// Onglet affiché du détail de la requête sélectionnée : pendant une
+    /// session d'édition sur cette requête, celui du champ sous le curseur
+    /// (la méthode et l'URL gardent l'onglet choisi) ; sinon l'onglet
+    /// choisi.
+    pub fn shown_request_tab(&self) -> RequestTab {
+        let session_tab = match self.selected_node() {
+            Some(TreeNode::Request(request)) => self
+                .editing
+                .as_ref()
+                .filter(|session| session.path == request.path)
+                .and_then(EditSession::current_field)
+                .and_then(RequestTab::of_field),
+            _ => None,
+        };
+        session_tab.unwrap_or(self.request_tab)
     }
 
     /// Panneau actuellement zoomé en plein écran s'il y en a un
