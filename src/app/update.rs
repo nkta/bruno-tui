@@ -25,7 +25,8 @@ use super::view::detail::{
 use super::view::hit::{DragRow, Hit, drag_row, hit_test};
 use super::view::{
     detail::{detail_text, response_text},
-    environment_edit_popup_area, help_max_scroll, help_popup_area, inner, layout_for,
+    environment_chip_area, environment_edit_popup_area, help_max_scroll, help_popup_area, inner,
+    layout_for, response_text_area,
 };
 use crate::collection::TreeNode;
 use crate::runner::report::ResponseStatus;
@@ -447,17 +448,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::ToggleEnvironmentPicker => {
-            match model.focus {
-                Focus::EnvironmentPicker => model.focus = Focus::Tree,
-                _ => {
-                    if let Some(collection) = model.loaded() {
-                        let index =
-                            environment_index_for(collection, model.current_environment.as_deref());
-                        model.environment_selected = index;
-                        model.focus = Focus::EnvironmentPicker;
-                    }
-                }
-            }
+            toggle_environment_picker(model);
             Command::None
         }
         Message::RunSelected if model.focus == Focus::Secrets => launch_pending_run(model),
@@ -2236,7 +2227,10 @@ fn response_max_scroll(model: &Model) -> u16 {
     let Some(areas) = layout_for(model.size, model.zoomed_panel()) else {
         return 0;
     };
-    max_scroll(response_line_count(model), inner(areas.response).height)
+    max_scroll(
+        response_line_count(model),
+        response_text_area(areas.response).height,
+    )
 }
 
 /// Dernière ligne visible du panneau de détail, à la position de
@@ -2259,7 +2253,7 @@ pub(crate) fn response_bottom_of_viewport(model: &Model) -> u16 {
     };
     viewport_bottom(
         model.response_scroll,
-        inner(areas.response).height,
+        response_text_area(areas.response).height,
         response_line_count(model),
     )
 }
@@ -2301,7 +2295,7 @@ fn scroll_detail(model: &mut Model, message: Message) {
 /// Même principe que [`scroll_detail`], pour la réponse.
 fn scroll_response(model: &mut Model, message: Message) {
     let page = layout_for(model.size, model.zoomed_panel())
-        .map_or(1, |areas| inner(areas.response).height.max(1));
+        .map_or(1, |areas| response_text_area(areas.response).height.max(1));
     let max = response_max_scroll(model);
     let scroll = model.response_scroll;
     model.response_scroll = match message {
@@ -3062,11 +3056,23 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
         environment_popup_mouse_press(model, input);
         return;
     }
-    if let Some(areas) = layout_for(model.size, model.zoomed_panel())
-        && let Some(index) = environment_panel_row_at(areas.environment, input)
-    {
-        environment_panel_mouse_press(model, index);
-        return;
+    if let Some(areas) = layout_for(model.size, model.zoomed_panel()) {
+        // Liste déroulante de l'en-tête : ouvre ou ferme le panneau
+        // Environnement, comme `E`.
+        if environment_chip_area(model, areas.title)
+            .is_some_and(|chip| chip.contains(Position::new(input.column, input.row)))
+        {
+            toggle_environment_picker(model);
+            return;
+        }
+        // Le panneau Environnement n'est cliquable que dessiné, donc
+        // ouvert (focus).
+        if model.focus == Focus::EnvironmentPicker
+            && let Some(index) = environment_panel_row_at(areas.environment, input)
+        {
+            environment_panel_mouse_press(model, index);
+            return;
+        }
     }
     // Cible calculée avant toute validation : elle correspond à l'écran
     // que l'utilisateur voyait (sans retour à la ligne pendant la saisie).
@@ -3122,6 +3128,21 @@ const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 /// Ligne de la liste du panneau Environnement sous `row`, ou `None` hors
 /// de la zone intérieure (résolution par position, sans tenir compte
 /// d'un éventuel défilement interne — design D6).
+/// `E` : ouvre le panneau Environnement sur l'environnement actif, ou le
+/// referme s'il est ouvert.
+fn toggle_environment_picker(model: &mut Model) {
+    match model.focus {
+        Focus::EnvironmentPicker => model.focus = Focus::Tree,
+        _ => {
+            if let Some(collection) = model.loaded() {
+                let index = environment_index_for(collection, model.current_environment.as_deref());
+                model.environment_selected = index;
+                model.focus = Focus::EnvironmentPicker;
+            }
+        }
+    }
+}
+
 fn environment_panel_row_at(area: Rect, input: MouseInput) -> Option<usize> {
     let inner_area = inner(area);
     if input.column < inner_area.x
@@ -8437,17 +8458,12 @@ mod mouse_tests {
     }
 
     #[test]
-    fn clicks_on_status_panel_title_and_status_bar_do_nothing() {
+    fn clicks_on_title_and_status_bar_do_nothing() {
         let mut model = runner_probe_model();
         model.mouse.capture = true;
         select(&mut model, "green.bru");
         let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
-        let status = areas.response_status;
-        for point in [
-            (status.x + 2, status.y + 1),
-            (1, areas.title.y),
-            (1, areas.status.y),
-        ] {
+        for point in [(1, areas.title.y), (1, areas.status.y)] {
             click(&mut model, point);
             event(&mut model, MouseKind::WheelDown, point);
             assert_eq!(model.focus, Focus::Tree);
@@ -8614,14 +8630,15 @@ mod mouse_tests {
         model.mouse.capture = true;
         model.size = (100, 11);
         select(&mut model, "green.bru");
-        assert!(response_max_scroll(&model) >= 3, "réponse assez longue");
-        let response = inner(
+        let max = response_max_scroll(&model);
+        assert!(max >= 1, "réponse assez longue");
+        let response = response_text_area(
             layout_for(model.size, model.zoomed_panel())
                 .expect("taille")
                 .response,
         );
         event(&mut model, MouseKind::WheelDown, (response.x, response.y));
-        assert_eq!(model.response_scroll, 3);
+        assert_eq!(model.response_scroll, 3.min(max));
         assert_eq!(model.focus, Focus::Tree);
         event(&mut model, MouseKind::WheelUp, (response.x, response.y));
         assert_eq!(model.response_scroll, 0);
@@ -8718,9 +8735,12 @@ mod mouse_tests {
     fn drag_beyond_the_panel_scrolls_and_extends() {
         let mut model = runner_probe_model();
         model.mouse.capture = true;
-        model.size = (100, 14);
+        model.size = (100, 11);
         select(&mut model, "green.bru");
-        let response = inner(
+        // Onglet Tests : assez de lignes pour défiler sur toute la hauteur.
+        model.response_tab = ResponseTab::Tests;
+        assert!(response_max_scroll(&model) >= 2, "réponse assez longue");
+        let response = response_text_area(
             layout_for(model.size, model.zoomed_panel())
                 .expect("taille")
                 .response,
@@ -9068,10 +9088,31 @@ mod mouse_tests {
         (area.x + 1, area.y + u16::try_from(row).expect("petit"))
     }
 
+    /// Modèle avec le panneau Environnement ouvert (surimpression).
     fn environment_model() -> Model {
         let mut model = loaded_model((100, 30));
         model.mouse.capture = true;
+        update(&mut model, Message::ToggleEnvironmentPicker);
         model
+    }
+
+    /// La liste déroulante de l'en-tête ouvre puis referme le panneau ;
+    /// fermé, le panneau n'intercepte aucun clic.
+    #[test]
+    fn header_chip_toggles_the_environment_panel() {
+        let mut model = loaded_model((100, 30));
+        model.mouse.capture = true;
+        let areas = layout_for(model.size, None).expect("taille");
+        let chip = crate::app::view::environment_chip_area(&model, areas.title).expect("liste");
+        let point = environment_panel_point(&model, 1);
+        click(&mut model, point);
+        assert_ne!(model.focus, Focus::EnvironmentPicker);
+        assert_eq!(model.current_environment, None);
+
+        click(&mut model, (chip.x + 1, chip.y));
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
+        click(&mut model, (chip.x + 1, chip.y));
+        assert_eq!(model.focus, Focus::Tree);
     }
 
     #[test]
@@ -9479,8 +9520,9 @@ mod mouse_tests {
         let zoomed_resp_max = response_max_scroll(&model);
         let zoomed_areas = layout_for(model.size, model.zoomed_panel()).expect("layout zoom");
 
-        // La hauteur de la réponse est plus grande en zoom qu'en disposition normale
-        assert!(zoomed_areas.response.height > normal_areas.response.height);
+        // La réponse est plus large en zoom qu'en disposition normale
+        // (elle a déjà toute la hauteur de la colonne).
+        assert!(zoomed_areas.response.width > normal_areas.response.width);
         // Donc le défilement maximal nécessaire est inférieur ou égal
         assert!(zoomed_resp_max <= normal_resp_max);
 

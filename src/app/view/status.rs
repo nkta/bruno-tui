@@ -1,4 +1,5 @@
-//! Contenu du panneau Statut (capacité `status-panel`).
+//! Résumé du statut de la réponse, affiché sur la bordure haute du
+//! panneau Réponse (capacité `status-panel`).
 //!
 //! Fonction pure dérivée du résultat conservé et de l'exécution en cours :
 //! aucune information qui n'a pas été rapportée par `bru` n'est inventée
@@ -11,7 +12,7 @@ use serde_json::Value;
 
 use super::theme;
 use super::tree::{FAILURE_MARK, SUCCESS_MARK};
-use crate::app::model::{ActiveRun, Model, RequestOutcome};
+use crate::app::model::{ActiveRun, Model};
 use crate::collection::TreeNode;
 use crate::runner::report::{RequestResult, ResponseStatus, ResultStatus};
 
@@ -114,14 +115,14 @@ pub fn run_concerns(active: &ActiveRun, path: &Path) -> bool {
     active.target == path || (active.recursive && path.starts_with(&active.target))
 }
 
-/// Lignes intérieures du panneau Statut : trois en forme complète, une
-/// en forme compacte.
-pub fn status_panel_lines(model: &Model, compact: bool) -> Vec<Line<'static>> {
+/// Résumé sur une ligne, à droite des onglets de la réponse comme dans
+/// Bruno bureau : statut coloré, temps, taille (si connue) et verdict ;
+/// indicateur « en cours » pendant une exécution ; vide sans résultat.
+pub fn status_summary(model: &Model) -> Line<'static> {
     let request_path = match model.selected_node() {
         Some(TreeNode::Request(request)) => Some(request.path.as_path()),
         _ => None,
     };
-    let outcome = request_path.and_then(|path| model.run.outcomes.get(path));
     let running = request_path.is_some_and(|path| {
         model
             .run
@@ -129,108 +130,62 @@ pub fn status_panel_lines(model: &Model, compact: bool) -> Vec<Line<'static>> {
             .as_ref()
             .is_some_and(|active| run_concerns(active, path))
     });
-    match (running, outcome) {
-        (true, previous) => running_lines(previous, compact),
-        (false, Some(outcome)) => result_lines(&outcome.result, compact),
-        (false, None) => vec![Line::from(Span::styled("—", theme::LABEL))],
+    if running {
+        return Line::from(Span::styled(
+            " en cours ",
+            theme::RUNNING.fg.map_or(theme::RUNNING, theme::badge_on),
+        ));
+    }
+    match request_path.and_then(|path| model.run.outcomes.get(path)) {
+        Some(outcome) => result_summary(&outcome.result),
+        None => Line::default(),
     }
 }
 
-fn badge(text: String, class: StatusClass) -> Span<'static> {
-    Span::styled(format!(" {text} "), theme::status_badge(class))
-}
-
-/// Indicateur « en cours » et, atténué et sans verdict, le résultat
-/// précédent : sur la ligne de l'indicateur en forme compacte, sur les
-/// deux lignes suivantes sinon, pour tenir dans une colonne étroite.
-fn running_lines(previous: Option<&RequestOutcome>, compact: bool) -> Vec<Line<'static>> {
-    let badge = Span::styled(
-        " en cours ",
-        theme::RUNNING.fg.map_or(theme::RUNNING, theme::badge_on),
-    );
-    let Some(outcome) = previous else {
-        return vec![Line::from(badge)];
-    };
-    let response = &outcome.result.response;
-    let summary = format!(
-        "{} · {} ms",
-        badge_text(&response.status),
-        response.response_time
-    );
-    if compact {
-        return vec![Line::from(vec![
-            badge,
-            Span::styled(format!(" {summary}"), theme::LABEL),
-        ])];
-    }
-    vec![
-        Line::from(badge),
-        Line::from(Span::styled("précédent :", theme::LABEL)),
-        Line::from(Span::styled(summary, theme::LABEL)),
-    ]
-}
-
-fn result_lines(result: &RequestResult, compact: bool) -> Vec<Line<'static>> {
+/// Résumé d'un résultat : statut coloré et son libellé, temps, taille
+/// (seulement d'après `content-length`), puis verdict et décompte des
+/// vérifications. Rien d'autre du résultat (en-têtes, corps, erreur).
+fn result_summary(result: &RequestResult) -> Line<'static> {
     let response = &result.response;
-    let badge = badge(badge_text(&response.status), classify(&response.status));
-    let (mark, verdict, verdict_style) = if result.is_failure() {
-        (FAILURE_MARK, "échec", theme::FAILURE)
-    } else {
-        (SUCCESS_MARK, "réussi", theme::SUCCESS)
-    };
-    let time = format!("{} ms", response.response_time);
-
-    if compact {
-        return vec![Line::from(vec![
-            badge,
-            Span::raw(" "),
-            Span::styled(mark, verdict_style),
-            Span::raw(format!(" {time}")),
-        ])];
-    }
-
-    // Forme complète : libellé atténué puis valeur, comme une fiche.
     let mut status_value = badge_text(&response.status);
     if let Some(label) = response.status_text.as_deref().filter(|t| !t.is_empty()) {
         status_value.push(' ');
         status_value.push_str(label);
     }
-    let class_style = match classify(&response.status) {
+    let mut spans = vec![
+        Span::styled(
+            status_value,
+            class_style(classify(&response.status)).add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+        Span::raw(format!("  {} ms", response.response_time)),
+    ];
+    if let Some(bytes) = content_length(result) {
+        spans.push(Span::raw(format!("  {}", format_size(bytes))));
+    }
+    let (passed, total) = check_counts(result);
+    let (mark, style) = if result.is_failure() {
+        (FAILURE_MARK, theme::FAILURE)
+    } else {
+        (SUCCESS_MARK, theme::SUCCESS)
+    };
+    let verdict = if total == 0 {
+        format!("  {mark}")
+    } else {
+        format!("  {mark} {passed}/{total}")
+    };
+    spans.push(Span::styled(verdict, style));
+    Line::from(spans)
+}
+
+/// Couleur de texte d'une classe de statut.
+fn class_style(class: StatusClass) -> ratatui::style::Style {
+    match class {
         StatusClass::Success => theme::SUCCESS,
         StatusClass::Redirect => theme::REDIRECT,
         StatusClass::ClientError => theme::CLIENT_ERROR,
         StatusClass::Failure => theme::FAILURE,
         StatusClass::Neutral => theme::LABEL,
-    };
-    let first = vec![
-        Span::styled("Statut  ", theme::LABEL),
-        Span::styled(
-            status_value,
-            class_style.add_modifier(ratatui::style::Modifier::BOLD),
-        ),
-    ];
-
-    let mut second = vec![
-        Span::styled("Temps   ", theme::LABEL),
-        Span::styled(time, theme::SUCCESS),
-    ];
-    if let Some(bytes) = content_length(result) {
-        second.push(Span::styled("  Taille ", theme::LABEL));
-        second.push(Span::styled(format_size(bytes), theme::SUCCESS));
     }
-
-    let (passed, total) = check_counts(result);
-    let counts = if total == 0 {
-        "aucune vérification".to_owned()
-    } else {
-        format!("{passed}/{total}")
-    };
-    let third = Line::from(vec![
-        Span::styled(format!("{mark} {verdict}"), verdict_style),
-        Span::raw(format!(" · {counts}")),
-    ]);
-
-    vec![Line::from(first), Line::from(second), third]
 }
 
 #[cfg(test)]
@@ -362,52 +317,41 @@ mod tests {
         assert!(run_concerns(&active("ok.bru", false), Path::new("ok.bru")));
     }
 
+    fn summary(model: &Model) -> String {
+        plain(&[status_summary(model)])
+    }
+
     #[test]
     fn fully_successful_request() {
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
-        let lines = status_panel_lines(&model, false);
+        assert_eq!(summary(&model), "200 OK  6 ms  21 o  ✓ 2/2");
+        let line = status_summary(&model);
         assert_eq!(
-            plain(&lines),
-            "Statut  200 OK\nTemps   6 ms  Taille 21 o\n✓ réussi · 2/2"
-        );
-        assert_eq!(lines[0].spans[0].style, theme::LABEL);
-        assert_eq!(
-            lines[0].spans[1].style,
+            line.spans[0].style,
             theme::SUCCESS.add_modifier(ratatui::style::Modifier::BOLD)
         );
-        assert_eq!(lines[2].spans[0].style, theme::SUCCESS);
+        assert_eq!(line.spans.last().map(|s| s.style), Some(theme::SUCCESS));
     }
 
     #[test]
     fn ok_status_with_failing_checks() {
         let mut model = runner_probe_model();
         select(&mut model, "ok.bru");
-        let lines = status_panel_lines(&model, false);
-        assert_eq!(
-            plain(&lines),
-            "Statut  200 OK\nTemps   14 ms  Taille 32 o\n● échec · 2/4"
-        );
-        assert_eq!(
-            lines[0].spans[1].style,
-            theme::SUCCESS.add_modifier(ratatui::style::Modifier::BOLD)
-        );
-        assert_eq!(lines[2].spans[0].style, theme::FAILURE);
+        assert_eq!(summary(&model), "200 OK  14 ms  32 o  ● 2/4");
+        let line = status_summary(&model);
+        assert_eq!(line.spans.last().map(|s| s.style), Some(theme::FAILURE));
     }
 
     #[test]
     fn request_without_response() {
         let mut model = runner_probe_model();
         select(&mut model, "folder/down.bru");
-        let lines = status_panel_lines(&model, false);
-        let text = plain(&lines);
-        assert_eq!(
-            text,
-            "Statut  aucune réponse\nTemps   0 ms\n● échec · aucune vérification"
-        );
+        let text = summary(&model);
+        assert_eq!(text, "aucune réponse  0 ms  ●");
         assert!(!text.contains("ECONNREFUSED"), "{text}");
         assert_eq!(
-            lines[0].spans[1].style,
+            status_summary(&model).spans[0].style,
             theme::FAILURE.add_modifier(ratatui::style::Modifier::BOLD)
         );
     }
@@ -416,92 +360,67 @@ mod tests {
     fn skipped_request() {
         let mut model = runner_probe_model();
         select(&mut model, "skip.bru");
-        let lines = status_panel_lines(&model, false);
-        let text = plain(&lines);
+        let text = summary(&model);
         assert!(
-            text.starts_with("Statut  ignorée request skipped via pre-request script\n"),
+            text.starts_with("ignorée request skipped via pre-request script  0 ms"),
             "{text}"
         );
-        assert!(!text.contains("échec"), "{text}");
-        assert_eq!(lines[0].spans[0].style, theme::LABEL);
+        assert!(text.ends_with('✓'), "{text}");
     }
 
     #[test]
-    fn request_failed_before_sending_keeps_error_out_of_the_panel() {
+    fn request_failed_before_sending_keeps_error_out_of_the_summary() {
         let report: crate::runner::Report = serde_json::from_str(include_str!(
             "../../../tests/fixtures/reports/pre-request-error.json"
         ))
         .expect("pre-request-error.json doit se désérialiser");
         let result = report.iterations()[0].results[0].clone();
-        let lines = result_lines(&result, false);
-        let text = plain(&lines);
-        assert!(text.starts_with("Statut  aucune réponse"), "{text}");
-        assert!(text.contains("● échec"), "{text}");
+        let text = plain(&[result_summary(&result)]);
+        assert!(text.starts_with("aucune réponse"), "{text}");
+        assert!(text.contains('●'), "{text}");
         let error = result.error.as_deref().expect("erreur rapportée");
         assert!(!text.contains(error), "{text}");
     }
 
     #[test]
-    fn compact_form_is_one_line_badge_mark_time() {
-        let mut model = runner_probe_model();
-        select(&mut model, "green.bru");
-        let lines = status_panel_lines(&model, true);
-        assert_eq!(plain(&lines), " 200  ✓ 6 ms");
-    }
-
-    #[test]
-    fn no_result_shows_a_neutral_dash() {
+    fn no_result_gives_an_empty_summary() {
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
         model.run.outcomes.clear();
-        let lines = status_panel_lines(&model, false);
-        assert_eq!(plain(&lines), "—");
-        assert_eq!(lines[0].spans[0].style, theme::LABEL);
+        assert_eq!(summary(&model), "");
 
         let mut folder_model = loaded_model((100, 30));
         select(&mut folder_model, "grp");
-        assert_eq!(plain(&status_panel_lines(&folder_model, false)), "—");
+        assert_eq!(summary(&folder_model), "");
     }
 
     #[test]
-    fn running_shows_indicator_and_dimmed_previous_result() {
+    fn running_shows_the_indicator() {
         let mut model = runner_probe_model();
         select(&mut model, "folder/down.bru");
         model.run.active = Some(active("folder", true));
-        let lines = status_panel_lines(&model, false);
-        assert_eq!(
-            plain(&lines),
-            " en cours \nprécédent :\naucune réponse · 0 ms"
-        );
-        assert_eq!(lines[0].spans[0].style.bg, theme::RUNNING.fg);
-        assert_eq!(lines[1].spans[0].style, theme::LABEL);
-        assert_eq!(lines[2].spans[0].style, theme::LABEL);
-        assert_eq!(
-            plain(&status_panel_lines(&model, true)),
-            " en cours  aucune réponse · 0 ms"
-        );
-
-        // Première exécution : pas de résultat précédent.
+        assert_eq!(summary(&model), " en cours ");
+        assert_eq!(status_summary(&model).spans[0].style.bg, theme::RUNNING.fg);
         model.run.outcomes.clear();
-        assert_eq!(plain(&status_panel_lines(&model, false)), " en cours ");
+        assert_eq!(summary(&model), " en cours ");
     }
 
     #[test]
-    fn unrelated_run_does_not_change_the_panel() {
+    fn unrelated_run_does_not_change_the_summary() {
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
         model.run.active = Some(active("ok.bru", false));
-        assert!(plain(&status_panel_lines(&model, false)).starts_with("Statut  200 "));
+        assert!(summary(&model).starts_with("200 OK"));
     }
 
     #[test]
-    fn no_other_header_value_or_body_leaks_into_the_panel() {
+    fn no_other_header_value_or_body_leaks_into_the_summary() {
         let mut result = with_headers(&[
             ("set-cookie", "session=secret-cookie".into()),
             ("content-length", "21".into()),
         ]);
         result.response.data = Value::String("secret-body".into());
-        let text = plain(&result_lines(&result, false));
+        let text = plain(&[result_summary(&result)]);
         assert!(!text.contains("secret"), "{text}");
         assert!(!text.contains("session"), "{text}");
         assert!(text.contains("21 o"), "{text}");

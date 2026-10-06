@@ -110,6 +110,17 @@ pub fn response_gutter_width(model: &Model, inner_width: u16) -> u16 {
         .min(inner_width.saturating_sub(1))
 }
 
+/// Vrai si la requête sélectionnée a un résultat à afficher dans la
+/// réponse.
+pub fn response_has_result(model: &Model) -> bool {
+    matches!(
+        model.selected_node(),
+        Some(TreeNode::Request(request)) if model.run.outcomes.contains_key(&request.path)
+    )
+}
+
+/// Texte de la réponse, sans la ligne des onglets : celle-ci est fixe en
+/// tête du panneau ([`tab_bar`]) et ne défile pas.
 fn response_text_and_body_start(model: &Model) -> (Text<'static>, Option<usize>) {
     let Some(TreeNode::Request(request)) = model.selected_node() else {
         return (Text::default(), None);
@@ -118,8 +129,6 @@ fn response_text_and_body_start(model: &Model) -> (Text<'static>, Option<usize>)
         return (Text::default(), None);
     };
     let mut lines = status_band(outcome);
-    lines.push(tab_bar(model.response_tab));
-    lines.push(Line::default());
     let filter = model.filter.as_ref().filter(|f| f.target == request.path);
     let mut body_start = None;
     match model.response_tab {
@@ -1094,7 +1103,8 @@ fn filter_line(draft: &str, editing: bool) -> Line<'static> {
 /// Bandeau toujours visible en tête du panneau Réponse, quel que soit
 /// l'onglet actif (`response-tabs`) : réduit au message d'erreur rapporté
 /// par `bru`, suivi d'une ligne vide, ou vide sans erreur. Verdict, statut
-/// et temps de réponse sont portés par le panneau Statut (`status-panel`).
+/// et temps de réponse sont portés par la bordure haute de la réponse
+/// (`status-panel`).
 fn status_band(outcome: &RequestOutcome) -> Vec<Line<'static>> {
     // Affiché quel que soit le statut : c'est la seule explication d'une
     // requête en erreur, y compris quand elle n'a jamais été envoyée.
@@ -1187,9 +1197,9 @@ fn tests_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
     lines
 }
 
-/// Barre d'onglets du panneau Réponse : l'onglet actif en pastille sur
-/// fond vert, les autres atténués.
-fn tab_bar(active: ResponseTab) -> Line<'static> {
+/// Barre d'onglets du panneau Réponse : l'onglet actif en clair, gras et
+/// souligné comme dans Bruno bureau, les autres en gris.
+pub fn tab_bar(active: ResponseTab) -> Line<'static> {
     let tabs = [
         (ResponseTab::Body, "Corps"),
         (ResponseTab::Headers, "En-têtes"),
@@ -1198,14 +1208,14 @@ fn tab_bar(active: ResponseTab) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, (tab, label)) in tabs.into_iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw(" "));
+            spans.push(Span::raw("   "));
         }
         let style = if tab == active {
-            theme::BORDER.fg.map_or(theme::SECTION, theme::badge_on)
+            theme::ACTIVE_TAB
         } else {
-            theme::LABEL
+            theme::PANEL_TITLE
         };
-        spans.push(Span::styled(format!(" {label} "), style));
+        spans.push(Span::styled(label, style));
     }
     Line::from(spans)
 }
@@ -1878,9 +1888,9 @@ mod tests {
             },
             ..base_result()
         });
-        // Verdict, statut et temps sont portés par le panneau Statut
-        // (`status-panel`), jamais répétés dans la réponse.
-        assert!(text.starts_with(" Corps "), "{text}");
+        // Verdict, statut et temps sont portés par la bordure de la
+        // réponse, jamais répétés dans son texte ; les onglets non plus.
+        assert!(text.starts_with("Assertions"), "{text}");
         for moved in ["Résultat", "Verdict", "Statut", "Temps de réponse", "12 ms"] {
             assert!(!text.contains(moved), "{moved} :\n{text}");
         }
@@ -1939,7 +1949,7 @@ mod tests {
             ..base_result()
         });
         assert!(
-            text.starts_with("Erreur : connect ECONNREFUSED 127.0.0.1:18799\n\n Corps "),
+            text.starts_with("Erreur : connect ECONNREFUSED 127.0.0.1:18799\n\nAssertions"),
             "{text}"
         );
         assert!(!text.contains("Verdict"), "{text}");
@@ -1984,7 +1994,7 @@ mod tests {
     #[test]
     fn status_band_has_no_error_line_without_error() {
         let text = result_detail(base_result());
-        assert!(text.starts_with(" Corps "), "{text}");
+        assert!(text.starts_with("Assertions"), "{text}");
         assert!(!text.contains("Erreur"), "{text}");
     }
 
@@ -2005,7 +2015,7 @@ mod tests {
         });
         assert!(!text.contains("ignorée"), "{text}");
         assert!(!text.contains("Verdict"), "{text}");
-        assert!(text.starts_with(" Corps "), "{text}");
+        assert!(text.starts_with("Assertions"), "{text}");
     }
 
     /// Le résultat d'exécution n'apparaît plus dans `detail_text` : il est
@@ -2026,7 +2036,7 @@ mod tests {
         assert!(!detail.contains("Verdict"), "{detail}");
         assert!(!detail.contains("Corps de réponse"), "{detail}");
         let response = plain(&response_text(&model));
-        assert!(response.contains("Corps"), "{response}");
+        assert!(!response.is_empty(), "{response}");
         assert!(!response.contains("Verdict"), "{response}");
     }
 

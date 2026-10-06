@@ -1,9 +1,8 @@
 //! Zones cliquables, calculées sans I/O (`mouse-support`, design D2 et D3).
 //!
 //! Tout est dérivé du modèle et de [`layout_for`], exactement comme le
-//! rendu : aucune géométrie n'est mémorisée par `view`. Le panneau Statut,
-//! le titre et la barre d'état n'ont pas de zone : un événement qui y
-//! tombe est ignoré.
+//! rendu : aucune géométrie n'est mémorisée par `view`. Le titre et la
+//! barre d'état n'ont pas de zone : un événement qui y tombe est ignoré.
 
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Text};
@@ -13,7 +12,7 @@ use super::detail::{
     SectionBox, detail_section_boxes, detail_text, is_box_border, line_width,
     response_gutter_width, response_text,
 };
-use super::{detail_wraps, inner, layout_for};
+use super::{detail_wraps, inner, layout_for, response_text_area};
 use crate::app::model::{DragPanel, Model};
 
 /// Cible d'un événement souris.
@@ -100,7 +99,7 @@ pub fn hit_test(model: &Model, column: u16, row: u16) -> Option<Hit> {
 /// taille minimale.
 pub fn drag_row(model: &Model, panel: DragPanel, row: u16) -> Option<DragRow> {
     let areas = layout_for(model.size, model.zoomed_panel())?;
-    let area = inner(panel_area(&areas, panel));
+    let area = text_area(panel, panel_area(&areas, panel));
     let (lines, wraps, scroll, boxes) = panel_content(model, panel);
     let last = u16::try_from(lines.len().checked_sub(1)?).unwrap_or(u16::MAX);
     if row < area.y {
@@ -112,6 +111,15 @@ pub fn drag_row(model: &Model, panel: DragPanel, row: u16) -> Option<DragRow> {
     let width = content_width(model, panel, area.width);
     let line = line_at_row(&lines, &boxes, wraps, width, scroll, row - area.y).unwrap_or(last);
     Some(DragRow::Line(line))
+}
+
+/// Zone du texte d'un panneau : son intérieur pour le détail, l'intérieur
+/// sous la ligne des onglets pour la réponse.
+fn text_area(panel: DragPanel, area: Rect) -> Rect {
+    match panel {
+        DragPanel::Detail => inner(area),
+        DragPanel::Response => response_text_area(area),
+    }
 }
 
 fn panel_area(areas: &super::Areas, panel: DragPanel) -> Rect {
@@ -156,7 +164,7 @@ fn content_width(model: &Model, panel: DragPanel, inner_width: u16) -> u16 {
 /// Ligne logique sous le pointeur, `None` sur la bordure ou après le
 /// contenu.
 fn content_line(model: &Model, panel: DragPanel, area: Rect, position: Position) -> Option<u16> {
-    let area = inner(area);
+    let area = text_area(panel, area);
     if !area.contains(position) {
         return None;
     }
@@ -236,7 +244,8 @@ mod tests {
         let (width, height) = model.size;
         let screen = render(model, width, height);
         let areas = layout_for(model.size, model.zoomed_panel()).expect("taille suffisante");
-        let panel = inner(area(&areas));
+        // `area` donne directement la zone du texte du panneau.
+        let panel = area(&areas);
         let mut checked = 0;
         for y in panel.y..panel.bottom() {
             let shown: String = screen[usize::from(y)]
@@ -308,7 +317,7 @@ mod tests {
             for scroll in [0, 3] {
                 model.detail_scroll = scroll;
                 let checked =
-                    assert_rows_match(&model, |a| a.detail, &lines, &boxes, 0, detail_line);
+                    assert_rows_match(&model, |a| inner(a.detail), &lines, &boxes, 0, detail_line);
                 assert!(checked > 0, "{size:?} {scroll}");
             }
         }
@@ -351,9 +360,16 @@ mod tests {
         let lines = response_plain_lines(&model);
         assert!(!lines.is_empty());
         let areas = layout_for(model.size, None).expect("taille suffisante");
-        let gutter = response_gutter_width(&model, inner(areas.response).width);
+        let gutter = response_gutter_width(&model, response_text_area(areas.response).width);
         assert!(gutter > 0, "le corps JSON doit être numéroté");
-        let checked = assert_rows_match(&model, |a| a.response, &lines, &[], gutter, response_line);
+        let checked = assert_rows_match(
+            &model,
+            |a| response_text_area(a.response),
+            &lines,
+            &[],
+            gutter,
+            response_line,
+        );
         assert!(checked > 0);
     }
 
@@ -393,13 +409,11 @@ mod tests {
             hit_test(&short, tall.x, tall.bottom() - 1),
             Some(Hit::Tree { row: None })
         );
-        // Titre, barre d'état et panneau Statut : aucune zone.
+        // Titre et barre d'état : aucune zone.
         assert_eq!(hit_test(&model, 1, areas.title.y), None);
         assert_eq!(hit_test(&model, 1, areas.status.y), None);
-        let status = areas.response_status;
-        assert_eq!(hit_test(&model, status.x + 2, status.y + 1), None);
         // Réponse sans résultat : zone sans ligne.
-        let response = inner(areas.response);
+        let response = response_text_area(areas.response);
         assert_eq!(
             hit_test(&model, response.x, response.y),
             Some(Hit::Response { line: None })
@@ -459,13 +473,8 @@ mod tests {
             "un clic à gauche en zoom détail doit toucher le détail: {hit:?}"
         );
 
-        // 3. Réponse zoomée : Statut compact en y: 1..4, Réponse en y: 4..29
+        // 3. Réponse zoomée : occupe tout le corps.
         model.focus = Focus::Response;
-        let hit_status = hit_test(&model, 5, 2);
-        assert_eq!(
-            hit_status, None,
-            "le panneau Statut au-dessus de la réponse n'a pas de hit"
-        );
         let hit_response = hit_test(&model, 5, 6);
         assert!(
             matches!(hit_response, Some(Hit::Response { .. })),

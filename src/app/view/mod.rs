@@ -44,13 +44,11 @@ const MIN_DETAIL_WIDTH: u16 = 18;
 /// Largeur minimale du panneau de réponse.
 const MIN_RESPONSE_WIDTH: u16 = 18;
 
-/// Hauteur du panneau Statut en forme complète (3 lignes intérieures).
-const STATUS_PANEL_HEIGHT: u16 = 5;
-/// Hauteur du panneau Statut en forme compacte (1 ligne intérieure).
-const STATUS_PANEL_COMPACT_HEIGHT: u16 = 3;
-/// Hauteur de terminal à partir de laquelle le panneau Statut prend sa
-/// forme complète (`status-panel`, `design.md` D3).
-const STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT: u16 = 20;
+/// Hauteur de terminal à partir de laquelle le pied de page porte le fil
+/// d'Ariane et le panneau Environnement sa forme complète.
+const FULL_MIN_TERMINAL_HEIGHT: u16 = 20;
+/// Largeur maximale du panneau Environnement en surimpression.
+const ENV_PANEL_MAX_WIDTH: u16 = 44;
 /// Hauteur du panneau Environnement en forme complète (4 lignes
 /// intérieures), fixe et indépendante du nombre d'environnements —
 /// `layout()` reste une fonction de géométrie pure, indépendante du
@@ -77,26 +75,20 @@ pub struct Areas {
     pub body: Rect,
     pub tree: Rect,
     pub detail: Rect,
-    /// Panneau Environnement, permanent, au-dessus du panneau Statut,
-    /// même largeur (`add-environment-panel-and-edit-popup`).
+    /// Panneau Environnement, en surimpression en haut à droite du corps :
+    /// dessiné et cliquable seulement quand il a le focus (touche `E`).
     pub environment: Rect,
-    /// Panneau Statut, au-dessus de la réponse, même largeur.
-    pub response_status: Rect,
-    /// Panneau Réponse, sous le panneau Statut.
+    /// Panneau Réponse, sur toute la hauteur de la colonne de droite ; sa
+    /// première ligne intérieure porte les onglets et le statut.
     pub response: Rect,
     /// Barre d'état du bas de l'écran (rappel de touches, messages).
     pub status: Rect,
     /// Fil d'Ariane du nœud sélectionné, sous la barre d'état ; vide
-    /// (hauteur 0) sous [`STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT`].
+    /// (hauteur 0) sous [`FULL_MIN_TERMINAL_HEIGHT`].
     pub breadcrumb: Rect,
 }
 
 impl Areas {
-    /// Vrai si le panneau Statut est en forme compacte.
-    pub fn status_panel_compact(&self) -> bool {
-        self.response_status.height < STATUS_PANEL_HEIGHT
-    }
-
     /// Vrai si le panneau Environnement est en forme compacte.
     pub fn environment_panel_compact(&self) -> bool {
         self.environment.height < ENV_PANEL_HEIGHT
@@ -107,13 +99,12 @@ impl Areas {
 ///
 /// Si `zoom` vaut `Some(Focus::Tree)`, `Some(Focus::Detail)` ou
 /// `Some(Focus::Response)`, le panneau désigné occupe l'intégralité de la
-/// zone du corps. En plein écran sur la Réponse, le panneau Statut reste
-/// affiché au-dessus d'elle en forme compacte.
+/// zone du corps.
 pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         return None;
     }
-    let full_size = area.height >= STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT;
+    let full_size = area.height >= FULL_MIN_TERMINAL_HEIGHT;
     // Pied de page : barre d'état, plus le fil d'Ariane en grande taille.
     let footer_height = if full_size { 2 } else { 1 };
     let body_height = area.height - 1 - footer_height;
@@ -133,7 +124,6 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             tree: body,
             detail: Rect::default(),
             environment: Rect::default(),
-            response_status: Rect::default(),
             response: Rect::default(),
             status,
             breadcrumb,
@@ -144,32 +134,20 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             tree: Rect::default(),
             detail: body,
             environment: Rect::default(),
-            response_status: Rect::default(),
             response: Rect::default(),
             status,
             breadcrumb,
         }),
-        Some(Focus::Response) => {
-            let status_panel_height = STATUS_PANEL_COMPACT_HEIGHT;
-            let response_status = Rect::new(body.x, body.y, body.width, status_panel_height);
-            let response = Rect::new(
-                body.x,
-                body.y + status_panel_height,
-                body.width,
-                body_height.saturating_sub(status_panel_height),
-            );
-            Some(Areas {
-                title,
-                body,
-                tree: Rect::default(),
-                detail: Rect::default(),
-                environment: Rect::default(),
-                response_status,
-                response,
-                status,
-                breadcrumb,
-            })
-        }
+        Some(Focus::Response) => Some(Areas {
+            title,
+            body,
+            tree: Rect::default(),
+            detail: Rect::default(),
+            environment: Rect::default(),
+            response: body,
+            status,
+            breadcrumb,
+        }),
         _ => {
             // La réponse reçoit la plus large colonne : c'est elle qu'on lit
             // le plus (arbre 30 %, détail 45 % du reste, réponse le solde).
@@ -178,36 +156,24 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             let detail_width = (remaining * 45 / 100).max(MIN_DETAIL_WIDTH);
             let response_width = (remaining - detail_width).max(MIN_RESPONSE_WIDTH);
             let response_x = body.x + tree_width + detail_width;
-            let status_panel_height = if full_size {
-                STATUS_PANEL_HEIGHT
-            } else {
-                STATUS_PANEL_COMPACT_HEIGHT
-            };
             let env_panel_height = if full_size {
                 ENV_PANEL_HEIGHT
             } else {
                 ENV_PANEL_COMPACT_HEIGHT
             };
-            // Colonne de droite : Statut, Réponse, puis Environnement en
-            // bas, comme la maquette (`exempleTui/`).
-            let response_height =
-                body_height.saturating_sub(env_panel_height + status_panel_height);
+            // Environnement : surimpression calée en haut à droite, sous
+            // la liste déroulante de l'en-tête, comme dans Bruno bureau.
+            let env_width = response_width.min(ENV_PANEL_MAX_WIDTH);
             Some(Areas {
                 title,
                 body,
                 tree: Rect::new(body.x, body.y, tree_width, body_height),
                 detail: Rect::new(body.x + tree_width, body.y, detail_width, body_height),
-                response_status: Rect::new(response_x, body.y, response_width, status_panel_height),
-                response: Rect::new(
-                    response_x,
-                    body.y + status_panel_height,
-                    response_width,
-                    response_height,
-                ),
+                response: Rect::new(response_x, body.y, response_width, body_height),
                 environment: Rect::new(
-                    response_x,
-                    body.y + status_panel_height + response_height,
-                    response_width,
+                    body.right() - env_width,
+                    body.y,
+                    env_width,
                     env_panel_height,
                 ),
                 status,
@@ -248,7 +214,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
                 areas.tree,
             );
             frame.render_widget(panel(" Détail ", false), areas.detail);
-            frame.render_widget(panel(" Réponse ", false), response_column(&areas));
+            frame.render_widget(panel(" Réponse ", false), areas.response);
         }
         CollectionState::Failed(error) => {
             let lines = vec![
@@ -331,17 +297,21 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     }
                     render_insert_cursor(model, frame, areas.detail);
                 }
-                if areas.environment.width > 0 && areas.environment.height > 0 {
-                    // Panneau Environnement : permanent, dans sa propre zone
-                    // de la mise en page (`add-environment-panel-and-edit-popup`),
-                    // plus une superposition en coin.
-                    panels::render_environment_picker(model, frame, areas.environment);
-                }
-                if areas.response_status.width > 0 && areas.response_status.height > 0 {
-                    render_status_panel(model, frame, &areas);
-                }
                 if areas.response.width > 0 && areas.response.height > 0 {
                     render_response(model, frame, areas.response);
+                }
+                // Panneau Environnement : en surimpression, par-dessus la
+                // réponse, seulement quand il a le focus (touche `E`).
+                if model.focus == Focus::EnvironmentPicker
+                    && areas.environment.width > 0
+                    && areas.environment.height > 0
+                {
+                    frame.render_widget(Clear, areas.environment);
+                    frame.render_widget(
+                        Block::default().style(theme::BACKGROUND),
+                        areas.environment,
+                    );
+                    panels::render_environment_picker(model, frame, areas.environment);
                 }
 
                 // Popup d'édition d'un environnement : superposé au centre
@@ -391,15 +361,10 @@ fn render_header(model: &Model, frame: &mut Frame, area: Rect) {
     let CollectionState::Loaded(_) = model.collection else {
         return;
     };
-    let env = environment_chip(model);
-    let env_width = u16::try_from(env.width()).unwrap_or(u16::MAX);
     let mut right_edge = area.right();
-    if title_width + 1 + env_width <= area.width {
-        right_edge -= env_width;
-        frame.render_widget(
-            Paragraph::new(env),
-            Rect::new(right_edge, area.y, env_width, 1),
-        );
+    if let Some(chip) = environment_chip_area(model, area) {
+        right_edge = chip.x;
+        frame.render_widget(Paragraph::new(environment_chip(model)), chip);
     }
     let search = Line::from(Span::styled(SEARCH_HINT, theme::EDITABLE_BODY));
     let search_width = u16::try_from(search.width()).unwrap_or(u16::MAX);
@@ -410,6 +375,19 @@ fn render_header(model: &Model, frame: &mut Frame, area: Rect) {
             Rect::new(centered, area.y, search_width, 1),
         );
     }
+}
+
+/// Zone de la liste déroulante d'environnement, calée à droite de
+/// l'en-tête `title` ; `None` si elle chevaucherait le titre. Partagée
+/// par le rendu et le clic.
+pub(crate) fn environment_chip_area(model: &Model, title: Rect) -> Option<Rect> {
+    let CollectionState::Loaded(_) = model.collection else {
+        return None;
+    };
+    let title_width = u16::try_from(title_line(model).width()).unwrap_or(u16::MAX);
+    let env_width = u16::try_from(environment_chip(model).width()).unwrap_or(u16::MAX);
+    (title_width + 1 + env_width <= title.width)
+        .then(|| Rect::new(title.right() - env_width, title.y, env_width, 1))
 }
 
 /// Rappel de la recherche dans l'en-tête : la touche `/` ouvre la saisie.
@@ -953,20 +931,16 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
-/// Colonne de réponse entière (Statut et Réponse réunis), pour les états
-/// où le panneau Statut n'est pas affiché.
-fn response_column(areas: &Areas) -> Rect {
-    areas.response_status.union(areas.response)
-}
-
-/// Dessine le panneau Statut (`status-panel`) : jamais focalisable, donc
-/// toujours bordé de la couleur ordinaire.
-fn render_status_panel(model: &Model, frame: &mut Frame, areas: &Areas) {
-    let lines = status::status_panel_lines(model, areas.status_panel_compact());
-    frame.render_widget(
-        Paragraph::new(lines).block(panel(" Statut ", false)),
-        areas.response_status,
-    );
+/// Zone du texte de la réponse : l'intérieur du panneau sous la ligne
+/// des onglets et du statut. Partagée par le rendu, le défilement et le
+/// clic.
+pub fn response_text_area(response: Rect) -> Rect {
+    let inner_area = inner(response);
+    Rect {
+        y: inner_area.y + 1.min(inner_area.height),
+        height: inner_area.height.saturating_sub(1),
+        ..inner_area
+    }
 }
 
 /// Dessine le panneau Réponse : le résultat de la dernière exécution de la
@@ -978,31 +952,56 @@ fn render_response(model: &Model, frame: &mut Frame, area: Rect) {
     } else {
         TITLE_RESPONSE
     };
-    let block = panel(title, model.focus == Focus::Response);
-    let text = detail::render_response_text(model);
-    if text.lines.is_empty() {
+    // Statut résumé sur la bordure haute, calé à droite (comme le statut
+    // à droite des onglets dans Bruno bureau) : toujours visible, même
+    // sans résultat pendant une première exécution.
+    let mut block = panel(title, model.focus == Focus::Response);
+    let summary = status::status_summary(model);
+    if summary.width() > 0 {
+        let mut summary = summary;
+        summary.spans.insert(0, Span::raw(" "));
+        summary.spans.push(Span::raw(" "));
+        block = block.title(summary.right_aligned());
+    }
+    let inner_area = block.inner(area);
+    if !detail::response_has_result(model) {
         frame.render_widget(
             panels::empty_state_message(area, "aucun résultat").block(block),
             area,
         );
         return;
     }
-    let inner_area = block.inner(area);
     frame.render_widget(block, area);
-    let gutter = detail::response_gutter_width(model, inner_area.width);
-    let content = Rect {
-        x: inner_area.x + gutter,
-        width: inner_area.width - gutter,
+    // Ligne des onglets, fixe : elle ne défile pas avec le contenu.
+    let header = Rect {
+        height: 1.min(inner_area.height),
         ..inner_area
+    };
+    frame.render_widget(Paragraph::new(detail::tab_bar(model.response_tab)), header);
+
+    let text_area = response_text_area(area);
+    let text = detail::render_response_text(model);
+    let gutter = detail::response_gutter_width(model, text_area.width);
+    let content = Rect {
+        x: text_area.x + gutter,
+        width: text_area.width - gutter,
+        ..text_area
     };
     if gutter > 0
         && let Some(start) = detail::response_body_start(model)
     {
+        frame.render_widget(
+            Block::default().style(theme::GUTTER),
+            Rect {
+                width: gutter,
+                ..text_area
+            },
+        );
         render_line_numbers(
             &text.lines,
             start,
             model.response_scroll,
-            inner_area,
+            text_area,
             content.width,
             gutter,
             frame,
@@ -1047,7 +1046,7 @@ fn render_line_numbers(
             );
             let y = area.y + u16::try_from(row - first).unwrap_or(0);
             frame.render_widget(
-                Paragraph::new(Span::styled(number, theme::LABEL)),
+                Paragraph::new(Span::styled(number, theme::GUTTER)),
                 Rect::new(area.x, y, gutter, 1),
             );
         }
@@ -1173,53 +1172,41 @@ mod tests {
             60
         );
         assert_eq!(areas.tree.height, 9);
-        // Environnement et Statut compacts, empilés au-dessus d'une
-        // réponse qui garde au moins une ligne intérieure
-        // (`status-panel`, `add-environment-panel-and-edit-popup`).
+        // La réponse occupe toute la hauteur ; l'Environnement compact
+        // est en surimpression.
+        assert_eq!(areas.response.height, 9);
+        assert!(response_text_area(areas.response).height >= 1);
         assert_eq!(areas.environment.height, 3);
-        assert_eq!(areas.response_status.height, 3);
-        assert_eq!(areas.response.height, 3);
-        assert!(inner(areas.response).height >= 1);
-        assert!(areas.status_panel_compact());
         assert!(areas.environment_panel_compact());
     }
 
+    /// La réponse occupe toute la colonne de droite ; l'Environnement est
+    /// une surimpression calée en haut à droite du corps.
     #[test]
-    fn status_panel_is_stacked_above_the_response() {
-        for (size, env_height, status_height) in [
-            ((60, 11), 3, 3),
-            ((100, 19), 3, 3),
-            ((100, 20), 6, 5),
-            ((100, 30), 6, 5),
+    fn response_fills_the_column_and_environment_overlays_it() {
+        for (size, env_height) in [
+            ((60, 11), 3),
+            ((100, 19), 3),
+            ((100, 20), 6),
+            ((100, 30), 6),
         ] {
             let areas = layout_for(size, None).expect("taille suffisante");
-            let (env, status, response) =
-                (areas.environment, areas.response_status, areas.response);
+            let (env, response) = (areas.environment, areas.response);
+            assert_eq!(response.y, areas.body.y, "{size:?}");
+            assert_eq!(response.height, areas.body.height, "{size:?}");
+            assert_eq!(response.right(), areas.body.right(), "{size:?}");
             assert_eq!(env.height, env_height, "{size:?}");
-            assert_eq!(status.height, status_height, "{size:?}");
-            assert_eq!(status.height == 3, areas.status_panel_compact(), "{size:?}");
             assert_eq!(
                 env.height == 3,
                 areas.environment_panel_compact(),
                 "{size:?}"
             );
-            assert_eq!((env.x, env.width), (status.x, status.width), "{size:?}");
             assert_eq!(
-                (status.x, status.width),
-                (response.x, response.width),
+                (env.y, env.right()),
+                (areas.body.y, areas.body.right()),
                 "{size:?}"
             );
-            // Statut en haut de la colonne, puis Réponse, puis
-            // Environnement en bas, empilés sans recouvrement.
-            assert_eq!(status.y, areas.body.y, "{size:?}");
-            assert_eq!(response.y, status.bottom(), "{size:?}");
-            assert_eq!(env.y, response.bottom(), "{size:?}");
-            assert_eq!(env.bottom(), areas.body.bottom(), "{size:?}");
-            assert_eq!(
-                env.height + status.height + response.height,
-                areas.body.height,
-                "{size:?}"
-            );
+            assert!(env.width <= response.width, "{size:?}");
             assert_eq!(areas.tree.height, areas.body.height, "{size:?}");
             assert_eq!(areas.detail.height, areas.body.height, "{size:?}");
         }
@@ -1654,10 +1641,10 @@ mod tests {
         select(&mut model, "green.bru");
         let lines = render(&model, 100, 30);
         let screen = lines.join("\n");
-        assert!(screen.contains("Réponse"), "{screen}");
-        assert!(screen.contains("Statut"), "{screen}");
-        assert!(screen.contains("Statut  200 OK"), "{screen}");
-        assert!(screen.contains("✓ réussi"), "{screen}");
+        assert!(
+            screen.contains("Réponse ─ 200 OK  6 ms  21 o  ✓ 2/2"),
+            "{screen}"
+        );
         let detail_col_end = layout_for((100, 30), None).expect("layout").detail.right();
         let detail_only: String = lines
             .iter()
@@ -1669,7 +1656,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            !detail_only.contains("réussi"),
+            !detail_only.contains("200 OK"),
             "le détail ne doit plus afficher le résultat :\n{detail_only}"
         );
 
@@ -1708,12 +1695,10 @@ mod tests {
         ] {
             model.response_tab = tab;
             let screen = render(&model, 100, 30).join("\n");
-            assert!(screen.contains("Statut  200 OK"), "{tab:?} :\n{screen}");
             assert!(
-                screen.contains("Temps   6 ms  Taille 21 o"),
+                screen.contains("200 OK  6 ms  21 o  ✓ 2/2"),
                 "{tab:?} :\n{screen}"
             );
-            assert!(screen.contains("✓ réussi · 2/2"), "{tab:?} :\n{screen}");
             // Aucune répétition dans le panneau Réponse.
             let response = detail::response_plain_lines(&model).join("\n");
             assert!(!response.contains("Verdict"), "{tab:?} :\n{response}");
@@ -1941,43 +1926,38 @@ mod tests {
     /// La fixture `parser-cases/environments/` porte, dans l'ordre
     /// alphabétique : `local` (valide), `malformed` (en erreur),
     /// `staging` (valide).
-    /// La fixture `parser-cases/environments/` porte, dans l'ordre
-    /// alphabétique : `local` (valide), `malformed` (en erreur),
-    /// `staging` (valide).
     #[test]
-    fn environment_panel_permanent_and_indicator() {
+    fn environment_panel_opens_on_demand_and_header_shows_the_active_one() {
         let mut model = loaded_model((100, 30));
 
-        // Toujours visible, focus sur l'arbre : le panneau Environnement
-        // n'est plus caché tant qu'il n'a pas le focus
-        // (`add-environment-panel-and-edit-popup`).
+        // Fermé par défaut : seul l'en-tête indique l'environnement actif.
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Aucun environnement ▾"), "{screen}");
+        assert!(!screen.contains("staging"), "{screen}");
+
+        // Ouvert avec `E` : surimpression listant tous les environnements.
+        update(&mut model, Message::ToggleEnvironmentPicker);
         let lines = render(&model, 100, 30);
         let screen = lines.join("\n");
-        assert!(screen.contains("Aucun environnement"), "{screen}");
-        assert!(screen.contains("Environnement"), "{screen}");
-        assert!(screen.contains("Aucun"), "{screen}");
-        assert!(screen.contains("local"), "{screen}");
-        assert!(screen.contains("staging"), "{screen}");
-        assert!(
-            screen.contains("malformed.bru"),
-            "entrée en erreur non marquée : {screen}"
-        );
-        // L'arbre et le détail restent visibles, dans la même zone.
+        for name in [
+            "Environnement",
+            "Aucun",
+            "local",
+            "staging",
+            "malformed.bru",
+        ] {
+            assert!(screen.contains(name), "{name} :\n{screen}");
+        }
         assert!(
             lines[1].contains("Collection") && lines[1].contains("Détail"),
             "{}",
             lines[1]
         );
-        let areas = layout_for((100, 30), None).expect("layout");
-        assert!(
-            areas.response_status.y < areas.response.y && areas.response.y < areas.environment.y,
-            "{areas:?}"
-        );
 
-        // Indicateur mis à jour après sélection, panneau toujours affiché.
+        // Indicateur mis à jour après sélection.
         model.current_environment = Some("staging".into());
         let screen = render(&model, 100, 30).join("\n");
-        assert!(screen.contains("staging"), "{screen}");
+        assert!(screen.contains("staging ▾"), "{screen}");
         assert!(!screen.contains("Aucun environnement"), "{screen}");
     }
 
@@ -2236,33 +2216,25 @@ mod tests {
             .collect()
     }
 
+    /// Onglets sur la première ligne de la réponse, statut résumé sur sa
+    /// bordure haute à droite. Le statut n'est pas répété dans le texte.
     #[test]
-    fn status_panel_is_drawn_above_the_response_panel() {
+    fn response_header_shows_tabs_and_status_summary() {
         use crate::app::test_support::runner_probe_model;
 
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
         let lines = render(&model, 100, 30);
         let areas = layout_for((100, 30), None).expect("layout");
-        let status = region(&lines, areas.response_status);
-        assert!(status[0].contains("Statut"), "{status:?}");
-        assert!(status[1].contains("Statut  200 OK"), "{status:?}");
-        assert!(
-            status[2].contains("Temps   6 ms  Taille 21 o"),
-            "{status:?}"
-        );
-        assert!(status[3].contains("✓ réussi · 2/2"), "{status:?}");
-        let response = region(&lines, areas.response);
-        assert!(response[0].contains("Réponse"), "{response:?}");
-        assert!(!response.join("\n").contains("200"), "{response:?}");
-    }
+        let header = &region(&lines, inner(areas.response))[0];
+        assert!(header.starts_with("Corps   En-têtes   Tests"), "{header}");
+        let border = &region(&lines, areas.response)[0];
+        assert!(border.ends_with(" 200 OK  6 ms  21 o  ✓ 2/2 ╮"), "{border}");
+        let text = region(&lines, response_text_area(areas.response)).join("\n");
+        assert!(!text.contains("200 OK"), "{text}");
+        assert!(!text.contains("Corps"), "{text}");
 
-    #[test]
-    fn status_panel_is_hidden_by_full_body_panels_and_loading_states() {
-        use crate::app::test_support::runner_probe_model;
-
-        let mut model = runner_probe_model();
-        select(&mut model, "green.bru");
+        // Le panneau Statut n'existe plus, quel que soit l'état.
         for focus in [
             Focus::History,
             Focus::Diagnostics,
@@ -2273,42 +2245,10 @@ mod tests {
             let screen = render(&model, 100, 30).join("\n");
             assert!(!screen.contains(" Statut "), "{focus:?} :\n{screen}");
         }
-
-        // Le panneau Environnement étant permanent, il ne masque plus
-        // Statut (`add-environment-panel-and-edit-popup`).
-        model.focus = Focus::EnvironmentPicker;
-        let screen = render(&model, 100, 30).join("\n");
-        assert!(screen.contains(" Statut "), "{screen}");
-
-        let loading = Model::new(fixture(), (100, 30));
-        let screen = render(&loading, 100, 30).join("\n");
-        assert!(!screen.contains(" Statut "), "{screen}");
     }
 
     #[test]
-    fn status_panel_never_takes_the_focus_style() {
-        use crate::app::test_support::runner_probe_model;
-
-        let mut model = runner_probe_model();
-        select(&mut model, "green.bru");
-        let areas = layout_for((100, 30), None).expect("layout");
-        let focus_fg = theme::FOCUS.fg.expect("fg défini");
-        let mut foci = Vec::new();
-        for _ in 0..3 {
-            update(&mut model, Message::NextFocus);
-            foci.push(model.focus);
-            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
-                .expect("terminal");
-            terminal.draw(|frame| view(&model, frame)).expect("rendu");
-            let corner =
-                &terminal.backend().buffer()[(areas.response_status.x, areas.response_status.y)];
-            assert_ne!(corner.fg, focus_fg, "{:?}", model.focus);
-        }
-        assert_eq!(foci, [Focus::Detail, Focus::Response, Focus::Tree]);
-    }
-
-    #[test]
-    fn status_panel_survives_minimal_and_absurd_sizes() {
+    fn response_header_survives_minimal_and_absurd_sizes() {
         use crate::app::test_support::runner_probe_model;
 
         let mut model = runner_probe_model();
@@ -2316,20 +2256,17 @@ mod tests {
         model.size = (60, 11);
         let lines = render(&model, 60, 11);
         let areas = layout_for((60, 11), None).expect("layout");
-        let status = region(&lines, areas.response_status);
-        assert!(status[1].contains(" 200 "), "{status:?}");
-        let response = region(&lines, areas.response);
+        let response = region(&lines, inner(areas.response));
+        assert!(response[0].starts_with("Corps"), "{response:?}");
         assert!(
-            response[1..response.len() - 1]
-                .iter()
-                .any(|row| !row.trim_matches(['│', ' ']).is_empty()),
+            response[1..].iter().any(|row| !row.trim().is_empty()),
             "{response:?}"
         );
         render(&model, 1, 1);
     }
 
     #[test]
-    fn response_end_shows_the_last_line_under_the_status_panel() {
+    fn response_end_shows_the_last_line() {
         use crate::app::test_support::runner_probe_model;
 
         let mut model = runner_probe_model();
@@ -2344,7 +2281,7 @@ mod tests {
             .expect("réponse non vide");
         let lines = render(&model, 100, 12);
         let areas = layout_for((100, 12), None).expect("layout");
-        let mut text_area = inner(areas.response);
+        let mut text_area = response_text_area(areas.response);
         // La gouttière des numéros de ligne précède le texte.
         let gutter = detail::response_gutter_width(&model, text_area.width);
         text_area.x += gutter;
@@ -2353,9 +2290,8 @@ mod tests {
         assert_eq!(response.last().map(|l| l.trim_end()), Some(last.as_str()));
     }
 
-    /// Le corps de la réponse est numéroté dans une gouttière atténuée,
-    /// à partir de 1 sur sa première ligne ; la barre d'onglets ne l'est
-    /// pas.
+    /// Le corps de la réponse est numéroté dans une gouttière sur fond
+    /// distinct, à partir de 1 sur sa première ligne.
     #[test]
     fn response_body_lines_are_numbered_in_a_gutter() {
         use crate::app::test_support::runner_probe_model;
@@ -2364,7 +2300,7 @@ mod tests {
         select(&mut model, "green.bru");
         let start = detail::response_body_start(&model).expect("onglet Corps");
         let areas = layout_for((100, 30), None).expect("layout");
-        let panel = inner(areas.response);
+        let panel = response_text_area(areas.response);
         let gutter = detail::response_gutter_width(&model, panel.width);
         assert!(gutter >= 2);
         let lines = render(&model, 100, 30);
@@ -2375,20 +2311,18 @@ mod tests {
                 .take(usize::from(gutter))
                 .collect()
         };
-        assert_eq!(gutter_text(0).trim(), "", "barre d'onglets non numérotée");
         assert_eq!(gutter_text(start).trim(), "1");
         assert_eq!(gutter_text(start + 1).trim(), "2");
     }
 
     #[test]
-    fn status_panel_follows_the_run_lifecycle() {
+    fn response_header_follows_the_run_lifecycle() {
         use crate::app::model::ActiveRun;
         use crate::app::test_support::runner_probe_model;
         use crate::runner::{RunEvent, RunId, RunOutcome};
 
         let areas = layout_for((100, 30), None).expect("layout");
-        let status_of =
-            |model: &Model| region(&render(model, 100, 30), areas.response_status).join("\n");
+        let header_of = |model: &Model| region(&render(model, 100, 30), areas.response)[0].clone();
         let start = |model: &mut Model| {
             model.run.active = Some(ActiveRun {
                 id: RunId(7),
@@ -2410,23 +2344,18 @@ mod tests {
         let mut model = runner_probe_model();
         select(&mut model, "folder/down.bru");
         start(&mut model);
-        let running = status_of(&model);
-        assert!(running.contains(" en cours "), "{running}");
-        assert!(running.contains("précédent :"), "{running}");
-        assert!(running.contains("aucune réponse · 0 ms"), "{running}");
+        assert!(header_of(&model).contains(" en cours "));
         cancel(&mut model);
-        let after = status_of(&model);
+        let after = header_of(&model);
         assert!(!after.contains("en cours"), "{after}");
-        assert!(after.contains(" aucune réponse "), "{after}");
+        assert!(after.contains("aucune réponse"), "{after}");
 
-        // Première exécution annulée : retour au tiret neutre.
+        // Première exécution : l'indicateur s'affiche aussi sans résultat.
         model.run.outcomes.clear();
         start(&mut model);
-        assert!(status_of(&model).contains(" en cours "));
+        assert!(header_of(&model).contains(" en cours "));
         cancel(&mut model);
-        let after = status_of(&model);
-        assert!(after.contains('—'), "{after}");
-        assert!(!after.contains("en cours"), "{after}");
+        assert!(!header_of(&model).contains("en cours"));
     }
 
     // --- Ajout, suppression, renommage (`add-entry-management`) ---------
@@ -2735,7 +2664,6 @@ mod tests {
         assert_eq!(tree_zoom.tree, normal.body);
         assert_eq!(tree_zoom.detail, Rect::default());
         assert_eq!(tree_zoom.environment, Rect::default());
-        assert_eq!(tree_zoom.response_status, Rect::default());
         assert_eq!(tree_zoom.response, Rect::default());
 
         // 2. Zoom Détail
@@ -2744,24 +2672,14 @@ mod tests {
         assert_eq!(detail_zoom.tree, Rect::default());
         assert_eq!(detail_zoom.detail, normal.body);
         assert_eq!(detail_zoom.environment, Rect::default());
-        assert_eq!(detail_zoom.response_status, Rect::default());
         assert_eq!(detail_zoom.response, Rect::default());
 
-        // 3. Zoom Réponse : Statut compact au-dessus de la réponse
+        // 3. Zoom Réponse : la réponse occupe tout le corps.
         let resp_zoom = layout_for(size, Some(Focus::Response)).expect("resp zoom");
-        assert_eq!(resp_zoom.body, normal.body);
         assert_eq!(resp_zoom.tree, Rect::default());
-        assert_eq!(detail_zoom.detail, normal.body);
+        assert_eq!(resp_zoom.detail, Rect::default());
         assert_eq!(resp_zoom.environment, Rect::default());
-        assert_eq!(resp_zoom.response_status.x, normal.body.x);
-        assert_eq!(resp_zoom.response_status.y, normal.body.y);
-        assert_eq!(resp_zoom.response_status.width, normal.body.width);
-        assert_eq!(resp_zoom.response_status.height, 3);
-        assert!(resp_zoom.status_panel_compact());
-        assert_eq!(resp_zoom.response.x, normal.body.x);
-        assert_eq!(resp_zoom.response.y, normal.body.y + 3);
-        assert_eq!(resp_zoom.response.width, normal.body.width);
-        assert_eq!(resp_zoom.response.height, normal.body.height - 3);
+        assert_eq!(resp_zoom.response, normal.body);
     }
 
     #[test]
@@ -2791,7 +2709,7 @@ mod tests {
         model.focus = Focus::Response;
         let screen = render(&model, 100, 30).join("\n");
         assert!(screen.contains("Réponse [plein écran — z]"), "{screen}");
-        assert!(screen.contains("Statut"), "{screen}");
+        assert!(screen.contains("200 OK"), "{screen}");
         assert!(!screen.contains("Collection"), "{screen}");
         assert!(!screen.contains("Détail"), "{screen}");
     }
