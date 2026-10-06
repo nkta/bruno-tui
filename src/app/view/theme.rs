@@ -78,6 +78,15 @@ pub const JSON_NULL: Style = Style::new().fg(Color::Rgb(230, 120, 140));
 /// Ponctuation syntaxique JSON (`{`, `}`, `[`, `]`, `:`, `,`) dans le corps de réponse.
 pub const JSON_PUNCTUATION: Style = Style::new().fg(Color::Rgb(180, 190, 205));
 
+/// Fil d'Ariane du pied de page : bande légèrement plus claire que le
+/// fond.
+pub const BREADCRUMB: Style = Style::new().bg(Color::Rgb(52, 59, 71));
+/// Environnement actif dans l'en-tête, en liste déroulante encadrée.
+pub const ENV_CHIP: Style = Style::new()
+    .bg(Color::Rgb(52, 59, 71))
+    .fg(Color::Rgb(140, 185, 150))
+    .add_modifier(Modifier::BOLD);
+
 /// Cadre commun à tous les panneaux : bordure arrondie.
 pub fn bordered() -> Block<'static> {
     Block::bordered().border_type(BorderType::Rounded)

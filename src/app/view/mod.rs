@@ -84,8 +84,11 @@ pub struct Areas {
     pub response_status: Rect,
     /// Panneau Réponse, sous le panneau Statut.
     pub response: Rect,
-    /// Barre d'état du bas de l'écran.
+    /// Barre d'état du bas de l'écran (rappel de touches, messages).
     pub status: Rect,
+    /// Fil d'Ariane du nœud sélectionné, sous la barre d'état ; vide
+    /// (hauteur 0) sous [`STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT`].
+    pub breadcrumb: Rect,
 }
 
 impl Areas {
@@ -110,10 +113,18 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         return None;
     }
-    let body_height = area.height - 2;
+    let full_size = area.height >= STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT;
+    // Pied de page : barre d'état, plus le fil d'Ariane en grande taille.
+    let footer_height = if full_size { 2 } else { 1 };
+    let body_height = area.height - 1 - footer_height;
     let body = Rect::new(area.x, area.y + 1, area.width, body_height);
     let title = Rect::new(area.x, area.y, area.width, 1);
-    let status = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+    let status = Rect::new(area.x, area.y + 1 + body_height, area.width, 1);
+    let breadcrumb = if full_size {
+        Rect::new(area.x, area.y + area.height - 1, area.width, 1)
+    } else {
+        Rect::default()
+    };
 
     match zoom {
         Some(Focus::Tree) => Some(Areas {
@@ -125,6 +136,7 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             response_status: Rect::default(),
             response: Rect::default(),
             status,
+            breadcrumb,
         }),
         Some(Focus::Detail) => Some(Areas {
             title,
@@ -135,6 +147,7 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             response_status: Rect::default(),
             response: Rect::default(),
             status,
+            breadcrumb,
         }),
         Some(Focus::Response) => {
             let status_panel_height = STATUS_PANEL_COMPACT_HEIGHT;
@@ -154,6 +167,7 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
                 response_status,
                 response,
                 status,
+                breadcrumb,
             })
         }
         _ => {
@@ -162,7 +176,6 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             let detail_width = (remaining * 50 / 100).max(MIN_DETAIL_WIDTH);
             let response_width = (remaining - detail_width).max(MIN_RESPONSE_WIDTH);
             let response_x = body.x + tree_width + detail_width;
-            let full_size = area.height >= STATUS_PANEL_FULL_MIN_TERMINAL_HEIGHT;
             let status_panel_height = if full_size {
                 STATUS_PANEL_HEIGHT
             } else {
@@ -173,26 +186,30 @@ pub fn layout(area: Rect, zoom: Option<Focus>) -> Option<Areas> {
             } else {
                 ENV_PANEL_COMPACT_HEIGHT
             };
-            let response_y = body.y + env_panel_height + status_panel_height;
+            // Colonne de droite : Statut, Réponse, puis Environnement en
+            // bas, comme la maquette (`exempleTui/`).
+            let response_height =
+                body_height.saturating_sub(env_panel_height + status_panel_height);
             Some(Areas {
                 title,
                 body,
                 tree: Rect::new(body.x, body.y, tree_width, body_height),
                 detail: Rect::new(body.x + tree_width, body.y, detail_width, body_height),
-                environment: Rect::new(response_x, body.y, response_width, env_panel_height),
-                response_status: Rect::new(
-                    response_x,
-                    body.y + env_panel_height,
-                    response_width,
-                    status_panel_height,
-                ),
+                response_status: Rect::new(response_x, body.y, response_width, status_panel_height),
                 response: Rect::new(
                     response_x,
-                    response_y,
+                    body.y + status_panel_height,
                     response_width,
-                    body_height.saturating_sub(env_panel_height + status_panel_height),
+                    response_height,
+                ),
+                environment: Rect::new(
+                    response_x,
+                    body.y + status_panel_height + response_height,
+                    response_width,
+                    env_panel_height,
                 ),
                 status,
+                breadcrumb,
             })
         }
     }
@@ -220,7 +237,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
         return;
     };
 
-    frame.render_widget(Paragraph::new(title_line(model)), areas.title);
+    render_header(model, frame, areas.title);
 
     match &model.collection {
         CollectionState::Loading => {
@@ -354,6 +371,99 @@ pub fn view(model: &Model, frame: &mut Frame) {
         Paragraph::new(status_line(model)).style(Style::new().add_modifier(Modifier::DIM)),
         areas.status,
     );
+    if areas.breadcrumb.height > 0 {
+        frame.render_widget(
+            Paragraph::new(breadcrumb_line(model)).style(theme::BREADCRUMB),
+            areas.breadcrumb,
+        );
+    }
+}
+
+/// En-tête sur une ligne : nom de l'application et de la collection à
+/// gauche, rappel de recherche au centre, environnement actif à droite.
+/// Les deux derniers ne sont posés que s'ils tiennent sans chevaucher.
+fn render_header(model: &Model, frame: &mut Frame, area: Rect) {
+    let title = title_line(model);
+    let title_width = u16::try_from(title.width()).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(title), area);
+    let CollectionState::Loaded(_) = model.collection else {
+        return;
+    };
+    let env = environment_chip(model);
+    let env_width = u16::try_from(env.width()).unwrap_or(u16::MAX);
+    let mut right_edge = area.right();
+    if title_width + 1 + env_width <= area.width {
+        right_edge -= env_width;
+        frame.render_widget(
+            Paragraph::new(env),
+            Rect::new(right_edge, area.y, env_width, 1),
+        );
+    }
+    let search = Line::from(Span::styled(SEARCH_HINT, theme::EDITABLE_BODY));
+    let search_width = u16::try_from(search.width()).unwrap_or(u16::MAX);
+    let centered = area.x + area.width.saturating_sub(search_width) / 2;
+    if centered > area.x + title_width + 1 && centered + search_width + 1 < right_edge {
+        frame.render_widget(
+            Paragraph::new(search).style(theme::LABEL),
+            Rect::new(centered, area.y, search_width, 1),
+        );
+    }
+}
+
+/// Rappel de la recherche dans l'en-tête : la touche `/` ouvre la saisie.
+const SEARCH_HINT: &str = " ⌕ Rechercher : /                ";
+
+/// Environnement actif en liste déroulante, ouverte par `E`.
+fn environment_chip(model: &Model) -> Line<'static> {
+    let env_label = model
+        .current_environment
+        .as_deref()
+        .unwrap_or("Aucun environnement");
+    Line::from(vec![
+        Span::styled(" E ", theme::LABEL),
+        Span::styled(format!(" {env_label} ▾ "), theme::ENV_CHIP),
+    ])
+}
+
+/// Fil d'Ariane du nœud sélectionné : collection, dossiers, puis le nom du
+/// nœud en évidence.
+fn breadcrumb_line(model: &Model) -> Line<'static> {
+    let CollectionState::Loaded(collection) = &model.collection else {
+        return Line::default();
+    };
+    let separator = || Span::styled(" › ", theme::LABEL);
+    let mut spans = vec![
+        Span::styled(" ⌂", theme::METHOD),
+        separator(),
+        Span::raw(collection.name.clone()),
+    ];
+    let Some(node) = model.selected_node() else {
+        return Line::from(spans);
+    };
+    if let Some(parent) = node.path().parent() {
+        for component in parent.components() {
+            spans.push(separator());
+            spans.push(Span::raw(
+                component.as_os_str().to_string_lossy().into_owned(),
+            ));
+        }
+    }
+    spans.push(separator());
+    match node {
+        TreeNode::Request(request) => {
+            spans.push(Span::styled(
+                format!("{} ", request.view.method.to_ascii_uppercase()),
+                theme::METHOD,
+            ));
+            spans.push(Span::styled(detail::request_name(request), theme::FOCUS));
+        }
+        TreeNode::Folder(folder) => spans.push(Span::styled(folder.name.clone(), theme::FOCUS)),
+        TreeNode::Error(error) => spans.push(Span::styled(
+            error.path.display().to_string(),
+            theme::LOAD_ERROR,
+        )),
+    }
+    Line::from(spans)
 }
 
 /// Zone du popup d'édition d'un environnement : centrée sur `screen`,
@@ -501,19 +611,10 @@ fn title_line(model: &Model) -> Line<'static> {
             Span::raw("Erreur de chargement".to_owned()),
         ]),
         CollectionState::Loaded(collection) => {
-            let env_label = model
-                .current_environment
-                .as_deref()
-                .unwrap_or("Aucun environnement");
             let mut spans = vec![
-                Span::styled("bruno-tui", Style::new().add_modifier(Modifier::BOLD)),
+                Span::styled("bruno-tui", theme::FOCUS),
                 Span::raw(" · "),
                 Span::raw(collection.name.clone()),
-                Span::raw(" · "),
-                Span::styled(
-                    env_label.to_owned(),
-                    Style::new().add_modifier(Modifier::DIM),
-                ),
             ];
             let error_count = crate::app::diagnostics::diagnostics(collection).len();
             if error_count > 0 {
@@ -993,7 +1094,8 @@ mod tests {
             ]
         );
         assert!(lines[13].starts_with('│') && lines[13].chars().nth(1) == Some(' '));
-        assert!(lines[29].contains("q quitter"), "{}", lines[29]);
+        // Ligne 28 = barre d'état, ligne 29 = fil d'Ariane, sur hauteur 30.
+        assert!(lines[28].contains("q quitter"), "{}", lines[28]);
     }
 
     #[test]
@@ -1098,12 +1200,12 @@ mod tests {
                 (response.x, response.width),
                 "{size:?}"
             );
-            // Environnement, en haut de la colonne, puis Statut, puis
-            // Réponse, empilés sans recouvrement
-            // (`add-environment-panel-and-edit-popup`).
-            assert_eq!(env.y, areas.body.y, "{size:?}");
-            assert_eq!(status.y, env.bottom(), "{size:?}");
+            // Statut en haut de la colonne, puis Réponse, puis
+            // Environnement en bas, empilés sans recouvrement.
+            assert_eq!(status.y, areas.body.y, "{size:?}");
             assert_eq!(response.y, status.bottom(), "{size:?}");
+            assert_eq!(env.y, response.bottom(), "{size:?}");
+            assert_eq!(env.bottom(), areas.body.bottom(), "{size:?}");
             assert_eq!(
                 env.height + status.height + response.height,
                 areas.body.height,
@@ -1202,7 +1304,7 @@ mod tests {
 
         // Rendu à l'écran via TestBackend
         let screen = render(&model, 100, 30);
-        let status_row = &screen[29]; // ligne 29 = barre d'état sur hauteur 30
+        let status_row = &screen[28]; // ligne 28 = barre d'état sur hauteur 30
         assert!(
             status_row.contains("|.a"),
             "la barre d'état à l'écran doit contenir |.a mais vaut :\n{status_row}"
@@ -1214,7 +1316,7 @@ mod tests {
         let line_after = status_line(&model);
         assert!(!line_after.starts_with('|'), "{line_after}");
         let screen_after = render(&model, 100, 30);
-        assert!(!screen_after[29].contains("|.a"), "{}", screen_after[29]);
+        assert!(!screen_after[28].contains("|.a"), "{}", screen_after[28]);
     }
 
     #[test]
@@ -1234,9 +1336,9 @@ mod tests {
         assert!(line.contains("Aucun corps de réponse à ouvrir"), "{line}");
         let screen = render(&model, 100, 30);
         assert!(
-            screen[29].contains("Aucun corps de réponse à ouvrir"),
+            screen[28].contains("Aucun corps de réponse à ouvrir"),
             "{}",
-            screen[29]
+            screen[28]
         );
 
         model.last_status = Some(StatusMessage::EditorError("binaire introuvable".into()));
@@ -1247,9 +1349,9 @@ mod tests {
         );
         let screen = render(&model, 100, 30);
         assert!(
-            screen[29].contains("Échec de l'éditeur : binaire introuvable"),
+            screen[28].contains("Échec de l'éditeur : binaire introuvable"),
             "{}",
-            screen[29]
+            screen[28]
         );
     }
 
@@ -1781,7 +1883,7 @@ mod tests {
 
         model.focus = Focus::Diagnostics;
         let lines = render(&model, 100, 30);
-        let status = &lines[29];
+        let status = &lines[28];
         assert!(
             status.contains("↑↓ naviguer  → aller au nœud  Échap arbre"),
             "{status}"
@@ -1789,7 +1891,7 @@ mod tests {
 
         model.focus = Focus::History;
         let lines = render(&model, 100, 30);
-        let status = &lines[29];
+        let status = &lines[28];
         assert!(
             status.contains("↑↓ naviguer  r rejouer  Échap arbre"),
             "{status}"
@@ -1797,7 +1899,7 @@ mod tests {
 
         model.focus = Focus::Campaign;
         let lines = render(&model, 100, 30);
-        let status = &lines[29];
+        let status = &lines[28];
         assert!(
             status.contains("↑↓ naviguer  Entrée/→ aller au détail  Échap arbre"),
             "{status}"
@@ -1805,7 +1907,7 @@ mod tests {
 
         model.focus = Focus::EnvironmentPicker;
         let lines = render(&model, 100, 30);
-        let status = &lines[29];
+        let status = &lines[28];
         assert!(
             status.contains("↑↓ naviguer  Entrée activer  e éditer  Échap arbre"),
             "{status}"
@@ -1818,7 +1920,7 @@ mod tests {
         // troncature.
         model.focus = Focus::Response;
         let lines = render(&model, 130, 30);
-        let status = &lines[29];
+        let status = &lines[28];
         assert!(
             status.contains(
                 "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter"
@@ -1859,8 +1961,7 @@ mod tests {
         );
         let areas = layout_for((100, 30), None).expect("layout");
         assert!(
-            areas.environment.y < areas.response_status.y
-                && areas.response_status.y < areas.response.y,
+            areas.response_status.y < areas.response.y && areas.response.y < areas.environment.y,
             "{areas:?}"
         );
 
@@ -1926,7 +2027,12 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(0, 0)].bg, bg, "ligne de titre");
         assert_eq!(buffer[(2, 5)].bg, bg, "panneau de l'arbre");
-        assert_eq!(buffer[(0, 29)].bg, bg, "barre d'état");
+        assert_eq!(buffer[(0, 28)].bg, bg, "barre d'état");
+        assert_eq!(
+            buffer[(0, 29)].bg,
+            theme::BREADCRUMB.bg.expect("fond"),
+            "fil d'Ariane"
+        );
 
         // État Loading.
         let loading = Model::new("/somewhere/else".into(), (100, 30));
@@ -2064,14 +2170,46 @@ mod tests {
         assert!(screen.contains("nom invalide"), "{screen}");
     }
 
+    /// L'en-tête porte l'environnement actif à droite ; le fil d'Ariane,
+    /// sur la dernière ligne, mène de la collection au nœud sélectionné.
+    /// Sous la hauteur de forme complète, pas de fil d'Ariane.
+    #[test]
+    fn header_and_breadcrumb() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "folder/down.bru");
+        let lines = render(&model, 100, 30);
+        assert!(
+            lines[0].starts_with("bruno-tui · runner-probe"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].trim_end().ends_with("Aucun environnement ▾"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains("Rechercher : /"), "{}", lines[0]);
+        assert!(
+            lines[29].starts_with(" ⌂ › runner-probe › folder › GET "),
+            "{}",
+            lines[29]
+        );
+
+        let areas = layout_for((100, 19), None).expect("layout");
+        assert_eq!(areas.breadcrumb.height, 0);
+        assert_eq!(areas.status.y, 18);
+    }
+
     #[test]
     fn tree_status_line_mentions_secrets_panel() {
         let model = loaded_model((100, 30));
-        let status = &render(&model, 100, 30)[29];
+        let status = &render(&model, 100, 30)[28];
         assert!(status.contains("S secrets"), "{status}");
         // `M` vient en dernier : visible dès que le terminal est assez large,
         // sans jamais masquer les touches existantes.
-        let wide = &render(&model, 120, 30)[29];
+        let wide = &render(&model, 120, 30)[28];
         assert!(wide.contains("q quitter  M souris"), "{wide}");
     }
 
