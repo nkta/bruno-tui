@@ -145,6 +145,11 @@ fn section(text: &str) -> Line<'static> {
     Line::from(Span::styled(text.to_owned(), theme::SECTION))
 }
 
+/// Libellés des champs Méthode et URL, courts pour que l'URL tienne sur
+/// sa ligne dans un panneau étroit.
+const METHOD_LABEL: &str = "Méthode : ";
+const URL_LABEL: &str = "URL : ";
+
 fn field(label: &str, value: impl Into<String>) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{label} : "), theme::LABEL),
@@ -616,6 +621,18 @@ pub fn request_text_with_session(
     request_text_and_fields(request, session).0
 }
 
+/// Nom affiché d'une requête : celui du bloc `meta`, sinon le nom du
+/// fichier sans extension.
+pub fn request_name(request: &RequestNode) -> String {
+    request.view.name.clone().unwrap_or_else(|| {
+        request
+            .path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
+}
+
 /// Texte de détail d'une requête, emplacement de chacun de ses champs
 /// éditables (`improve-direct-editing`, D7) et boîtes de section
 /// (`add-boxed-detail-sections`).
@@ -629,13 +646,7 @@ pub fn request_text_and_fields(
     let shown = session.map_or(view, |s| &s.preview);
     let mut field_lines = Vec::new();
     let mut boxes = Vec::new();
-    let node_name = view.name.clone().unwrap_or_else(|| {
-        request
-            .path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
+    let node_name = request_name(request);
     let mut lines = vec![
         title(node_name),
         field("Chemin", request.path.display().to_string()),
@@ -648,19 +659,22 @@ pub fn request_text_and_fields(
     // jamais la colonne.
     let method_field = EditableField::Method;
     let method_val = session.map_or(view.method.as_str(), |s| field_value(s, &method_field));
+    let method_label = Span::styled(METHOD_LABEL, theme::LABEL);
     field_lines.push(FieldLine {
         field: method_field,
         line: lines.len(),
         count: 1,
-        prefix_width: 0,
+        prefix_width: method_label.width(),
     });
-    let mut method_line = Line::styled(
+    let mut method_value = Line::from(Span::styled(
         method_val.to_owned(),
-        Style::new().add_modifier(Modifier::BOLD),
-    );
+        theme::METHOD.add_modifier(Modifier::BOLD),
+    ));
     if is_field_cursor(session, &method_field) {
-        method_line = tint_line(method_line, FIELD_CURSOR_STYLE);
+        method_value = tint_line(method_value, FIELD_CURSOR_STYLE);
     }
+    let mut method_line = Line::from(method_label);
+    method_line.spans.extend(method_value.spans);
     lines.push(method_line);
 
     if let Some(session) = session
@@ -686,16 +700,19 @@ pub fn request_text_and_fields(
     let url_field = EditableField::Url;
     let url_val = session.map_or(view.url.as_str(), |s| field_value(s, &url_field));
     let (url_val, _) = skip_columns(url_val, value_hscroll(session, &url_field));
+    let url_label = Span::styled(URL_LABEL, theme::LABEL);
     field_lines.push(FieldLine {
         field: url_field,
         line: lines.len(),
         count: 1,
-        prefix_width: 0,
+        prefix_width: url_label.width(),
     });
-    let mut url_line = Line::raw(url_val.to_owned());
+    let mut url_value = Line::raw(url_val.to_owned());
     if is_field_cursor(session, &url_field) {
-        url_line = tint_line(url_line, FIELD_CURSOR_STYLE);
+        url_value = tint_line(url_value, FIELD_CURSOR_STYLE);
     }
+    let mut url_line = Line::from(url_label);
+    url_line.spans.extend(url_value.spans);
     lines.push(url_line);
 
     lines.push(field(
@@ -1473,11 +1490,11 @@ mod tests {
         let mut model = loaded_model((300, 40));
         session_on(&mut model, "post-json.bru");
         let text = detail_text(&model);
-        // URL : sur sa propre ligne (`add-method-editing`), curseur en
-        // colonne 0.
+        // URL : sur sa propre ligne (`add-method-editing`), curseur juste
+        // après le libellé.
         let (line, col) = cursor_for(&mut model, EditableField::Url, &[InputKey::Home]);
         assert_eq!(line, text_line(&text, "https://{{host}}/items"));
-        assert_eq!(col, 0);
+        assert_eq!(col, URL_LABEL.len());
         // En-tête : après « Content-Type: », curseur en fin de valeur.
         let (line, col) = cursor_for(&mut model, EditableField::HeaderValue(0), &[]);
         assert_eq!(line, text_line(&text, "Content-Type: "));
@@ -1778,7 +1795,10 @@ mod tests {
     #[test]
     fn simple_get_without_body() {
         let text = detail_of("simple-get.bru");
-        assert!(text.contains("GET\nhttps://{{host}}/ping"), "{text}");
+        assert!(
+            text.contains("Méthode : GET\nURL : https://{{host}}/ping"),
+            "{text}"
+        );
         assert!(
             text.contains("Corps") && text.contains("Auth : none"),
             "{text}"

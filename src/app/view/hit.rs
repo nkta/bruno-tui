@@ -26,6 +26,31 @@ pub enum Hit {
     Detail { line: Option<u16> },
     /// Réponse : même principe que le détail.
     Response { line: Option<u16> },
+    /// Bouton « Lancer » sur la bordure basse du détail.
+    RunButton,
+}
+
+/// Libellé du bouton « Lancer » du panneau Détail.
+pub const RUN_BUTTON: &str = " ▶ Lancer (r) ";
+
+/// Zone du bouton « Lancer », sur la bordure basse du détail, calée à
+/// droite : présent seulement sur une requête, hors session d'édition, et
+/// si le panneau est assez large. Partagée par le rendu et le clic.
+pub fn run_button_area(model: &Model, detail: Rect) -> Option<Rect> {
+    let is_request = matches!(
+        model.selected_node(),
+        Some(crate::collection::TreeNode::Request(_))
+    );
+    let width = u16::try_from(Line::raw(RUN_BUTTON).width()).ok()?;
+    if !is_request || model.editing.is_some() || detail.width < width + 4 || detail.height < 3 {
+        return None;
+    }
+    Some(Rect::new(
+        detail.right() - 2 - width,
+        detail.bottom() - 1,
+        width,
+        1,
+    ))
 }
 
 /// Position verticale du pointeur pendant un glisser, relativement à
@@ -53,6 +78,9 @@ pub fn hit_test(model: &Model, column: u16, row: u16) -> Option<Hit> {
             .then(|| model.tree.offset + usize::from(row - area.y))
             .filter(|index| *index < model.tree.rows.len());
         return Some(Hit::Tree { row: index });
+    }
+    if run_button_area(model, areas.detail).is_some_and(|button| button.contains(position)) {
+        return Some(Hit::RunButton);
     }
     if areas.detail.contains(position) {
         return Some(Hit::Detail {

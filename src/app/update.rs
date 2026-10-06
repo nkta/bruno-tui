@@ -681,6 +681,15 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             }
         },
         Message::Mouse(input) => {
+            // Le bouton « Lancer » déclenche une exécution, seule action
+            // souris qui produit une commande.
+            if input.kind == MouseKind::Press
+                && mouse_accepted(model)
+                && hit_test(model, input.column, input.row) == Some(Hit::RunButton)
+            {
+                model.mouse.drag = None;
+                return run_selected(model);
+            }
             mouse(model, input);
             Command::None
         }
@@ -2205,7 +2214,21 @@ fn detail_max_scroll(model: &Model) -> u16 {
     let Some(areas) = layout_for(model.size, model.zoomed_panel()) else {
         return 0;
     };
-    max_scroll(detail_line_count(model), inner(areas.detail).height)
+    let inner_area = inner(areas.detail);
+    // Le détail d'une requête est rendu par tampon virtuel : son
+    // défilement compte des lignes affichées, retours à la ligne compris.
+    if let Some(TreeNode::Request(_)) = model.selected_node() {
+        let lines = detail_text(model).lines;
+        let boxes = crate::app::view::detail::detail_section_boxes(model);
+        let height = crate::app::view::detail::content_height(
+            &lines,
+            &boxes,
+            inner_area.width,
+            crate::app::view::detail_wraps(model),
+        );
+        return max_scroll(usize::from(height), inner_area.height);
+    }
+    max_scroll(detail_line_count(model), inner_area.height)
 }
 
 /// Même principe que [`detail_max_scroll`], pour la réponse.
@@ -3086,6 +3109,8 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
                 moved: false,
             });
         }
+        // Traité dans `update`, qui doit renvoyer la commande d'exécution.
+        Hit::RunButton => {}
     }
 }
 
@@ -3291,6 +3316,11 @@ fn mouse_wheel(model: &mut Model, input: MouseInput, up: bool) {
         Hit::Response { .. } => {
             for _ in 0..WHEEL_LINES {
                 scroll_response(model, step());
+            }
+        }
+        Hit::RunButton => {
+            for _ in 0..WHEEL_LINES {
+                scroll_detail(model, step());
             }
         }
     }
@@ -8212,6 +8242,25 @@ mod mouse_tests {
     fn click(model: &mut Model, point: (u16, u16)) {
         event(model, MouseKind::Press, point);
         event(model, MouseKind::Release, point);
+    }
+
+    /// Un clic sur le bouton « Lancer » du détail lance la requête
+    /// sélectionnée ; le bouton disparaît pendant une session d'édition.
+    #[test]
+    fn run_button_click_starts_the_selected_request() {
+        use crate::app::view::hit::run_button_area;
+        let mut model = model_on("simple-get.bru", (100, 30));
+        let areas = layout_for(model.size, None).expect("layout");
+        let button = run_button_area(&model, areas.detail).expect("bouton sur une requête");
+        assert_eq!(button.y, areas.detail.bottom() - 1);
+        assert_eq!(hit_test(&model, button.x, button.y), Some(Hit::RunButton));
+        let command = event(&mut model, MouseKind::Press, (button.x, button.y));
+        assert!(matches!(command, Command::StartRun { .. }), "{command:?}");
+
+        let mut editing = model_on("simple-get.bru", (100, 30));
+        update(&mut editing, Message::NextFocus);
+        update(&mut editing, Message::StartEdit);
+        assert!(run_button_area(&editing, areas.detail).is_none());
     }
 
     fn row_of(model: &Model, path: &str) -> usize {

@@ -270,7 +270,19 @@ pub fn view(model: &Model, frame: &mut Frame) {
                     } else {
                         TITLE_DETAIL
                     };
-                    let detail_block = panel(title, model.focus == Focus::Detail);
+                    let mut detail_block = panel(title, model.focus == Focus::Detail);
+                    if let Some(TreeNode::Request(request)) = model.selected_node() {
+                        // Onglet de la requête ouverte : méthode et nom
+                        // en pastille orange, à la suite du titre.
+                        detail_block = detail_block.title(Span::styled(
+                            format!(
+                                " {} {} ",
+                                request.view.method.to_ascii_uppercase(),
+                                detail::request_name(request)
+                            ),
+                            theme::SELECTION,
+                        ));
+                    }
                     match model.selected_node() {
                         Some(TreeNode::Request(_)) => {
                             render_boxed_detail(model, frame, areas.detail, detail_block);
@@ -288,6 +300,15 @@ pub fn view(model: &Model, frame: &mut Frame) {
                             }
                             frame.render_widget(detail, areas.detail);
                         }
+                    }
+                    if let Some(button) = hit::run_button_area(model, areas.detail) {
+                        frame.render_widget(
+                            Paragraph::new(Span::styled(
+                                hit::RUN_BUTTON,
+                                theme::SUCCESS.fg.map_or(theme::SUCCESS, theme::badge_on),
+                            )),
+                            button,
+                        );
                     }
                     render_insert_cursor(model, frame, areas.detail);
                 }
@@ -1294,9 +1315,10 @@ mod tests {
         let buffer = terminal.backend().buffer();
 
         // Ligne 4 du détail = ligne URL, la méthode ayant sa propre ligne
-        // avant elle (`add-method-editing`).
+        // avant elle (`add-method-editing`) ; la valeur suit le libellé
+        // « URL : » (6 colonnes).
         let url_row = inner_area.y + 4;
-        let url_cell = &buffer[(inner_area.x, url_row)];
+        let url_cell = &buffer[(inner_area.x + 6, url_row)];
         assert!(
             url_cell.modifier.contains(Modifier::REVERSED),
             "le champ sous le curseur doit être visuellement distinct (REVERSED)"
