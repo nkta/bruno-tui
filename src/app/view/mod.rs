@@ -18,7 +18,7 @@ use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{
@@ -856,13 +856,72 @@ fn render_response(model: &Model, frame: &mut Frame, area: Rect) {
         );
         return;
     }
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+    let gutter = detail::response_gutter_width(model, inner_area.width);
+    let content = Rect {
+        x: inner_area.x + gutter,
+        width: inner_area.width - gutter,
+        ..inner_area
+    };
+    if gutter > 0
+        && let Some(start) = detail::response_body_start(model)
+    {
+        render_line_numbers(
+            &text.lines,
+            start,
+            model.response_scroll,
+            inner_area,
+            content.width,
+            gutter,
+            frame,
+        );
+    }
     frame.render_widget(
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
-            .scroll((model.response_scroll, 0))
-            .block(block),
-        area,
+            .scroll((model.response_scroll, 0)),
+        content,
     );
+}
+
+/// Numéros des lignes du corps dans la gouttière de gauche, sur la
+/// première ligne visuelle de chaque ligne logique : même découpage que
+/// `Paragraph` à la largeur `width` du contenu, comme `hit::line_at_row`.
+fn render_line_numbers(
+    lines: &[Line<'static>],
+    body_start: usize,
+    scroll: u16,
+    area: Rect,
+    width: u16,
+    gutter: u16,
+    frame: &mut Frame,
+) {
+    let first = usize::from(scroll);
+    let last = first + usize::from(area.height);
+    let mut row = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        if row >= last {
+            break;
+        }
+        let height = Paragraph::new(Text::from(line.clone()))
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .max(1);
+        if row >= first && index >= body_start {
+            let number = format!(
+                "{:>w$} ",
+                index - body_start + 1,
+                w = usize::from(gutter.saturating_sub(1))
+            );
+            let y = area.y + u16::try_from(row - first).unwrap_or(0);
+            frame.render_widget(
+                Paragraph::new(Span::styled(number, theme::LABEL)),
+                Rect::new(area.x, y, gutter, 1),
+            );
+        }
+        row += height;
+    }
 }
 
 #[cfg(test)]
@@ -1464,7 +1523,7 @@ mod tests {
         let screen = lines.join("\n");
         assert!(screen.contains("Réponse"), "{screen}");
         assert!(screen.contains("Statut"), "{screen}");
-        assert!(screen.contains(" 200  OK"), "{screen}");
+        assert!(screen.contains("Statut  200 OK"), "{screen}");
         assert!(screen.contains("✓ réussi"), "{screen}");
         let detail_col_end = layout_for((100, 30), None).expect("layout").detail.right();
         let detail_only: String = lines
@@ -1516,8 +1575,11 @@ mod tests {
         ] {
             model.response_tab = tab;
             let screen = render(&model, 100, 30).join("\n");
-            assert!(screen.contains(" 200  OK"), "{tab:?} :\n{screen}");
-            assert!(screen.contains("6 ms · 21 o"), "{tab:?} :\n{screen}");
+            assert!(screen.contains("Statut  200 OK"), "{tab:?} :\n{screen}");
+            assert!(
+                screen.contains("Temps   6 ms  Taille 21 o"),
+                "{tab:?} :\n{screen}"
+            );
             assert!(screen.contains("✓ réussi · 2/2"), "{tab:?} :\n{screen}");
             // Aucune répétition dans le panneau Réponse.
             let response = detail::response_plain_lines(&model).join("\n");
@@ -2014,8 +2076,11 @@ mod tests {
         let areas = layout_for((100, 30), None).expect("layout");
         let status = region(&lines, areas.response_status);
         assert!(status[0].contains("Statut"), "{status:?}");
-        assert!(status[1].contains(" 200  OK"), "{status:?}");
-        assert!(status[2].contains("6 ms · 21 o"), "{status:?}");
+        assert!(status[1].contains("Statut  200 OK"), "{status:?}");
+        assert!(
+            status[2].contains("Temps   6 ms  Taille 21 o"),
+            "{status:?}"
+        );
         assert!(status[3].contains("✓ réussi · 2/2"), "{status:?}");
         let response = region(&lines, areas.response);
         assert!(response[0].contains("Réponse"), "{response:?}");
@@ -2109,8 +2174,40 @@ mod tests {
             .expect("réponse non vide");
         let lines = render(&model, 100, 12);
         let areas = layout_for((100, 12), None).expect("layout");
-        let response = region(&lines, inner(areas.response));
+        let mut text_area = inner(areas.response);
+        // La gouttière des numéros de ligne précède le texte.
+        let gutter = detail::response_gutter_width(&model, text_area.width);
+        text_area.x += gutter;
+        text_area.width -= gutter;
+        let response = region(&lines, text_area);
         assert_eq!(response.last().map(|l| l.trim_end()), Some(last.as_str()));
+    }
+
+    /// Le corps de la réponse est numéroté dans une gouttière atténuée,
+    /// à partir de 1 sur sa première ligne ; la barre d'onglets ne l'est
+    /// pas.
+    #[test]
+    fn response_body_lines_are_numbered_in_a_gutter() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        let start = detail::response_body_start(&model).expect("onglet Corps");
+        let areas = layout_for((100, 30), None).expect("layout");
+        let panel = inner(areas.response);
+        let gutter = detail::response_gutter_width(&model, panel.width);
+        assert!(gutter >= 2);
+        let lines = render(&model, 100, 30);
+        let gutter_text = |row: usize| -> String {
+            lines[usize::from(panel.y) + row]
+                .chars()
+                .skip(usize::from(panel.x))
+                .take(usize::from(gutter))
+                .collect()
+        };
+        assert_eq!(gutter_text(0).trim(), "", "barre d'onglets non numérotée");
+        assert_eq!(gutter_text(start).trim(), "1");
+        assert_eq!(gutter_text(start + 1).trim(), "2");
     }
 
     #[test]

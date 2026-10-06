@@ -10,7 +10,8 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::detail::{
-    SectionBox, detail_section_boxes, detail_text, is_box_border, line_width, response_text,
+    SectionBox, detail_section_boxes, detail_text, is_box_border, line_width,
+    response_gutter_width, response_text,
 };
 use super::{detail_wraps, inner, layout_for};
 use crate::app::model::{DragPanel, Model};
@@ -80,7 +81,8 @@ pub fn drag_row(model: &Model, panel: DragPanel, row: u16) -> Option<DragRow> {
     if row >= area.bottom() {
         return Some(DragRow::Below);
     }
-    let line = line_at_row(&lines, &boxes, wraps, area.width, scroll, row - area.y).unwrap_or(last);
+    let width = content_width(model, panel, area.width);
+    let line = line_at_row(&lines, &boxes, wraps, width, scroll, row - area.y).unwrap_or(last);
     Some(DragRow::Line(line))
 }
 
@@ -114,6 +116,17 @@ fn panel_content(
     }
 }
 
+/// Largeur du texte dans l'intérieur d'un panneau : la réponse laisse la
+/// place de sa gouttière de numéros de ligne.
+fn content_width(model: &Model, panel: DragPanel, inner_width: u16) -> u16 {
+    match panel {
+        DragPanel::Detail => inner_width,
+        DragPanel::Response => inner_width - response_gutter_width(model, inner_width),
+    }
+}
+
+/// Ligne logique sous le pointeur, `None` sur la bordure ou après le
+/// contenu.
 fn content_line(model: &Model, panel: DragPanel, area: Rect, position: Position) -> Option<u16> {
     let area = inner(area);
     if !area.contains(position) {
@@ -124,7 +137,7 @@ fn content_line(model: &Model, panel: DragPanel, area: Rect, position: Position)
         &lines,
         &boxes,
         wraps,
-        area.width,
+        content_width(model, panel, area.width),
         scroll,
         position.y - area.y,
     )
@@ -189,6 +202,7 @@ mod tests {
         area: impl Fn(&Areas) -> Rect,
         lines: &[String],
         boxes: &[SectionBox],
+        gutter: u16,
         hit_line: impl Fn(Hit) -> Option<u16>,
     ) -> usize {
         let (width, height) = model.size;
@@ -199,8 +213,8 @@ mod tests {
         for y in panel.y..panel.bottom() {
             let shown: String = screen[usize::from(y)]
                 .chars()
-                .skip(usize::from(panel.x))
-                .take(usize::from(panel.width))
+                .skip(usize::from(panel.x + gutter))
+                .take(usize::from(panel.width - gutter))
                 .collect();
             let hit = hit_test(model, panel.x, y).expect("dans le panneau");
             match hit_line(hit) {
@@ -265,7 +279,8 @@ mod tests {
             let boxes = detail_section_boxes(&model);
             for scroll in [0, 3] {
                 model.detail_scroll = scroll;
-                let checked = assert_rows_match(&model, |a| a.detail, &lines, &boxes, detail_line);
+                let checked =
+                    assert_rows_match(&model, |a| a.detail, &lines, &boxes, 0, detail_line);
                 assert!(checked > 0, "{size:?} {scroll}");
             }
         }
@@ -307,7 +322,10 @@ mod tests {
         select(&mut model, "green.bru");
         let lines = response_plain_lines(&model);
         assert!(!lines.is_empty());
-        let checked = assert_rows_match(&model, |a| a.response, &lines, &[], response_line);
+        let areas = layout_for(model.size, None).expect("taille suffisante");
+        let gutter = response_gutter_width(&model, inner(areas.response).width);
+        assert!(gutter > 0, "le corps JSON doit être numéroté");
+        let checked = assert_rows_match(&model, |a| a.response, &lines, &[], gutter, response_line);
         assert!(checked > 0);
     }
 

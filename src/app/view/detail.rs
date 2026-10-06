@@ -82,22 +82,59 @@ pub fn detail_section_boxes(model: &Model) -> Vec<SectionBox> {
 /// aucun résultat exploitable (pas de sélection, nœud non-requête, ou
 /// requête jamais exécutée).
 pub fn response_text(model: &Model) -> Text<'static> {
+    response_text_and_body_start(model).0
+}
+
+/// Index, dans [`response_text`], de la première ligne du corps quand
+/// l'onglet Corps est actif : seules ces lignes reçoivent un numéro dans
+/// la gouttière du panneau Réponse.
+pub fn response_body_start(model: &Model) -> Option<usize> {
+    response_text_and_body_start(model).1
+}
+
+/// Largeur de la gouttière des numéros de ligne du panneau Réponse,
+/// d'intérieur large de `inner_width` : chiffres du plus grand numéro plus
+/// un espace, ou 0 sans corps numéroté. Laisse toujours au moins une
+/// colonne au contenu. Partagée par le rendu et par `hit.rs`.
+pub fn response_gutter_width(model: &Model, inner_width: u16) -> u16 {
+    let (text, start) = response_text_and_body_start(model);
+    let Some(start) = start else {
+        return 0;
+    };
+    let count = text.lines.len().saturating_sub(start);
+    if count == 0 {
+        return 0;
+    }
+    u16::try_from(count.to_string().len() + 1)
+        .unwrap_or(0)
+        .min(inner_width.saturating_sub(1))
+}
+
+fn response_text_and_body_start(model: &Model) -> (Text<'static>, Option<usize>) {
     let Some(TreeNode::Request(request)) = model.selected_node() else {
-        return Text::default();
+        return (Text::default(), None);
     };
     let Some(outcome) = model.run.outcomes.get(&request.path) else {
-        return Text::default();
+        return (Text::default(), None);
     };
     let mut lines = status_band(outcome);
     lines.push(tab_bar(model.response_tab));
     lines.push(Line::default());
     let filter = model.filter.as_ref().filter(|f| f.target == request.path);
+    let mut body_start = None;
     match model.response_tab {
-        ResponseTab::Body => lines.extend(body_tab_lines(outcome, filter)),
+        ResponseTab::Body => {
+            let body = body_tab_lines(outcome, filter);
+            // La ligne du filtre, s'il y en a une, n'est pas numérotée.
+            let filter_lines =
+                usize::from(filter.is_some_and(|f| f.editing || f.applied.is_some()));
+            body_start = Some(lines.len() + filter_lines);
+            lines.extend(body);
+        }
         ResponseTab::Headers => lines.extend(headers_tab_lines(outcome)),
         ResponseTab::Tests => lines.extend(tests_tab_lines(outcome)),
     }
-    Text::from(lines)
+    (Text::from(lines), body_start)
 }
 
 fn title(text: String) -> Line<'static> {
@@ -1133,8 +1170,8 @@ fn tests_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
     lines
 }
 
-/// Barre d'onglets du panneau Réponse : l'onglet actif en évidence,
-/// les autres atténués.
+/// Barre d'onglets du panneau Réponse : l'onglet actif en pastille sur
+/// fond vert, les autres atténués.
 fn tab_bar(active: ResponseTab) -> Line<'static> {
     let tabs = [
         (ResponseTab::Body, "Corps"),
@@ -1144,14 +1181,14 @@ fn tab_bar(active: ResponseTab) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, (tab, label)) in tabs.into_iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
         let style = if tab == active {
-            theme::SECTION
+            theme::BORDER.fg.map_or(theme::SECTION, theme::badge_on)
         } else {
             theme::LABEL
         };
-        spans.push(Span::styled(label, style));
+        spans.push(Span::styled(format!(" {label} "), style));
     }
     Line::from(spans)
 }
@@ -1823,7 +1860,7 @@ mod tests {
         });
         // Verdict, statut et temps sont portés par le panneau Statut
         // (`status-panel`), jamais répétés dans la réponse.
-        assert!(text.starts_with("Corps"), "{text}");
+        assert!(text.starts_with(" Corps "), "{text}");
         for moved in ["Résultat", "Verdict", "Statut", "Temps de réponse", "12 ms"] {
             assert!(!text.contains(moved), "{moved} :\n{text}");
         }
@@ -1882,7 +1919,7 @@ mod tests {
             ..base_result()
         });
         assert!(
-            text.starts_with("Erreur : connect ECONNREFUSED 127.0.0.1:18799\n\nCorps"),
+            text.starts_with("Erreur : connect ECONNREFUSED 127.0.0.1:18799\n\n Corps "),
             "{text}"
         );
         assert!(!text.contains("Verdict"), "{text}");
@@ -1927,7 +1964,7 @@ mod tests {
     #[test]
     fn status_band_has_no_error_line_without_error() {
         let text = result_detail(base_result());
-        assert!(text.starts_with("Corps"), "{text}");
+        assert!(text.starts_with(" Corps "), "{text}");
         assert!(!text.contains("Erreur"), "{text}");
     }
 
@@ -1948,7 +1985,7 @@ mod tests {
         });
         assert!(!text.contains("ignorée"), "{text}");
         assert!(!text.contains("Verdict"), "{text}");
-        assert!(text.starts_with("Corps"), "{text}");
+        assert!(text.starts_with(" Corps "), "{text}");
     }
 
     /// Le résultat d'exécution n'apparaît plus dans `detail_text` : il est

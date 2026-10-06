@@ -189,15 +189,35 @@ fn result_lines(result: &RequestResult, compact: bool) -> Vec<Line<'static>> {
         ])];
     }
 
-    let mut first = vec![badge];
+    // Forme complète : libellé atténué puis valeur, comme une fiche.
+    let mut status_value = badge_text(&response.status);
     if let Some(label) = response.status_text.as_deref().filter(|t| !t.is_empty()) {
-        first.push(Span::raw(format!(" {label}")));
+        status_value.push(' ');
+        status_value.push_str(label);
     }
-
-    let second = match content_length(result) {
-        Some(bytes) => format!("{time} · {}", format_size(bytes)),
-        None => time,
+    let class_style = match classify(&response.status) {
+        StatusClass::Success => theme::SUCCESS,
+        StatusClass::Redirect => theme::REDIRECT,
+        StatusClass::ClientError => theme::CLIENT_ERROR,
+        StatusClass::Failure => theme::FAILURE,
+        StatusClass::Neutral => theme::LABEL,
     };
+    let first = vec![
+        Span::styled("Statut  ", theme::LABEL),
+        Span::styled(
+            status_value,
+            class_style.add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+    ];
+
+    let mut second = vec![
+        Span::styled("Temps   ", theme::LABEL),
+        Span::styled(time, theme::SUCCESS),
+    ];
+    if let Some(bytes) = content_length(result) {
+        second.push(Span::styled("  Taille ", theme::LABEL));
+        second.push(Span::styled(format_size(bytes), theme::SUCCESS));
+    }
 
     let (passed, total) = check_counts(result);
     let counts = if total == 0 {
@@ -210,7 +230,7 @@ fn result_lines(result: &RequestResult, compact: bool) -> Vec<Line<'static>> {
         Span::raw(format!(" · {counts}")),
     ]);
 
-    vec![Line::from(first), Line::raw(second), third]
+    vec![Line::from(first), Line::from(second), third]
 }
 
 #[cfg(test)]
@@ -347,10 +367,14 @@ mod tests {
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
         let lines = status_panel_lines(&model, false);
-        assert_eq!(plain(&lines), " 200  OK\n6 ms · 21 o\n✓ réussi · 2/2");
         assert_eq!(
-            lines[0].spans[0].style,
-            theme::status_badge(StatusClass::Success)
+            plain(&lines),
+            "Statut  200 OK\nTemps   6 ms  Taille 21 o\n✓ réussi · 2/2"
+        );
+        assert_eq!(lines[0].spans[0].style, theme::LABEL);
+        assert_eq!(
+            lines[0].spans[1].style,
+            theme::SUCCESS.add_modifier(ratatui::style::Modifier::BOLD)
         );
         assert_eq!(lines[2].spans[0].style, theme::SUCCESS);
     }
@@ -360,10 +384,13 @@ mod tests {
         let mut model = runner_probe_model();
         select(&mut model, "ok.bru");
         let lines = status_panel_lines(&model, false);
-        assert_eq!(plain(&lines), " 200  OK\n14 ms · 32 o\n● échec · 2/4");
         assert_eq!(
-            lines[0].spans[0].style,
-            theme::status_badge(StatusClass::Success)
+            plain(&lines),
+            "Statut  200 OK\nTemps   14 ms  Taille 32 o\n● échec · 2/4"
+        );
+        assert_eq!(
+            lines[0].spans[1].style,
+            theme::SUCCESS.add_modifier(ratatui::style::Modifier::BOLD)
         );
         assert_eq!(lines[2].spans[0].style, theme::FAILURE);
     }
@@ -376,12 +403,12 @@ mod tests {
         let text = plain(&lines);
         assert_eq!(
             text,
-            " aucune réponse \n0 ms\n● échec · aucune vérification"
+            "Statut  aucune réponse\nTemps   0 ms\n● échec · aucune vérification"
         );
         assert!(!text.contains("ECONNREFUSED"), "{text}");
         assert_eq!(
-            lines[0].spans[0].style,
-            theme::status_badge(StatusClass::Failure)
+            lines[0].spans[1].style,
+            theme::FAILURE.add_modifier(ratatui::style::Modifier::BOLD)
         );
     }
 
@@ -392,7 +419,7 @@ mod tests {
         let lines = status_panel_lines(&model, false);
         let text = plain(&lines);
         assert!(
-            text.starts_with(" ignorée  request skipped via pre-request script\n"),
+            text.starts_with("Statut  ignorée request skipped via pre-request script\n"),
             "{text}"
         );
         assert!(!text.contains("échec"), "{text}");
@@ -408,7 +435,7 @@ mod tests {
         let result = report.iterations()[0].results[0].clone();
         let lines = result_lines(&result, false);
         let text = plain(&lines);
-        assert!(text.starts_with(" aucune réponse "), "{text}");
+        assert!(text.starts_with("Statut  aucune réponse"), "{text}");
         assert!(text.contains("● échec"), "{text}");
         let error = result.error.as_deref().expect("erreur rapportée");
         assert!(!text.contains(error), "{text}");
@@ -464,7 +491,7 @@ mod tests {
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
         model.run.active = Some(active("ok.bru", false));
-        assert!(plain(&status_panel_lines(&model, false)).starts_with(" 200 "));
+        assert!(plain(&status_panel_lines(&model, false)).starts_with("Statut  200 "));
     }
 
     #[test]
