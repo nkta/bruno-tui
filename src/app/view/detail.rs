@@ -661,14 +661,20 @@ pub fn url_bar_values(model: &Model) -> Option<(String, String)> {
 
 /// Ligne de la barre d'URL : méthode colorée, flèche, puis l'URL avec
 /// ses variables `{{…}}` en vert comme dans Bruno bureau (simple repérage
-/// visuel, aucune variable n'est résolue).
-pub fn url_bar_line(method: &str, url: &str) -> Line<'static> {
+/// visuel, aucune variable n'est résolue). Sans `method_picker` (gRPC,
+/// WebSocket), la flèche est remplacée par un blanc de même largeur.
+pub fn url_bar_line(method: &str, url: &str, method_picker: bool) -> Line<'static> {
+    let suffix = if method_picker {
+        URL_BAR_METHOD_SUFFIX.to_owned()
+    } else {
+        " ".repeat(Line::raw(URL_BAR_METHOD_SUFFIX).width())
+    };
     let mut spans = vec![
         Span::styled(
             method.to_owned(),
             theme::method_style(method).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(URL_BAR_METHOD_SUFFIX, theme::LABEL),
+        Span::styled(suffix, theme::LABEL),
     ];
     let mut rest = url;
     while let Some(start) = rest.find("{{") {
@@ -796,9 +802,38 @@ pub fn request_text_and_fields(
         lines.push(Line::default());
     }
 
+    // gRPC et WebSocket : affichage seul, ni exécution ni édition ; le
+    // type est déjà dans le titre du panneau.
+    if !view.is_http() {
+        lines.push(Line::styled(
+            "Lecture seule, non exécutable".to_owned(),
+            theme::LABEL,
+        ));
+        lines.push(Line::default());
+    }
+
     // Contenu de l'onglet affiché seulement (`RequestTab`).
     match tab {
         RequestTab::Params => {
+            if let Some(grpc) = view.grpc() {
+                boxed_section(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    "Appel gRPC".to_owned(),
+                    |lines, _| {
+                        let shown = |value: &Option<String>| {
+                            value
+                                .clone()
+                                .filter(|v| !v.is_empty())
+                                .unwrap_or_else(|| "non déclaré".to_owned())
+                        };
+                        lines.push(field("  Méthode RPC", shown(&grpc.method)));
+                        lines.push(field("  Type", shown(&grpc.method_type)));
+                        lines.push(field("  Fichier proto", shown(&grpc.proto_path)));
+                    },
+                );
+            }
             boxed_section(
                 &mut lines,
                 &mut field_lines,
@@ -831,9 +866,11 @@ pub fn request_text_and_fields(
             );
         }
         RequestTab::Body => {
+            // gRPC et WebSocket : le corps est une liste de messages.
+            let title = if view.is_http() { "Corps" } else { "Messages" };
             let corps_title = match &view.body {
-                Some(body) => format!("Corps ({})", body_label(&body.kind)),
-                None => "Corps".to_owned(),
+                Some(body) => format!("{title} ({})", body_label(&body.kind)),
+                None => title.to_owned(),
             };
             boxed_section(
                 &mut lines,
@@ -881,7 +918,12 @@ pub fn request_text_and_fields(
                 &mut lines,
                 &mut field_lines,
                 &mut boxes,
-                "En-têtes".to_owned(),
+                // gRPC : le bloc `metadata` tient lieu d'en-têtes.
+                if view.is_grpc() {
+                    "Métadonnées".to_owned()
+                } else {
+                    "En-têtes".to_owned()
+                },
                 |lines, field_lines| {
                     editable_entries(
                         lines,
@@ -919,6 +961,19 @@ pub fn request_text_and_fields(
                     entries(lines, view.vars_post_response());
                 },
             );
+        }
+        RequestTab::Script if let Some(grpc) = view.grpc() => {
+            for (hook, code) in grpc.scripts() {
+                boxed_section(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    format!("Script {hook}"),
+                    |lines, _| {
+                        render_code_block(lines, code);
+                    },
+                );
+            }
         }
         RequestTab::Script => {
             boxed_section(
@@ -992,13 +1047,16 @@ pub fn request_text_and_fields(
 /// alors grisé dans la barre d'onglets.
 pub fn request_tab_is_empty(view: &crate::collection::RequestView, tab: RequestTab) -> bool {
     match tab {
-        RequestTab::Params => view.query_params.is_empty() && view.path_params.is_empty(),
+        RequestTab::Params => {
+            view.grpc().is_none() && view.query_params.is_empty() && view.path_params.is_empty()
+        }
         RequestTab::Body => view.body.is_none(),
         RequestTab::Headers => view.headers.is_empty(),
         RequestTab::Auth => view.auth.is_none(),
         RequestTab::Vars => {
             view.vars_pre_request().is_empty() && view.vars_post_response().is_empty()
         }
+        RequestTab::Script if let Some(grpc) = view.grpc() => !grpc.has_scripts(),
         RequestTab::Script => {
             view.script_pre_request()
                 .is_none_or(|s| s.trim().is_empty())
@@ -2201,7 +2259,7 @@ mod tests {
             (method.as_str(), url.as_str()),
             ("POST", "https://{{host}}/items")
         );
-        let line = url_bar_line(&method, &url);
+        let line = url_bar_line(&method, &url, true);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "POST ▾  https://{{host}}/items");
         let variable = line

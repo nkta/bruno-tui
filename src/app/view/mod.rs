@@ -770,6 +770,12 @@ fn status_message_text(message: &StatusMessage) -> String {
             "Collection OpenCollection (YAML) en lecture seule : édition et enregistrement désactivés"
                 .to_owned()
         }
+        StatusMessage::NotExecutable(kind) => {
+            format!("Requête {kind} : type non exécutable par bru run")
+        }
+        StatusMessage::ReadOnlyRequestType(kind) => {
+            format!("Requête {kind} en lecture seule : l'édition ne gère que les requêtes HTTP")
+        }
     }
 }
 
@@ -1036,7 +1042,13 @@ fn render_url_bar(model: &Model, frame: &mut Frame, area: Rect) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
     let line = match detail::url_bar_values(model) {
-        Some((method, url)) => detail::url_bar_line(&method, &url),
+        Some((method, url)) => {
+            let method_picker = !matches!(
+                model.selected_node(),
+                Some(TreeNode::Request(request)) if !request.view.is_http()
+            );
+            detail::url_bar_line(&method, &url, method_picker)
+        }
         None => Line::from(Span::styled(
             "sélectionner une requête dans l'arbre",
             theme::EMPTY_MESSAGE,

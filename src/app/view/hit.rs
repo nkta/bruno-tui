@@ -38,13 +38,13 @@ pub enum Hit {
 pub const RUN_BUTTON: &str = " ▶ Lancer (r) ";
 
 /// Zone du bouton « Lancer », calée à droite sur la ligne intérieure de
-/// la barre d'URL `url_bar` : présent seulement sur une requête, hors
-/// session d'édition, et si la barre est assez large. Partagée par le
-/// rendu et le clic.
+/// la barre d'URL `url_bar` : présent seulement sur une requête que
+/// `bru run` exécute (ni gRPC ni WebSocket), hors session d'édition, et si
+/// la barre est assez large. Partagée par le rendu et le clic.
 pub fn run_button_area(model: &Model, url_bar: Rect) -> Option<Rect> {
     let is_request = matches!(
         model.selected_node(),
-        Some(crate::collection::TreeNode::Request(_))
+        Some(crate::collection::TreeNode::Request(request)) if request.view.is_http()
     );
     let width = u16::try_from(Line::raw(RUN_BUTTON).width()).ok()?;
     if !is_request || model.editing.is_some() || url_bar.width < width + 4 || url_bar.height < 3 {

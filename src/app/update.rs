@@ -894,6 +894,12 @@ fn run_selected(model: &mut Model) -> Command {
             .get(model.history_selected)
             .map(|entry| (entry.target.clone(), entry.recursive)),
         Focus::Tree | Focus::Detail | Focus::Response => match model.selected_node() {
+            // `bru run` 4.2.1 n'exécute ni gRPC ni WebSocket : rien n'est
+            // lancé (voir `tests/fixtures/reports/grpc-ws.json`).
+            Some(TreeNode::Request(request)) if let Some(kind) = request.view.non_http_label() => {
+                model.last_status = Some(StatusMessage::NotExecutable(kind));
+                return Command::None;
+            }
             Some(TreeNode::Request(request)) => Some((request.path.clone(), false)),
             Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
             Some(TreeNode::Error(_)) | None => None,
@@ -2027,6 +2033,10 @@ fn start_edit(model: &mut Model) {
     let Some(TreeNode::Request(request)) = model.selected_node() else {
         return;
     };
+    if let Some(kind) = request.view.non_http_label() {
+        model.last_status = Some(StatusMessage::ReadOnlyRequestType(kind));
+        return;
+    }
     if read_only_collection(model) {
         model.last_status = Some(StatusMessage::ReadOnlyCollection);
         return;

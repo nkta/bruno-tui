@@ -309,6 +309,18 @@ impl RequestView {
         matches!(self.kind.as_deref(), Some("ws" | "websocket"))
     }
 
+    /// Libellé du type pour une requête que `bru run` n'exécute pas et
+    /// que le writer ne modifie pas (`gRPC`, `WebSocket`) ; `None` sinon.
+    pub fn non_http_label(&self) -> Option<&'static str> {
+        if self.is_grpc() {
+            Some("gRPC")
+        } else if self.is_ws() {
+            Some("WebSocket")
+        } else {
+            None
+        }
+    }
+
     /// Vrai pour une requête HTTP ou GraphQL : la seule sorte que
     /// `bru run` 4.2.1 exécute et que le writer sait modifier.
     pub fn is_http(&self) -> bool {
