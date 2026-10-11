@@ -141,7 +141,12 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
     let mut header_spans = vec![
         Span::styled("Cible : ", theme::LABEL),
         Span::styled(
-            campaign.target.display().to_string(),
+            // Cible vide : campagne lancée sur la racine de la collection.
+            if campaign.target.as_os_str().is_empty() {
+                "collection entière".to_owned()
+            } else {
+                campaign.target.display().to_string()
+            },
             Style::new().add_modifier(Modifier::BOLD),
         ),
         Span::raw("  ·  "),
@@ -718,8 +723,10 @@ fn format_duration(secs: f64) -> String {
 }
 
 /// Calcule la zone centrée pour le popup des options de campagne.
+/// Largeur cible : la ligne la plus longue (`--reporter-skip-all-headers`)
+/// tient en entier sur un terminal de 96 colonnes ou plus.
 pub fn runner_options_popup_area(area: Rect) -> Rect {
-    let width = 72.min(area.width.saturating_sub(4)).max(42);
+    let width = 92.min(area.width.saturating_sub(4)).max(42);
     let height = 16.min(area.height.saturating_sub(2)).max(12);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;

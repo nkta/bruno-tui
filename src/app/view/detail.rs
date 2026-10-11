@@ -1428,6 +1428,31 @@ fn tests_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
     lines
 }
 
+/// Vrai si `received` est l'URL envoyée, éventuellement privée de son port.
+///
+/// `bru` (constaté en 2.13 et 4.2.1) rapporte `response.url` sans le port
+/// de l'URL envoyée (`http://127.0.0.1:18765/a` devient
+/// `http://127.0.0.1/a`) : sans cette tolérance, l'onglet Timeline
+/// afficherait une « URL finale » trompeuse, comme après une redirection.
+fn same_url_but_dropped_port(sent: &str, received: &str) -> bool {
+    if sent == received {
+        return true;
+    }
+    let Some((scheme, rest)) = sent.split_once("://") else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    // `]` en fin d'hôte : IPv6 entre crochets sans port (`[::1]`).
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) || host.ends_with(':') {
+        return false;
+    }
+    received == format!("{scheme}://{host}{tail}")
+}
+
 /// Contenu de l'onglet Timeline : méthode et URL résolue envoyées,
 /// en-têtes envoyés, corps envoyé s'il est disponible, puis statut,
 /// durée (`responseTime`) et URL finale de la réponse si différente.
@@ -1487,7 +1512,10 @@ fn timeline_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
     lines.push(field("  Statut", status_str));
     lines.push(field("  Durée", format!("{} ms", response.response_time)));
     if let Some(resp_url) = &response.url
-        && request.url.as_ref() != Some(resp_url)
+        && !request
+            .url
+            .as_deref()
+            .is_some_and(|sent| same_url_but_dropped_port(sent, resp_url))
     {
         lines.push(field("  URL finale", resp_url));
     }
@@ -1661,6 +1689,25 @@ fn error_text(error: &ErrorNode) -> Text<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_port_is_not_a_final_url() {
+        assert!(same_url_but_dropped_port(
+            "http://127.0.0.1:18765/index.html",
+            "http://127.0.0.1/index.html"
+        ));
+        assert!(same_url_but_dropped_port(
+            "https://h:8443?q=1",
+            "https://h?q=1"
+        ));
+        assert!(same_url_but_dropped_port("http://h/a", "http://h/a"));
+        // Vraie redirection : autre chemin ou autre hôte.
+        assert!(!same_url_but_dropped_port("http://h:8080/a", "http://h/b"));
+        assert!(!same_url_but_dropped_port("http://a:80/x", "http://b/x"));
+        // Pas de port à retirer.
+        assert!(!same_url_but_dropped_port("http://h/a", "http://h/b"));
+        assert!(!same_url_but_dropped_port("http://[::1]/a", "http://[:/a"));
+    }
     use crate::app::test_support::{loaded_model, select};
 
     fn plain(text: &Text<'_>) -> String {
@@ -3060,9 +3107,8 @@ mod tests {
             text.contains("Statut : 501 Unsupported method ('POST')"),
             "{text}"
         );
-        assert!(
-            text.contains("URL finale : http://127.0.0.1/index.html"),
-            "{text}"
-        );
+        // `bru` rapporte `response.url` sans le port : ce n'est pas une
+        // redirection, aucune « URL finale » n'est affichée.
+        assert!(!text.contains("URL finale"), "{text}");
     }
 }

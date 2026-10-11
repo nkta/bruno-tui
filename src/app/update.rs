@@ -1817,10 +1817,9 @@ fn extract_failure_reason(result: &crate::runner::report::RequestResult) -> Stri
     }
     for assertion in &result.assertion_results {
         if assertion.status.is_failure() {
-            let expr = format!(
-                "{} {} {}",
-                assertion.lhs_expr, assertion.operator, assertion.rhs_expr
-            );
+            // `rhsExpr` contient déjà l'opérateur (`eq 404`) : le répéter
+            // donnait « res.status eq eq 404 ».
+            let expr = format!("{} {}", assertion.lhs_expr, assertion.rhs_expr);
             return match &assertion.error {
                 Some(err) => format!("{expr} : {err}"),
                 None => expr,
@@ -8739,7 +8738,7 @@ mod tests {
         res4.assertion_results = vec![AssertionResult {
             uid: "1".into(),
             lhs_expr: "res.status".into(),
-            rhs_expr: "200".into(),
+            rhs_expr: "eq 200".into(),
             rhs_operand: "200".into(),
             operator: "eq".into(),
             status: ResultStatus::Fail,
