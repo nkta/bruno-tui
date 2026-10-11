@@ -280,6 +280,97 @@ impl FileMeta {
     }
 }
 
+/// Environnement(s) parent(s) dont hérite cet environnement (`extends`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvironmentExtends {
+    /// Héritage simple : `extends: <nom>`.
+    Single(String),
+    /// Héritage multiple : `extends [ <nom1>, <nom2> ]`.
+    List(Vec<String>),
+}
+
+impl EnvironmentExtends {
+    /// Représentation textuelle de l'héritage pour l'affichage (ex. `base` ou `base, parent`).
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Single(name) => name.clone(),
+            Self::List(names) => names.join(", "),
+        }
+    }
+}
+
+/// Nom d'environnement valide selon Bruno (`validatedEnvironmentName` de
+/// `@usebruno/lang`) : non vide, 255 caractères au plus, ni caractère
+/// réservé ni nom de périphérique, sans espace ou `-` en tête ni `.` ou
+/// espace en fin. Un nom invalide est ignoré par Bruno ; on l'ignore aussi.
+fn valid_environment_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    let reserved_char = |c: char| "<>:\"/\\|?*".contains(c) || c.is_control();
+    let upper = name.to_ascii_uppercase();
+    let device = ["CON", "PRN", "AUX", "NUL"].contains(&upper.as_str())
+        || ["COM", "LPT"].iter().any(|prefix| {
+            upper
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.len() == 1 && rest.chars().all(|c| c.is_ascii_digit()))
+        });
+    let valid = !name.is_empty()
+        && name.chars().count() <= 255
+        && !device
+        && !name.chars().any(reserved_char)
+        && !name.starts_with(|c: char| c.is_whitespace() || c == '-')
+        && !name.ends_with(|c: char| c.is_whitespace() || c == '.');
+    valid.then(|| name.to_owned())
+}
+
+/// Interprète le contenu d'un bloc `extends [ ... ]` comme la grammaire de
+/// Bruno : entrées séparées par des virgules, soit entre guillemets (avec
+/// échappements `\"`, `\\`, `\n`, `\r`, `\t`), soit nues et rognées. Les
+/// entrées vides sont ignorées. Une entrée invalide invalide toute la liste.
+pub(crate) fn parse_extends_list(content: &str) -> Option<Vec<String>> {
+    let mut items: Vec<String> = Vec::new();
+    let mut chars = content.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        let mut item = String::new();
+        if chars.next_if_eq(&'"').is_some() {
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' => break,
+                    '\\' => match chars.next() {
+                        Some('n') => item.push('\n'),
+                        Some('r') => item.push('\r'),
+                        Some('t') => item.push('\t'),
+                        Some(c @ ('"' | '\\')) => item.push(c),
+                        Some(other) => {
+                            item.push('\\');
+                            item.push(other);
+                        }
+                        None => item.push('\\'),
+                    },
+                    other => item.push(other),
+                }
+            }
+            // Texte résiduel jusqu'à la prochaine virgule : ignoré.
+            while chars.next_if(|c| *c != ',').is_some() {}
+        } else {
+            while let Some(c) = chars.next_if(|c| *c != ',') {
+                item.push(c);
+            }
+            item = item.trim().to_owned();
+        }
+        if !item.is_empty() {
+            items.push(item);
+        }
+        if chars.next().is_none() {
+            break;
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+    items.iter().map(|n| valid_environment_name(n)).collect()
+}
+
 /// Environnement déclaré dans `environments/*.bru`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Environment {
@@ -291,6 +382,10 @@ pub struct Environment {
     /// Noms des variables secrètes ; leurs valeurs ne sont jamais dans le
     /// fichier.
     pub secret_names: Vec<String>,
+    /// Environnement(s) parent(s) (`extends: base` ou `extends [ ... ]`), non résolu.
+    pub extends: Option<EnvironmentExtends>,
+    /// Valeur brute déclarée de la couleur (`color: <valeur>`).
+    pub color: Option<String>,
     pub ast: Option<BruFile>,
 }
 
@@ -300,11 +395,26 @@ impl Environment {
             Some(BlockBody::List(items)) => items.clone(),
             _ => Vec::new(),
         };
+        let extends = match file.declaration("extends") {
+            Some(parent) => valid_environment_name(parent).map(EnvironmentExtends::Single),
+            None => match file.block("extends").map(|b| &b.body) {
+                Some(BlockBody::Unknown { content }) => {
+                    parse_extends_list(file.slice(content)).map(EnvironmentExtends::List)
+                }
+                _ => None,
+            },
+        };
+        let color = file
+            .declaration("color")
+            .map(|c| c.trim().to_owned())
+            .filter(|c| !c.is_empty());
         Self {
             name,
             path,
             variables: key_values(&file, "vars"),
             secret_names,
+            extends,
+            color,
             ast: Some(file),
         }
     }
@@ -530,5 +640,76 @@ mod tests {
             ]
         );
         assert_eq!(view.docs(), Some("This is documentation.\nLine 2."));
+    }
+
+    #[test]
+    fn environment_with_single_extends_and_color() {
+        let source = "extends: base\nvars {\n  host: staging.example.com\n}\ncolor: #ffaa00\n";
+        let file = BruFile::parse_environment(source.to_owned()).expect("valide");
+        let env = Environment::from_ast("staging".into(), "environments/staging.bru".into(), file);
+        assert_eq!(env.name, "staging");
+        assert_eq!(
+            env.extends,
+            Some(EnvironmentExtends::Single("base".to_owned()))
+        );
+        assert_eq!(
+            env.extends.as_ref().map(|e| e.display_name()),
+            Some("base".to_owned())
+        );
+        assert_eq!(env.color, Some("#ffaa00".to_owned()));
+        assert_eq!(env.variables.len(), 1);
+        assert_eq!(env.variables[0].key, "host");
+    }
+
+    #[test]
+    fn environment_with_list_extends_and_quoted_entries() {
+        let source = "extends [\n  base,\n  \"custom parent\"\n]\nvars {\n}\ncolor: #00ff00\n";
+        let file = BruFile::parse_environment(source.to_owned()).expect("valide");
+        let env = Environment::from_ast("multi".into(), "environments/multi.bru".into(), file);
+        assert_eq!(
+            env.extends,
+            Some(EnvironmentExtends::List(vec![
+                "base".to_owned(),
+                "custom parent".to_owned()
+            ]))
+        );
+        assert_eq!(
+            env.extends.as_ref().map(|e| e.display_name()),
+            Some("base, custom parent".to_owned())
+        );
+        assert_eq!(env.color, Some("#00ff00".to_owned()));
+    }
+
+    #[test]
+    fn extends_list_follows_bruno_grammar() {
+        // Entrée entre guillemets contenant une virgule.
+        assert_eq!(
+            parse_extends_list("  base,\n  \"a, b\"\n"),
+            Some(vec!["base".into(), "a, b".into()])
+        );
+        // L'échappement `\"` est décodé, mais `"` est un caractère interdit
+        // dans un nom d'environnement (`invalidNameCharacters`) : liste rejetée.
+        assert_eq!(parse_extends_list("base, \"q\\\"x\""), None);
+        // Entrée nue avec espace interne, entrées vides ignorées.
+        assert_eq!(
+            parse_extends_list("custom parent,, other"),
+            Some(vec!["custom parent".into(), "other".into()])
+        );
+        assert_eq!(parse_extends_list("\n"), None);
+        // Un nom invalide (séparateur de chemin) invalide toute la liste.
+        assert_eq!(parse_extends_list("base, ../x"), None);
+    }
+
+    #[test]
+    fn invalid_extends_name_and_empty_color_are_ignored() {
+        let file =
+            BruFile::parse_environment("extends: bad/name\ncolor:\n".to_owned()).expect("valide");
+        let env = Environment::from_ast("e".into(), "environments/e.bru".into(), file);
+        assert_eq!(env.extends, None);
+        assert_eq!(env.color, None);
+        assert_eq!(valid_environment_name("CON"), None);
+        assert_eq!(valid_environment_name("-x"), None);
+        assert_eq!(valid_environment_name("x."), None);
+        assert_eq!(valid_environment_name(" base "), Some("base".into()));
     }
 }

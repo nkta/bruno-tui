@@ -17,12 +17,23 @@ use super::edit::Replacement;
 use super::error::{EditError, WriteError};
 use super::format::detect_eol;
 use super::{FileStamp, write_atomic};
-use crate::collection::BruFile;
+use crate::collection::{BruFile, NodeKind};
 
-/// Position d'insertion du bloc `vars` s'il n'existe pas encore : tout
-/// début de fichier, cohérent avec les fichiers d'environnement réels où
-/// `vars` précède toujours `vars:secret` (design D2).
-const VARS_CREATION_ANCHOR: usize = 0;
+/// Position d'insertion du bloc `vars` s'il n'existe pas encore : juste
+/// après `extends` (déclaration ou liste) s'il existe, sinon tout début de
+/// fichier, cohérent avec les fichiers d'environnement réels où `vars`
+/// précède toujours `vars:secret` (design D2) ; `color` est écrit en fin
+/// de fichier par Bruno.
+fn vars_creation_anchor(ast: &BruFile) -> usize {
+    ast.nodes()
+        .iter()
+        .find_map(|node| match &node.kind {
+            NodeKind::Declaration(decl) if decl.name == "extends" => Some(node.span.end),
+            NodeKind::Block(block) if block.name == "extends" => Some(node.span.end),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
 
 /// Modification des variables du bloc `vars` d'un environnement.
 ///
@@ -108,14 +119,9 @@ pub(crate) fn resolve(
 
     let raw = ast.raw();
     let eol = detect_eol(raw);
+    let anchor = vars_creation_anchor(ast);
     Ok(dictionary_replacements(
-        raw,
-        eol,
-        "vars",
-        block,
-        &section,
-        VARS_CREATION_ANCHOR,
-        true,
+        raw, eol, "vars", block, &section, anchor, true,
     ))
 }
 
@@ -136,7 +142,7 @@ pub(crate) fn serialize(ast: &BruFile, edits: &[EnvironmentVarEdit]) -> Result<V
 
     let bytes = out.into_bytes();
     let source = String::from_utf8(bytes.clone()).map_err(|_| EditError::Unreadable)?;
-    let _ = BruFile::parse(source).map_err(|_| EditError::Unreadable)?;
+    let _ = BruFile::parse_environment(source).map_err(|_| EditError::Unreadable)?;
     Ok(bytes)
 }
 
@@ -376,6 +382,85 @@ mod tests {
             fs::read_to_string(&path).expect("relecture"),
             "vars {\n  host: changed-by-third-party\n}\n"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_environment_preserves_extends_and_color_byte_for_byte() {
+        let dir = workdir("extends-color");
+        let path = dir.join("staging.bru");
+        let initial = "extends: base\n\nvars {\n  host: staging.example.com\n  ~debug: true\n}\n\nvars:secret [\n  token\n]\n\ncolor: #ffaa00\n";
+        fs::write(&path, initial).expect("écriture");
+
+        let file = BruFile::parse_environment(initial.to_owned()).expect("AST");
+        let stamp = FileStamp::capture(&path).expect("stamp");
+
+        let edits = vec![EnvironmentVarEdit::Value {
+            index: 0,
+            value: "prod.example.com".into(),
+        }];
+
+        let new_stamp = write_environment(&path, &file, &stamp, &edits).expect("écriture");
+        let rewritten = fs::read_to_string(&path).expect("relecture");
+        let expected = "extends: base\n\nvars {\n  host: prod.example.com\n  ~debug: true\n}\n\nvars:secret [\n  token\n]\n\ncolor: #ffaa00\n";
+        assert_eq!(rewritten, expected);
+        assert_eq!(new_stamp, FileStamp::capture(&path).expect("stamp"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_environment_with_list_extends_preserves_everything() {
+        let dir = workdir("list-extends");
+        let path = dir.join("multi.bru");
+        let initial =
+            "extends [\n  base,\n  \"custom parent\"\n]\n\nvars {\n  a: 1\n}\n\ncolor: #00ff00\n";
+        fs::write(&path, initial).expect("écriture");
+
+        let file = BruFile::parse_environment(initial.to_owned()).expect("AST");
+        let stamp = FileStamp::capture(&path).expect("stamp");
+
+        let edits = vec![EnvironmentVarEdit::Add {
+            key: "b".into(),
+            value: "2".into(),
+            enabled: true,
+        }];
+
+        let _ = write_environment(&path, &file, &stamp, &edits).expect("écriture");
+        let rewritten = fs::read_to_string(&path).expect("relecture");
+        let expected = "extends [\n  base,\n  \"custom parent\"\n]\n\nvars {\n  a: 1\n  b: 2\n}\n\ncolor: #00ff00\n";
+        assert_eq!(rewritten, expected);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_environment_creates_vars_between_extends_and_color() {
+        let dir = workdir("create-vars");
+        let path = dir.join("bare.bru");
+        let initial = "extends: base\n\ncolor: #ff0000\n";
+        fs::write(&path, initial).expect("écriture");
+
+        let file = BruFile::parse_environment(initial.to_owned()).expect("AST");
+        let stamp = FileStamp::capture(&path).expect("stamp");
+
+        let edits = vec![EnvironmentVarEdit::Add {
+            key: "foo".into(),
+            value: "bar".into(),
+            enabled: true,
+        }];
+
+        let _ = write_environment(&path, &file, &stamp, &edits).expect("écriture");
+        let rewritten = fs::read_to_string(&path).expect("relecture");
+        assert!(rewritten.starts_with("extends: base\n"));
+        assert!(rewritten.contains("vars {\n  foo: bar\n}"));
+        assert!(rewritten.ends_with("color: #ff0000\n"));
+
+        let reloaded = BruFile::parse_environment(rewritten).expect("relecture AST");
+        assert_eq!(reloaded.declaration("extends"), Some("base"));
+        assert_eq!(reloaded.declaration("color"), Some("#ff0000"));
+        assert_eq!(reloaded.entry("vars", "foo"), Some("bar"));
 
         let _ = fs::remove_dir_all(&dir);
     }

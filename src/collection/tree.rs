@@ -283,7 +283,7 @@ fn load_environments(root: &Path, relative: &Path) -> Environments {
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            match read_bru(&root.join(&path)) {
+            match read_env_bru(&root.join(&path)) {
                 Ok(ast) => Ok(Environment::from_ast(name, path, ast)),
                 Err(error) => Err(ErrorNode { path, error }),
             }
@@ -330,6 +330,12 @@ fn read_bru(path: &Path) -> Result<BruFile, ParseError> {
     let bytes = fs::read(path).map_err(ParseError::Io)?;
     let source = String::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)?;
     BruFile::parse(source)
+}
+
+fn read_env_bru(path: &Path) -> Result<BruFile, ParseError> {
+    let bytes = fs::read(path).map_err(ParseError::Io)?;
+    let source = String::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)?;
+    BruFile::parse_environment(source)
 }
 
 #[cfg(test)]

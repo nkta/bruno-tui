@@ -64,6 +64,13 @@ pub fn known_form(name: &str) -> Option<BlockForm> {
     }
 }
 
+/// Déclaration de premier niveau autorisée dans un environnement (ex. `extends: base`, `color: #ff0000`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declaration {
+    pub name: String,
+    pub value: String,
+}
+
 /// Entrée d'un bloc dictionnaire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -105,6 +112,8 @@ pub enum NodeKind {
     /// Lignes vides entre deux blocs.
     Blank,
     Block(Block),
+    /// Déclaration de premier niveau (ex. `extends: base`, `color: #ff0000`).
+    Declaration(Declaration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,16 +131,38 @@ pub struct BruFile {
 }
 
 impl BruFile {
-    /// Parse un source complet. Ne rejette que les défauts de structure
-    /// (bloc non fermé, texte hors bloc, ouverture ou fermeture invalide).
+    /// Parse un source complet de fichier requête ou méta. Ne rejette que les
+    /// défauts de structure (bloc non fermé, texte hors bloc, ouverture ou
+    /// fermeture invalide).
     pub fn parse(source: String) -> Result<Self, ParseError> {
-        let raw = lexer::lex(&source)?;
+        Self::parse_kind(source, false)
+    }
+
+    /// Parse un source complet de fichier d'environnement (`environments/*.bru`).
+    /// Accepte les déclarations de premier niveau autorisées (`extends:`, `color:`).
+    pub fn parse_environment(source: String) -> Result<Self, ParseError> {
+        Self::parse_kind(source, true)
+    }
+
+    fn parse_kind(source: String, is_environment: bool) -> Result<Self, ParseError> {
+        let raw = if is_environment {
+            lexer::lex_environment(&source)?
+        } else {
+            lexer::lex(&source)?
+        };
         let nodes = raw
             .into_iter()
             .map(|node| match node {
                 RawNode::Blank(span) => Node {
                     span,
                     kind: NodeKind::Blank,
+                },
+                RawNode::Declaration(decl) => Node {
+                    span: decl.span,
+                    kind: NodeKind::Declaration(Declaration {
+                        name: decl.name,
+                        value: decl.value,
+                    }),
                 },
                 RawNode::Block(block) => {
                     let body = match known_form(&block.name) {
@@ -180,7 +211,23 @@ impl BruFile {
     pub fn blocks(&self) -> impl Iterator<Item = &Block> {
         self.nodes.iter().filter_map(|node| match &node.kind {
             NodeKind::Block(block) => Some(block),
-            NodeKind::Blank => None,
+            NodeKind::Blank | NodeKind::Declaration(_) => None,
+        })
+    }
+
+    /// Déclaration de premier niveau portant ce nom.
+    pub fn declaration(&self, name: &str) -> Option<&str> {
+        self.nodes.iter().find_map(|node| match &node.kind {
+            NodeKind::Declaration(decl) if decl.name == name => Some(decl.value.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Déclarations de premier niveau dans l'ordre du fichier.
+    pub fn declarations(&self) -> impl Iterator<Item = &Declaration> {
+        self.nodes.iter().filter_map(|node| match &node.kind {
+            NodeKind::Declaration(decl) => Some(decl),
+            _ => None,
         })
     }
 
@@ -441,6 +488,42 @@ mod tests {
         assert_eq!(known_form("auth:oauth2"), Some(BlockForm::Dictionary));
         assert_eq!(known_form("body:json"), Some(BlockForm::Text));
         assert_eq!(known_form("vars:secret"), Some(BlockForm::List));
+        // `extends [..]` reste un bloc inconnu : sa liste est interprétée par `Environment`.
+        assert_eq!(known_form("extends"), None);
         assert_eq!(known_form("grpc"), None);
+    }
+
+    #[test]
+    fn parse_environment_with_extends_and_color() {
+        let source =
+            "extends: base\n\nvars {\n  api_url: http://localhost:3000\n}\n\ncolor: #ffaa00\n";
+        let file = BruFile::parse_environment(source.to_owned()).expect("valide");
+        assert_eq!(file.declaration("extends"), Some("base"));
+        assert_eq!(file.declaration("color"), Some("#ffaa00"));
+        assert_eq!(file.entry("vars", "api_url"), Some("http://localhost:3000"));
+        assert!(file.spans_are_contiguous());
+        assert_eq!(file.raw(), source);
+    }
+
+    #[test]
+    fn parse_environment_with_list_extends() {
+        let source = "extends [\n  base,\n  \"other parent\"\n]\n\nvars {\n}\n";
+        let file = BruFile::parse_environment(source.to_owned()).expect("valide");
+        assert_eq!(file.declaration("extends"), None);
+        let block = file.block("extends").expect("bloc extends");
+        assert_eq!(block.delimiter, Delimiter::Bracket);
+        match &block.body {
+            BlockBody::Unknown { content } => {
+                assert_eq!(file.slice(content), "  base,\n  \"other parent\"\n");
+            }
+            other => panic!("attendu Unknown, obtenu {other:?}"),
+        }
+        assert!(file.spans_are_contiguous());
+    }
+
+    #[test]
+    fn parse_request_refuses_declarations() {
+        let err = BruFile::parse("extends: base\n".to_owned()).expect_err("refusé en requête");
+        assert!(matches!(err, ParseError::TextOutsideBlock { line: 1 }));
     }
 }

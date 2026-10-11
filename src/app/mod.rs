@@ -218,15 +218,11 @@ pub async fn run<B: Backend>(
                                         source: io::Error::new(io::ErrorKind::InvalidData, source),
                                     }
                                 })?;
-                                let ast =
-                                    crate::collection::BruFile::parse(text).map_err(|source| {
-                                        writer::WriteError::Io {
-                                            path: full_path.clone(),
-                                            source: io::Error::new(
-                                                io::ErrorKind::InvalidData,
-                                                source,
-                                            ),
-                                        }
+                                // Fichier d'environnement : accepte `extends`/`color`.
+                                let ast = crate::collection::BruFile::parse_environment(text)
+                                    .map_err(|source| writer::WriteError::Io {
+                                        path: full_path.clone(),
+                                        source: io::Error::new(io::ErrorKind::InvalidData, source),
                                     })?;
                                 Ok(model::SavedEnvironment {
                                     stamp: new_stamp,
