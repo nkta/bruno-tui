@@ -6199,6 +6199,40 @@ mod tests {
     }
 
     #[test]
+    fn script_tab_search_selection_and_yank() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "scripted.bru");
+        model.request_tab = RequestTab::Script;
+        update(&mut model, Message::NextFocus); // Focus sur Détail
+
+        // 1. Recherche dans l'onglet Script
+        update(&mut model, Message::StartSearch);
+        for c in "started".chars() {
+            update(&mut model, Message::SearchInput(c));
+        }
+        update(&mut model, Message::ConfirmSearch);
+        assert!(model.detail_match.is_some());
+        let (line, range) = model.detail_match.clone().expect("match");
+        let lines = crate::app::view::detail::plain_lines(&model);
+        assert_eq!(&lines[line as usize][range], "started");
+
+        // 2. Sélection visuelle et copie
+        update(&mut model, Message::ToggleVisual);
+        let Command::CopyToClipboard { text, token } = update(&mut model, Message::Yank) else {
+            panic!("copie attendue");
+        };
+        assert!(text.contains("started"));
+        update(
+            &mut model,
+            Message::ClipboardResult {
+                token,
+                result: Ok(()),
+            },
+        );
+        assert!(model.detail_selection.is_none());
+    }
+
+    #[test]
     fn visual_selections_in_detail_and_response_are_independent() {
         use crate::app::test_support::runner_probe_model;
 

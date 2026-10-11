@@ -195,6 +195,21 @@ fn entries(lines: &mut Vec<Line<'static>>, values: &[KeyValue]) {
     }
 }
 
+/// Affiche un bloc de code avec numéros de ligne, ou « aucun » s'il est absent.
+fn render_code_block(lines: &mut Vec<Line<'static>>, code: Option<&str>) {
+    let Some(code) = code.filter(|s| !s.trim().is_empty()) else {
+        lines.push(Line::raw("  aucun"));
+        return;
+    };
+    let code_lines: Vec<&str> = code.lines().collect();
+    let width = code_lines.len().to_string().len();
+    for (idx, line) in code_lines.iter().enumerate() {
+        let num_span = Span::styled(format!("  {:>width$} ", idx + 1), theme::LABEL);
+        let code_span = Span::raw((*line).to_owned());
+        lines.push(Line::from(vec![num_span, code_span]));
+    }
+}
+
 /// Mode d'auth tel qu'écrit dans le fichier.
 pub fn auth_label(mode: &AuthMode) -> &str {
     match mode {
@@ -905,14 +920,24 @@ pub fn request_text_and_fields(
             );
         }
         RequestTab::Script => {
-            lines.push(field(
-                "Script pré-requête",
-                yes_no(view.has_pre_request_script),
-            ));
-            lines.push(field(
-                "Script post-réponse",
-                yes_no(view.has_post_response_script),
-            ));
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Script pré-requête".to_owned(),
+                |lines, _| {
+                    render_code_block(lines, view.script_pre_request());
+                },
+            );
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Script post-réponse".to_owned(),
+                |lines, _| {
+                    render_code_block(lines, view.script_post_response());
+                },
+            );
         }
         RequestTab::Assert => {
             lines.push(field("Assertions", yes_no(view.has_assert)));
@@ -963,7 +988,13 @@ pub fn request_tab_is_empty(view: &crate::collection::RequestView, tab: RequestT
         RequestTab::Vars => {
             view.vars_pre_request().is_empty() && view.vars_post_response().is_empty()
         }
-        RequestTab::Script => !view.has_pre_request_script && !view.has_post_response_script,
+        RequestTab::Script => {
+            view.script_pre_request()
+                .is_none_or(|s| s.trim().is_empty())
+                && view
+                    .script_post_response()
+                    .is_none_or(|s| s.trim().is_empty())
+        }
         RequestTab::Assert => !view.has_assert && view.assertions().is_empty(),
         RequestTab::Tests => !view.has_tests,
         RequestTab::Docs => view.docs().is_none_or(|d| d.trim().is_empty()),
@@ -2168,8 +2199,12 @@ mod tests {
         for expected in [
             "X-Debug: 1 (désactivé)",
             "Accept: application/json\n",
-            "Script pré-requête : oui",
-            "Script post-réponse : oui",
+            "Script pré-requête",
+            "1 bru.setVar(\"started\", Date.now());",
+            "Script post-réponse",
+            "1 if (res.getStatus() !== 200) {",
+            "2   console.log(\"oops\");",
+            "3 }",
             "Tests : oui",
             "Assertions : oui",
             "res.status: eq 200",
@@ -2228,6 +2263,32 @@ mod tests {
         assert!(request_tab_is_empty(&request.view, RequestTab::Script));
         assert!(request_tab_is_empty(&request.view, RequestTab::Assert));
         assert!(request_tab_is_empty(&request.view, RequestTab::Tests));
+    }
+
+    #[test]
+    fn script_tab_rendering() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "scripted.bru");
+        model.request_tab = RequestTab::Script;
+
+        // Onglet Script avec scripts présents
+        let script_plain = plain(&detail_text(&model));
+        let boxes = detail_section_boxes(&model);
+        assert_eq!(boxes.len(), 2);
+        assert_eq!(boxes[0].title, "Script pré-requête");
+        assert_eq!(boxes[1].title, "Script post-réponse");
+        assert!(script_plain.contains("1 bru.setVar(\"started\", Date.now());"));
+        assert!(script_plain.contains("1 if (res.getStatus() !== 200) {"));
+        assert!(script_plain.contains("2   console.log(\"oops\");"));
+        assert!(script_plain.contains("3 }"));
+
+        // Onglet Script sans script
+        select(&mut model, "simple-get.bru");
+        model.request_tab = RequestTab::Script;
+        let empty_plain = plain(&detail_text(&model));
+        let empty_boxes = detail_section_boxes(&model);
+        assert_eq!(empty_boxes.len(), 2);
+        assert!(empty_plain.contains("aucun"));
     }
 
     #[test]

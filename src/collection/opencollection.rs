@@ -269,24 +269,36 @@ fn post_response_variables(map: &Mapping, notices: &mut Notices, scope: &str) ->
     vars
 }
 
-/// Présence des scripts (`toBrunoScripts`) : code non vide par type.
+/// Présence et code des scripts (`toBrunoScripts`) : code non vide par type.
 #[derive(Debug, Default)]
 struct Scripts {
-    pre_request: bool,
-    post_response: bool,
+    pre_request: Option<String>,
+    post_response: Option<String>,
     tests: bool,
 }
 
 fn scripts(map: &Mapping, notices: &mut Notices, scope: &str) -> Scripts {
     let mut found = Scripts::default();
     for script in sequence(map, "scripts") {
-        let has_code = string_of(script, "code").is_some_and(|code| !code.is_empty());
-        if !has_code {
+        let code = string_of(script, "code").filter(|code| !code.is_empty());
+        let Some(code) = code else {
             continue;
-        }
+        };
         match get(script, "type").and_then(Value::as_str) {
-            Some("before-request") => found.pre_request = true,
-            Some("after-response") => found.post_response = true,
+            Some("before-request") => match &mut found.pre_request {
+                Some(existing) => {
+                    existing.push('\n');
+                    existing.push_str(&code);
+                }
+                None => found.pre_request = Some(code),
+            },
+            Some("after-response") => match &mut found.post_response {
+                Some(existing) => {
+                    existing.push('\n');
+                    existing.push_str(&code);
+                }
+                None => found.post_response = Some(code),
+            },
             Some("tests") => found.tests = true,
             _ => notices.push(format!("type de script `{scope}scripts` non affiché")),
         }
@@ -533,13 +545,15 @@ pub fn parse_item(source: &str) -> Result<Parsed<RequestView>, ParseError> {
         path_params,
         body,
         auth,
-        has_pre_request_script: found.pre_request,
-        has_post_response_script: found.post_response,
+        has_pre_request_script: found.pre_request.is_some(),
+        has_post_response_script: found.post_response.is_some(),
         has_tests: found.tests,
         has_assert: !assertions.is_empty(),
         extra: Box::new(ExtraTabs {
             vars_pre_request: variables(runtime),
             vars_post_response: post_response_variables(runtime, &mut notices, "runtime."),
+            script_pre_request: found.pre_request,
+            script_post_response: found.post_response,
             docs: content_of(item.get("docs")),
             settings: settings(&item, &mut notices),
             assertions,
@@ -574,8 +588,8 @@ fn defaults_meta(
         seq,
         has_headers: !headers(request).is_empty(),
         has_auth,
-        has_pre_request_script: found.pre_request,
-        has_post_response_script: found.post_response,
+        has_pre_request_script: found.pre_request.is_some(),
+        has_post_response_script: found.post_response.is_some(),
         has_tests: found.tests,
         has_vars,
         ast: None,
