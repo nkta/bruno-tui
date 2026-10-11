@@ -218,6 +218,7 @@ sur le disque, jamais enregistrée dans l'historique persistant, ni logguée.
 | `c` | copier en commande `curl` (en-têtes d'auth masqués) |
 | `u` | copier en commande `curl` complète (confirmation si des secrets sont présents) |
 | `Ctrl+E` | ouvrir le corps brut de la réponse (non filtré) dans `$VISUAL`, `$EDITOR`, ou `nano` — consultation seule, rien n'est relu |
+| `x` | exporter le corps brut dans un fichier (chemin proposé hors collection, confirmation si existant) |
 
 `Ctrl+E` fonctionne quel que soit le focus courant, tant qu'une requête
 sélectionnée a un résultat avec un corps non vide.

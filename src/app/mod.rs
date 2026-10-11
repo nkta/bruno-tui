@@ -10,6 +10,7 @@ pub mod clipboard;
 pub mod diagnostics;
 pub mod editor;
 pub mod event;
+pub mod export;
 pub mod filter;
 pub mod global_search;
 pub mod message;
@@ -309,6 +310,14 @@ pub async fn run<B: Backend>(
                     tokio::task::spawn_blocking(move || {
                         let result = loader.load(&source);
                         let _ = sender.blocking_send(AppEvent::CollectionLoaded(result));
+                    });
+                }
+                Command::ExportResponseBody { path, bytes } => {
+                    let sender = sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = std::fs::write(&path, &bytes).map_err(|e| e.to_string());
+                        let _ =
+                            sender.blocking_send(AppEvent::ResponseBodyExported { path, result });
                     });
                 }
             }

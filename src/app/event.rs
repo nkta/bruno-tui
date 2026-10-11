@@ -61,6 +61,11 @@ pub enum AppEvent {
     /// un ou plusieurs fichiers de la collection ont été modifiés sur disque
     /// (chemins relatifs à la racine).
     WatchReload(Vec<PathBuf>),
+    /// Issue d'une exportation de corps de réponse (`Command::ExportResponseBody`).
+    ResponseBodyExported {
+        path: PathBuf,
+        result: Result<(), String>,
+    },
 }
 
 /// Lance le thread qui lit le terminal et publie ses événements.

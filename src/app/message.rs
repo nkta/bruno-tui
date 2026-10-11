@@ -46,6 +46,8 @@ pub enum TextCapture {
     MethodPicker,
     /// Recherche globale par nom, méthode, chemin et URL (`Ctrl+K`).
     GlobalSearch,
+    /// Saisie du chemin pour l'exportation du corps de réponse.
+    ExportPath,
 }
 
 /// Touche d'édition du tampon pendant la saisie d'un champ
@@ -304,6 +306,31 @@ pub enum Message {
     RunFailedRequests,
     /// Modification de fichiers sur disque signalée par le watcher après débounce.
     WatchReload(Vec<PathBuf>),
+    /// `x` en focus Réponse : démarre la saisie du chemin pour exporter le corps brut.
+    ExportResponseBody,
+    /// Caractère tapé pendant la saisie du chemin d'export.
+    ExportPathInput(char),
+    /// `Retour arrière` pendant la saisie du chemin d'export.
+    ExportPathBackspace,
+    /// `Supprimer` pendant la saisie du chemin d'export.
+    ExportPathDelete,
+    /// Flèche gauche pendant la saisie du chemin d'export.
+    ExportPathLeft,
+    /// Flèche droite pendant la saisie du chemin d'export.
+    ExportPathRight,
+    /// Début pendant la saisie du chemin d'export.
+    ExportPathHome,
+    /// Fin pendant la saisie du chemin d'export.
+    ExportPathEnd,
+    /// `Entrée` pendant la saisie du chemin d'export : valide l'export.
+    ConfirmExportPath,
+    /// `Échap` pendant la saisie du chemin d'export : annule.
+    CancelExportPath,
+    /// Renvoyé par la boucle après `Command::ExportResponseBody`.
+    ResponseBodyExported {
+        path: PathBuf,
+        result: Result<(), String>,
+    },
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -329,6 +356,9 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
             Some(Message::SecretsResolved { root, resolved })
         }
         AppEvent::WatchReload(paths) => Some(Message::WatchReload(paths)),
+        AppEvent::ResponseBodyExported { path, result } => {
+            Some(Message::ResponseBodyExported { path, result })
+        }
     }
 }
 
@@ -412,6 +442,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('z') => Message::ToggleZoom,
         KeyCode::Char('O') => Message::ToggleRunnerOptions,
         KeyCode::Char('R') => Message::RunFailedRequests,
+        KeyCode::Char('x') => Message::ExportResponseBody,
         _ => return None,
     };
     Some(message)
@@ -428,6 +459,23 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::SecretName | TextCapture::SecretValue => secret_capture_message(key),
         TextCapture::MethodPicker => method_picker_capture_message(key),
         TextCapture::GlobalSearch => global_search_capture_message(key),
+        TextCapture::ExportPath => export_path_capture_message(key),
+    }
+}
+
+/// Capture pendant la saisie du chemin d'export du corps de réponse.
+fn export_path_capture_message(key: KeyEvent) -> Option<Message> {
+    match key.code {
+        KeyCode::Enter => Some(Message::ConfirmExportPath),
+        KeyCode::Esc => Some(Message::CancelExportPath),
+        KeyCode::Backspace => Some(Message::ExportPathBackspace),
+        KeyCode::Delete => Some(Message::ExportPathDelete),
+        KeyCode::Left => Some(Message::ExportPathLeft),
+        KeyCode::Right => Some(Message::ExportPathRight),
+        KeyCode::Home => Some(Message::ExportPathHome),
+        KeyCode::End => Some(Message::ExportPathEnd),
+        KeyCode::Char(c) => Some(Message::ExportPathInput(c)),
+        _ => None,
     }
 }
 
