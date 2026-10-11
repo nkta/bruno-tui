@@ -252,6 +252,11 @@ sélectionnée a un résultat avec un corps non vide.
     configuration du certificat client (`--client-cert-config`), désactivation des proxys
     (`--noproxy`) et désactivation des cookies automatiques (`--disable-cookies`). Les chemins
     sont vérifiés à la saisie et transmis sous forme absolue à `bru`.
+  - **Données et itérations** : exécution pilotée par des jeux de données CSV (`--csv-file-path`)
+    ou JSON (`--json-file-path`) mutuellement exclusifs, nombre d'itérations (`--iteration-count`),
+    et exécution concurrente (`--parallel`, requiert un fichier de données). En présence de plusieurs
+    itérations, le bilan de campagne totalise chaque exécution avec son numéro d'itération (`#N`),
+    et le panneau Réponse affiche la dernière itération (`itération N/M`).
   - **Exports de rapports** JUnit XML (`--reporter-junit`) et HTML (`--reporter-html`)
     délégués à `bru` : écrits hors collection (`$XDG_STATE_HOME/bruno-tui/reports/` ou
     `~/.local/state/bruno-tui/reports/`, repli vers `./reports`), horodatés avec le nom

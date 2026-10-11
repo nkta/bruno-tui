@@ -1,0 +1,166 @@
+[
+  {
+    "iterationIndex": 0,
+    "results": [
+      {
+        "test": {
+          "filename": "req.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/data.json",
+          "headers": {
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "bruno-runtime/4.2.1",
+            "Accept-Encoding": "gzip, compress, deflate, br",
+            "Host": "127.0.0.1:18765",
+            "Connection": "keep-alive",
+            "content-type": null
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.12.3",
+            "date": "Sun, 11 Oct 2026 16:16:03 GMT",
+            "content-type": "application/json",
+            "content-length": "21",
+            "last-modified": "Sun, 11 Oct 2026 16:03:04 GMT"
+          },
+          "data": {
+            "a": [
+              1,
+              2
+            ],
+            "b": null
+          },
+          "url": "http://127.0.0.1/data.json",
+          "responseTime": 13,
+          "duration": 13,
+          "size": 21
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [],
+        "testResults": [
+          {
+            "description": "status is 200",
+            "status": "pass",
+            "uid": "96J-ESLD28VGeq6zcI_Dx"
+          }
+        ],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.2055898,
+        "name": "req",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-bru-options/tests/fixtures/collections/csv-probe/req",
+        "path": "req",
+        "iterationIndex": 0
+      }
+    ],
+    "summary": {
+      "totalRequests": 1,
+      "passedRequests": 1,
+      "failedRequests": 0,
+      "errorRequests": 0,
+      "skippedRequests": 0,
+      "skippedByBail": 0,
+      "totalAssertions": 0,
+      "passedAssertions": 0,
+      "failedAssertions": 0,
+      "totalTests": 1,
+      "passedTests": 1,
+      "failedTests": 0,
+      "totalPreRequestTests": 0,
+      "passedPreRequestTests": 0,
+      "failedPreRequestTests": 0,
+      "totalPostResponseTests": 0,
+      "passedPostResponseTests": 0,
+      "failedPostResponseTests": 0
+    }
+  },
+  {
+    "iterationIndex": 1,
+    "results": [
+      {
+        "test": {
+          "filename": "req.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/data.json",
+          "headers": {
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "bruno-runtime/4.2.1",
+            "Accept-Encoding": "gzip, compress, deflate, br",
+            "Host": "127.0.0.1:18765",
+            "Connection": "keep-alive",
+            "content-type": null
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.12.3",
+            "date": "Sun, 11 Oct 2026 16:16:03 GMT",
+            "content-type": "application/json",
+            "content-length": "21",
+            "last-modified": "Sun, 11 Oct 2026 16:03:04 GMT"
+          },
+          "data": {
+            "a": [
+              1,
+              2
+            ],
+            "b": null
+          },
+          "url": "http://127.0.0.1/data.json",
+          "responseTime": 2,
+          "duration": 2,
+          "size": 21
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [],
+        "testResults": [
+          {
+            "description": "status is 200",
+            "status": "pass",
+            "uid": "OECnQJ2Rr5qVOdG8hdfgn"
+          }
+        ],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.084833571,
+        "name": "req",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-bru-options/tests/fixtures/collections/csv-probe/req",
+        "path": "req",
+        "iterationIndex": 1
+      }
+    ],
+    "summary": {
+      "totalRequests": 1,
+      "passedRequests": 1,
+      "failedRequests": 0,
+      "errorRequests": 0,
+      "skippedRequests": 0,
+      "skippedByBail": 0,
+      "totalAssertions": 0,
+      "passedAssertions": 0,
+      "failedAssertions": 0,
+      "totalTests": 1,
+      "passedTests": 1,
+      "failedTests": 0,
+      "totalPreRequestTests": 0,
+      "passedPreRequestTests": 0,
+      "failedPreRequestTests": 0,
+      "totalPostResponseTests": 0,
+      "passedPostResponseTests": 0,
+      "failedPostResponseTests": 0
+    }
+  }
+]

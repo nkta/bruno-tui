@@ -209,7 +209,7 @@ async fn real_bru_receives_vars_secret_found_automatically() {
 
     let (tx, mut rx) = mpsc::channel(1);
     let runner = BruRunner::new(tx);
-    let _handle = runner.start(request);
+    let _handle = runner.start(*request);
     let event = timeout(Duration::from_secs(60), rx.recv())
         .await
         .expect("bru doit terminer en moins de 60 s")

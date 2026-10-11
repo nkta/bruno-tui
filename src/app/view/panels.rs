@@ -248,11 +248,13 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
     let list_items: Vec<ListItem> = items
         .iter()
         .map(|item| {
+            let path_display = if campaign.total_iterations > 1 {
+                format!("{}  #{}", item.path.display(), item.iteration_index + 1)
+            } else {
+                item.path.display().to_string()
+            };
             let mut spans = vec![
-                Span::styled(
-                    item.path.display().to_string(),
-                    Style::new().add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(path_display, Style::new().add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
                 Span::styled(format!("({})", item.name), theme::LABEL),
                 Span::raw("  ·  "),
@@ -992,40 +994,99 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
-    // --- Section Rapports ---
-    lines.push(Line::styled("── Rapports & Export ──", theme::SECTION));
+    // --- Section Données & Itérations ---
+    lines.push(Line::styled("── Données & Itérations ──", theme::SECTION));
 
-    // Champ 11: Rapport JUnit
+    // Champ 11: CsvFilePath
     let c11 = popup.cursor == 11;
     if c11 {
         selected_line_idx = lines.len();
     }
-    let junit_check = if popup.reporter_junit { "[x]" } else { "[ ]" };
+    let csv_val = if popup.csv_file_path_input.text().is_empty() {
+        "(aucun)"
+    } else {
+        popup.csv_file_path_input.text()
+    };
+    let csv_style = if c11 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
     lines.push(Line::from(vec![
         Span::styled(if c11 { "▶ " } else { "  " }, theme::FOCUS),
-        Span::styled("Rapport JUnit XML  : ", theme::LABEL),
-        Span::styled(
-            format!("{junit_check} Exporter rapport JUnit (--reporter-junit)"),
-            if c11 {
-                theme::SELECTION
-            } else {
-                Style::default()
-            },
-        ),
+        Span::styled("Fichier CSV        : ", theme::LABEL),
+        Span::styled(format!("[ {csv_val} ]"), csv_style),
+        if c11 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
     ]));
 
-    // Champ 12: Rapport HTML
+    // Champ 12: JsonFilePath
     let c12 = popup.cursor == 12;
     if c12 {
         selected_line_idx = lines.len();
     }
-    let html_check = if popup.reporter_html { "[x]" } else { "[ ]" };
+    let json_val = if popup.json_file_path_input.text().is_empty() {
+        "(aucun)"
+    } else {
+        popup.json_file_path_input.text()
+    };
+    let json_style = if c12 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
     lines.push(Line::from(vec![
         Span::styled(if c12 { "▶ " } else { "  " }, theme::FOCUS),
-        Span::styled("Rapport HTML       : ", theme::LABEL),
+        Span::styled("Fichier JSON       : ", theme::LABEL),
+        Span::styled(format!("[ {json_val} ]"), json_style),
+        if c12 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 13: IterationCount
+    let c13 = popup.cursor == 13;
+    if c13 {
+        selected_line_idx = lines.len();
+    }
+    let it_val = if popup.iteration_count_input.text().is_empty() {
+        "défaut (1)"
+    } else {
+        popup.iteration_count_input.text()
+    };
+    let it_style = if c13 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c13 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Nb d'itérations    : ", theme::LABEL),
+        Span::styled(format!("[ {it_val} ]"), it_style),
+        if c13 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 14: Parallel
+    let c14 = popup.cursor == 14;
+    if c14 {
+        selected_line_idx = lines.len();
+    }
+    let parallel_check = if popup.parallel { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c14 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Exécution //       : ", theme::LABEL),
         Span::styled(
-            format!("{html_check} Exporter rapport HTML (--reporter-html)"),
-            if c12 {
+            format!("{parallel_check} Exécuter en parallèle (--parallel, avec CSV/JSON)"),
+            if c14 {
                 theme::SELECTION
             } else {
                 Style::default()
@@ -1033,18 +1094,59 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
-    // Champ 13: Masquer en-têtes sensibles
-    let c13 = popup.cursor == 13;
-    if c13 {
+    // --- Section Rapports ---
+    lines.push(Line::styled("── Rapports & Export ──", theme::SECTION));
+
+    // Champ 15: Rapport JUnit
+    let c15 = popup.cursor == 15;
+    if c15 {
+        selected_line_idx = lines.len();
+    }
+    let junit_check = if popup.reporter_junit { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c15 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Rapport JUnit XML  : ", theme::LABEL),
+        Span::styled(
+            format!("{junit_check} Exporter rapport JUnit (--reporter-junit)"),
+            if c15 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 16: Rapport HTML
+    let c16 = popup.cursor == 16;
+    if c16 {
+        selected_line_idx = lines.len();
+    }
+    let html_check = if popup.reporter_html { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c16 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Rapport HTML       : ", theme::LABEL),
+        Span::styled(
+            format!("{html_check} Exporter rapport HTML (--reporter-html)"),
+            if c16 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 17: Masquer en-têtes sensibles
+    let c17 = popup.cursor == 17;
+    if c17 {
         selected_line_idx = lines.len();
     }
     let skip_check = if popup.skip_headers { "[x]" } else { "[ ]" };
     lines.push(Line::from(vec![
-        Span::styled(if c13 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled(if c17 { "▶ " } else { "  " }, theme::FOCUS),
         Span::styled("Masquer en-têtes   : ", theme::LABEL),
         Span::styled(
             format!("{skip_check} Omettre en-têtes sensibles (--reporter-skip-all-headers)"),
-            if c13 {
+            if c17 {
                 theme::SELECTION
             } else {
                 Style::default()
@@ -1054,15 +1156,15 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
 
     lines.push(Line::default());
 
-    // Boutons (Champs 14 et 15)
-    let c14 = popup.cursor == 14;
-    let c15 = popup.cursor == 15;
-    if c14 || c15 {
+    // Boutons (Champs 18 et 19)
+    let c18 = popup.cursor == 18;
+    let c19 = popup.cursor == 19;
+    if c18 || c19 {
         selected_line_idx = lines.len();
     }
     let save_btn = Span::styled(
         " [ Enregistrer ] ",
-        if c14 {
+        if c18 {
             theme::SELECTION
         } else {
             theme::SECTION
@@ -1070,7 +1172,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     );
     let run_btn = Span::styled(
         " [ Lancer la campagne (r) ] ",
-        if c15 {
+        if c19 {
             theme::SELECTION
         } else {
             theme::SECTION

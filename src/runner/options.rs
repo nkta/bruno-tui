@@ -17,6 +17,12 @@ pub enum RunnerOptionsError {
     FileNotFound(String),
     #[error("--ignore-truststore ne peut être utilisé qu'avec --cacert")]
     IgnoreTruststoreWithoutCacert,
+    #[error("--csv-file-path et --json-file-path sont mutuellement exclusifs")]
+    MutuallyExclusiveDataFiles,
+    #[error("le nombre d'itérations '{0}' doit être un entier positif non nul")]
+    InvalidIterationCount(String),
+    #[error("--parallel ne peut être utilisé qu'avec --csv-file-path ou --json-file-path")]
+    ParallelWithoutDataFile,
 }
 
 /// Options effectives transmises à [`crate::runner::RunRequest`].
@@ -44,6 +50,14 @@ pub struct RunnerOptions {
     pub noproxy: bool,
     /// Désactive la sauvegarde et l'envoi automatique de cookies (`--disable-cookies`).
     pub disable_cookies: bool,
+    /// Chemin absolu du fichier CSV de données (`--csv-file-path <path>`).
+    pub csv_file_path: Option<PathBuf>,
+    /// Chemin absolu du fichier JSON de données (`--json-file-path <path>`).
+    pub json_file_path: Option<PathBuf>,
+    /// Nombre d'itérations (`--iteration-count <n>`).
+    pub iteration_count: Option<u32>,
+    /// Exécution des itérations en parallèle (`--parallel`).
+    pub parallel: bool,
     /// Chemin du fichier de rapport JUnit (`--reporter-junit <path>`).
     pub reporter_junit: Option<PathBuf>,
     /// Chemin du fichier de rapport HTML (`--reporter-html <path>`).
@@ -66,6 +80,10 @@ impl Default for RunnerOptions {
             client_cert_config: None,
             noproxy: false,
             disable_cookies: false,
+            csv_file_path: None,
+            json_file_path: None,
+            iteration_count: None,
+            parallel: false,
             reporter_junit: None,
             reporter_html: None,
             reporter_skip_all_headers: true,
@@ -87,6 +105,10 @@ impl RunnerOptions {
             || self.client_cert_config.is_some()
             || self.noproxy
             || self.disable_cookies
+            || self.csv_file_path.is_some()
+            || self.json_file_path.is_some()
+            || self.iteration_count.is_some()
+            || self.parallel
             || self.reporter_junit.is_some()
             || self.reporter_html.is_some()
     }
@@ -106,6 +128,10 @@ pub struct RunnerOptionsConfig {
     pub client_cert_config: Option<PathBuf>,
     pub noproxy: bool,
     pub disable_cookies: bool,
+    pub csv_file_path: Option<PathBuf>,
+    pub json_file_path: Option<PathBuf>,
+    pub iteration_count: Option<u32>,
+    pub parallel: bool,
     pub export_junit: bool,
     pub export_html: bool,
     pub skip_headers: bool,
@@ -125,6 +151,10 @@ impl Default for RunnerOptionsConfig {
             client_cert_config: None,
             noproxy: false,
             disable_cookies: false,
+            csv_file_path: None,
+            json_file_path: None,
+            iteration_count: None,
+            parallel: false,
             export_junit: false,
             export_html: false,
             skip_headers: true,
@@ -146,6 +176,10 @@ impl RunnerOptionsConfig {
             || self.client_cert_config.is_some()
             || self.noproxy
             || self.disable_cookies
+            || self.csv_file_path.is_some()
+            || self.json_file_path.is_some()
+            || self.iteration_count.is_some()
+            || self.parallel
             || self.export_junit
             || self.export_html
     }
@@ -194,6 +228,20 @@ impl RunnerOptionsConfig {
         if self.disable_cookies {
             parts.push("disable-cookies".to_string());
         }
+        if let Some(csv) = &self.csv_file_path {
+            let name = csv.file_name().and_then(|n| n.to_str()).unwrap_or("csv");
+            parts.push(format!("csv: {name}"));
+        }
+        if let Some(json) = &self.json_file_path {
+            let name = json.file_name().and_then(|n| n.to_str()).unwrap_or("json");
+            parts.push(format!("json: {name}"));
+        }
+        if let Some(count) = self.iteration_count {
+            parts.push(format!("itérations: {count}"));
+        }
+        if self.parallel {
+            parts.push("parallel".to_string());
+        }
         if self.export_junit {
             parts.push("junit".to_string());
         }
@@ -240,6 +288,10 @@ impl RunnerOptionsConfig {
             client_cert_config: self.client_cert_config.clone(),
             noproxy: self.noproxy,
             disable_cookies: self.disable_cookies,
+            csv_file_path: self.csv_file_path.clone(),
+            json_file_path: self.json_file_path.clone(),
+            iteration_count: self.iteration_count,
+            parallel: self.parallel,
             reporter_junit,
             reporter_html,
             reporter_skip_all_headers: self.skip_headers,
@@ -333,6 +385,20 @@ pub fn parse_existing_file_path(input: &str) -> Result<Option<PathBuf>, RunnerOp
     Ok(Some(resolved))
 }
 
+/// Analyse une saisie de nombre d'itérations et valide qu'il s'agit d'un entier positif non nul.
+pub fn parse_iteration_count(input: &str) -> Result<Option<u32>, RunnerOptionsError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed.parse::<u32>() {
+        Ok(val) if val > 0 => Ok(Some(val)),
+        _ => Err(RunnerOptionsError::InvalidIterationCount(
+            trimmed.to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +452,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_iteration_count_valid_and_invalid() {
+        assert_eq!(parse_iteration_count("").unwrap(), None);
+        assert_eq!(parse_iteration_count("   ").unwrap(), None);
+        assert_eq!(parse_iteration_count("1").unwrap(), Some(1));
+        assert_eq!(parse_iteration_count(" 10 ").unwrap(), Some(10));
+
+        assert!(matches!(
+            parse_iteration_count("0"),
+            Err(RunnerOptionsError::InvalidIterationCount(_))
+        ));
+        assert!(matches!(
+            parse_iteration_count("-5"),
+            Err(RunnerOptionsError::InvalidIterationCount(_))
+        ));
+        assert!(matches!(
+            parse_iteration_count("abc"),
+            Err(RunnerOptionsError::InvalidIterationCount(_))
+        ));
+    }
+
+    #[test]
     fn parse_existing_file_path_valid_and_invalid() {
         assert_eq!(parse_existing_file_path("").unwrap(), None);
         assert_eq!(parse_existing_file_path("   ").unwrap(), None);
@@ -420,9 +507,12 @@ mod tests {
         config.cacert = Some(PathBuf::from("/etc/ssl/ca.pem"));
         config.ignore_truststore = true;
         config.disable_cookies = true;
+        config.csv_file_path = Some(PathBuf::from("/path/to/data.csv"));
+        config.iteration_count = Some(3);
+        config.parallel = true;
         assert_eq!(
             config.summary(),
-            "tags: smoke · délai: 200ms · bail · insecure · cacert: ca.pem · ignore-truststore · noproxy · disable-cookies · junit"
+            "tags: smoke · délai: 200ms · bail · insecure · cacert: ca.pem · ignore-truststore · noproxy · disable-cookies · csv: data.csv · itérations: 3 · parallel · junit"
         );
     }
 
@@ -434,6 +524,9 @@ mod tests {
             tags: vec!["smoke".into()],
             insecure: true,
             noproxy: true,
+            csv_file_path: Some(PathBuf::from("Cargo.toml")),
+            iteration_count: Some(5),
+            parallel: true,
             export_junit: true,
             export_html: true,
             skip_headers: true,
@@ -444,6 +537,9 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(opts.insecure);
         assert!(opts.noproxy);
+        assert_eq!(opts.csv_file_path, Some(PathBuf::from("Cargo.toml")));
+        assert_eq!(opts.iteration_count, Some(5));
+        assert!(opts.parallel);
         assert!(opts.reporter_junit.is_some());
         assert!(opts.reporter_html.is_some());
         assert!(opts.reporter_skip_all_headers);

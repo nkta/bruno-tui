@@ -89,3 +89,19 @@ Différence avec une collection `.bru` : `path` garde l'extension
 du TUI passe par `test.filename`, donc fonctionne sans conversion.
 
 Aucun secret : jeton factice `fixture-token`, masqué dans le rapport.
+
+## `csv-iterations.json`
+
+- Version : `bru` 4.2.1 (Node 22.19.0, Linux)
+- Date de capture : 2026-10-11
+- Collection : `tests/fixtures/collections/csv-probe/`
+- Commande : `scripts/gen-report-fixtures.sh`, soit
+  `bru run --csv-file-path data.csv --reporter-json /dev/fd/3 3>csv-iterations.json`
+  avec `tests/fixtures/collections/runner-probe/www` servi sur `127.0.0.1:18765`
+- Code de sortie : 0
+
+Cas couvert : exécution pilotée par les données d'un CSV (2 lignes).
+Le rapport contient 2 itérations (`iterationIndex: 0` et `iterationIndex: 1`),
+chacune contenant le résultat de `req.bru`. Permet de vérifier la gestion
+des itérations multiples et l'affichage dans le TUI sans écrasement.
+

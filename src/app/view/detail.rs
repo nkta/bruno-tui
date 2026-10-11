@@ -1379,12 +1379,21 @@ fn filter_line(draft: &str, editing: bool) -> Line<'static> {
 /// et temps de réponse sont portés par la bordure haute de la réponse
 /// (`status-panel`).
 fn status_band(outcome: &RequestOutcome) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some((current, total)) = outcome.iteration {
+        lines.push(Line::styled(
+            format!("itération {current}/{total}"),
+            theme::LABEL,
+        ));
+        lines.push(Line::default());
+    }
     // Affiché quel que soit le statut : c'est la seule explication d'une
     // requête en erreur, y compris quand elle n'a jamais été envoyée.
-    match &outcome.result.error {
-        Some(error) => vec![field("Erreur", error.clone()), Line::default()],
-        None => Vec::new(),
+    if let Some(error) = &outcome.result.error {
+        lines.push(field("Erreur", error.clone()));
+        lines.push(Line::default());
     }
+    lines
 }
 
 /// Contenu de l'onglet Corps : le résultat filtré s'il y en a un, sinon

@@ -46,7 +46,7 @@ pub enum Command {
     /// Démarrer cette exécution ; la boucle appelle `BruRunner::start` puis
     /// renvoie le résultat à `update` via `Message::RunStarted`.
     StartRun {
-        request: RunRequest,
+        request: Box<RunRequest>,
         target: std::path::PathBuf,
         is_campaign: bool,
     },
@@ -1107,7 +1107,10 @@ fn apply_runner_options_popup(model: &mut Model, message: Message) -> Command {
                 | RunnerOptionsField::ExcludeTags
                 | RunnerOptionsField::Delay
                 | RunnerOptionsField::Cacert
-                | RunnerOptionsField::ClientCertConfig => {
+                | RunnerOptionsField::ClientCertConfig
+                | RunnerOptionsField::CsvFilePath
+                | RunnerOptionsField::JsonFilePath
+                | RunnerOptionsField::IterationCount => {
                     if popup.editing_text {
                         if let Err(err) = popup.to_config() {
                             popup.error = Some(err.to_string());
@@ -1126,6 +1129,7 @@ fn apply_runner_options_popup(model: &mut Model, message: Message) -> Command {
                 | RunnerOptionsField::IgnoreTruststore
                 | RunnerOptionsField::NoProxy
                 | RunnerOptionsField::DisableCookies
+                | RunnerOptionsField::Parallel
                 | RunnerOptionsField::ReporterJunit
                 | RunnerOptionsField::ReporterHtml
                 | RunnerOptionsField::SkipHeaders => {
@@ -1373,14 +1377,14 @@ fn start_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> 
         vec![target.clone()]
     };
     Command::StartRun {
-        request: RunRequest {
+        request: Box::new(RunRequest {
             collection_root: root,
             targets,
             recursive,
             env: model.current_environment.clone(),
             env_vars: secret_env_vars(model),
             options,
-        },
+        }),
         target,
         is_campaign: recursive,
     }
@@ -1402,14 +1406,14 @@ fn start_run_failures(
         .build_runner_options(&model.reports_dir);
     model.last_reports = reports;
     Command::StartRun {
-        request: RunRequest {
+        request: Box::new(RunRequest {
             collection_root: root,
             targets: failure_paths,
             recursive: false,
             env: model.current_environment.clone(),
             env_vars: secret_env_vars(model),
             options,
-        },
+        }),
         target,
         is_campaign: true,
     }
@@ -1694,26 +1698,33 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
     if (active.recursive || active.is_campaign)
         && let crate::runner::RunOutcome::Completed { ref report, .. } = event.outcome
     {
-        let results: Vec<_> = report
-            .iterations()
+        let iterations = report.iterations();
+        let total_iterations = iterations.len();
+        let results_with_iteration: Vec<_> = iterations
             .iter()
-            .flat_map(|it| &it.results)
+            .flat_map(|it| it.results.iter().map(move |r| (it.iteration_index, r)))
             .collect();
-        let total = results.len();
-        let failed = results.iter().filter(|r| r.is_failure()).count();
-        let skipped = results
+        let total = results_with_iteration.len();
+        let failed = results_with_iteration
             .iter()
-            .filter(|r| {
+            .filter(|(_, r)| r.is_failure())
+            .count();
+        let skipped = results_with_iteration
+            .iter()
+            .filter(|(_, r)| {
                 (r.skipped || r.status == crate::runner::report::ResultStatus::Skipped)
                     && !r.is_failure()
             })
             .count();
         let passed = total.saturating_sub(failed + skipped);
-        let duration_secs: f64 = results.iter().map(|r| r.run_duration).sum();
-
-        let items: Vec<CampaignItem> = results
+        let duration_secs: f64 = results_with_iteration
             .iter()
-            .map(|r| {
+            .map(|(_, r)| r.run_duration)
+            .sum();
+
+        let items: Vec<CampaignItem> = results_with_iteration
+            .iter()
+            .map(|(iter_idx, r)| {
                 let status = if r.is_failure() {
                     CampaignItemStatus::Failed
                 } else if r.skipped || r.status == crate::runner::report::ResultStatus::Skipped {
@@ -1741,6 +1752,7 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
                     http_code,
                     duration_secs: r.run_duration,
                     reason,
+                    iteration_index: *iter_idx,
                 }
             })
             .collect();
@@ -1766,6 +1778,7 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
             items,
             filter: CampaignFilter::default(),
             failures,
+            total_iterations,
         });
         model.campaign_selected = 0;
 
@@ -1801,17 +1814,22 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
             // plusieurs requêtes en échec (`R`).
             let is_global_console = active.recursive || active.is_campaign;
             let output: std::sync::Arc<str> = std::sync::Arc::from(output);
-            for result in report.0.into_iter().flat_map(|iteration| iteration.results) {
-                let key = std::path::PathBuf::from(&result.test.filename);
-                model.run.outcomes.insert(
-                    key,
-                    super::model::RequestOutcome::with_console(
-                        result,
-                        exit_code,
-                        std::sync::Arc::clone(&output),
-                        is_global_console,
-                    ),
-                );
+            let total_iterations = report.iterations().len() as u32;
+            for iteration in report.0 {
+                let current_iteration = iteration.iteration_index + 1;
+                for result in iteration.results {
+                    let key = std::path::PathBuf::from(&result.test.filename);
+                    model.run.outcomes.insert(
+                        key,
+                        super::model::RequestOutcome::with_console(
+                            result,
+                            exit_code,
+                            std::sync::Arc::clone(&output),
+                            is_global_console,
+                        )
+                        .with_iteration(current_iteration, total_iterations),
+                    );
+                }
             }
             model.run.last_failure = None;
         }
@@ -9006,6 +9024,7 @@ mod tests {
                     http_code: Some(500),
                     duration_secs: 0.1,
                     reason: Some("server error".into()),
+                    iteration_index: 0,
                 },
                 CampaignItem {
                     path: PathBuf::from("grp/sub/deep.bru"),
@@ -9014,6 +9033,7 @@ mod tests {
                     http_code: Some(400),
                     duration_secs: 0.2,
                     reason: Some("bad request".into()),
+                    iteration_index: 0,
                 },
             ],
             filter: CampaignFilter::default(),
@@ -9031,6 +9051,7 @@ mod tests {
                     reason: "bad request".into(),
                 },
             ],
+            total_iterations: 1,
         });
         model.focus = Focus::Campaign;
         assert_eq!(model.campaign_selected, 0);
@@ -9426,6 +9447,7 @@ mod tests {
                     http_code: Some(200),
                     duration_secs: 0.1,
                     reason: None,
+                    iteration_index: 0,
                 },
                 CampaignItem {
                     path: PathBuf::from("grp/x.bru"),
@@ -9434,6 +9456,7 @@ mod tests {
                     http_code: Some(500),
                     duration_secs: 0.2,
                     reason: Some("server error".into()),
+                    iteration_index: 0,
                 },
                 CampaignItem {
                     path: PathBuf::from("grp/skip.bru"),
@@ -9442,6 +9465,7 @@ mod tests {
                     http_code: None,
                     duration_secs: 0.0,
                     reason: None,
+                    iteration_index: 0,
                 },
             ],
             filter: CampaignFilter::Failed,
@@ -9451,6 +9475,7 @@ mod tests {
                 http_code: Some(500),
                 reason: "server error".into(),
             }],
+            total_iterations: 1,
         });
         model.focus = Focus::Campaign;
         assert_eq!(model.campaign_selected, 0);
@@ -9546,6 +9571,7 @@ mod tests {
                     http_code: Some(200),
                     duration_secs: 0.1,
                     reason: None,
+                    iteration_index: 0,
                 },
                 CampaignItem {
                     path: PathBuf::from("folder/down.bru"),
@@ -9554,6 +9580,7 @@ mod tests {
                     http_code: None,
                     duration_secs: 0.2,
                     reason: Some("connect error".into()),
+                    iteration_index: 0,
                 },
                 CampaignItem {
                     path: PathBuf::from("json.bru"),
@@ -9562,6 +9589,7 @@ mod tests {
                     http_code: Some(500),
                     duration_secs: 0.2,
                     reason: Some("assertion failed".into()),
+                    iteration_index: 0,
                 },
             ],
             filter: CampaignFilter::Failed,
@@ -9579,6 +9607,7 @@ mod tests {
                     reason: "assertion failed".into(),
                 },
             ],
+            total_iterations: 1,
         });
 
         model.focus = Focus::Campaign;
@@ -9646,9 +9675,11 @@ mod tests {
                 http_code: Some(200),
                 duration_secs: 0.1,
                 reason: None,
+                iteration_index: 0,
             }],
             filter: CampaignFilter::Failed,
             failures: Vec::new(),
+            total_iterations: 1,
         });
         model.last_status = None;
         let cmd = update(&mut model, Message::RunFailedRequests);
@@ -9676,6 +9707,7 @@ mod tests {
                 http_code: None,
                 duration_secs: 0.1,
                 reason: Some("error".into()),
+                iteration_index: 0,
             }],
             filter: CampaignFilter::Failed,
             failures: vec![CampaignFailure {
@@ -9684,6 +9716,7 @@ mod tests {
                 http_code: None,
                 reason: "error".into(),
             }],
+            total_iterations: 1,
         });
         model.run.active = Some(ActiveRun {
             id: runner::RunId(1),
@@ -11286,17 +11319,23 @@ mod mouse_tests {
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().disable_cookies);
 
-        // ReporterJunit (champ 11)
-        update(&mut model, Message::Down);
+        // ReporterJunit (champ 15) : 5x Down depuis DisableCookies
+        for _ in 0..5 {
+            update(&mut model, Message::Down);
+        }
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::ReporterJunit
+        );
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().reporter_junit);
 
-        // ReporterHtml (champ 12)
+        // ReporterHtml (champ 16)
         update(&mut model, Message::Down);
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().reporter_html);
 
-        // SkipHeaders (champ 13, actif par défaut, on le bascule à false)
+        // SkipHeaders (champ 17, actif par défaut, on le bascule à false)
         update(&mut model, Message::Down);
         update(&mut model, Message::ToggleField);
         assert!(!model.runner_options_popup.as_ref().unwrap().skip_headers);
@@ -11411,8 +11450,8 @@ mod mouse_tests {
         assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
         assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
 
-        // Naviguer jusqu'au bouton Enregistrer (champ 14, 12 fois Down depuis champ 2) et presser Entrée
-        for _ in 0..12 {
+        // Naviguer jusqu'au bouton Enregistrer (champ 18, 16 fois Down depuis champ 2) et presser Entrée
+        for _ in 0..16 {
             update(&mut model, Message::Down);
         }
         assert_eq!(
@@ -11526,6 +11565,214 @@ mod mouse_tests {
                 .unwrap()
                 .contains("--ignore-truststore")
         );
+    }
+
+    #[test]
+    fn test_runner_options_popup_data_and_iterations_validation() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleRunnerOptions);
+
+        // Aller à CsvFilePath (champ 11) : 11x Down
+        for _ in 0..11 {
+            update(&mut model, Message::Down);
+        }
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::CsvFilePath
+        );
+
+        // Saisir un fichier CSV qui n'existe pas
+        update(&mut model, Message::Enter);
+        for c in "non_existent.csv".chars() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char(c)),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(model.runner_options_popup.as_ref().unwrap().error.is_some());
+
+        // Remplacer par un fichier existant ("Cargo.toml")
+        for _ in 0.."non_existent.csv".len() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Backspace),
+            );
+        }
+        for c in "Cargo.toml".chars() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char(c)),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
+
+        // Champ 12 : JsonFilePath
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::JsonFilePath
+        );
+        // Tenter de définir aussi un JSON alors que CSV est renseigné
+        update(&mut model, Message::Enter);
+        for c in "Cargo.lock".chars() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char(c)),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(
+            model
+                .runner_options_popup
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("exclusifs")
+        );
+
+        // Vider JsonFilePath
+        for _ in 0.."Cargo.lock".len() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Backspace),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
+
+        // Champ 13 : IterationCount
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::IterationCount
+        );
+        update(&mut model, Message::Enter);
+        for c in "0".chars() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char(c)),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(
+            model
+                .runner_options_popup
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("positif non nul")
+        );
+
+        // Corriger en "5"
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Backspace),
+        );
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Char('5')),
+        );
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
+
+        // Champ 14 : Parallel
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::Parallel
+        );
+        update(&mut model, Message::ToggleField);
+        assert!(model.runner_options_popup.as_ref().unwrap().parallel);
+
+        // Aller à SaveButton (champ 18) : 4x Down
+        for _ in 0..4 {
+            update(&mut model, Message::Down);
+        }
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::SaveButton
+        );
+        update(&mut model, Message::Enter);
+        assert!(model.runner_options_popup.is_none());
+        assert_eq!(model.last_status, Some(StatusMessage::RunnerOptionsSaved));
+        assert!(model.runner_options.csv_file_path.is_some());
+        assert_eq!(model.runner_options.iteration_count, Some(5));
+        assert!(model.runner_options.parallel);
+    }
+
+    #[test]
+    fn test_run_finished_multi_iterations_aggregates_and_stores_last_outcome() {
+        let mut model = runner_probe_model();
+        let report: crate::runner::report::Report = serde_json::from_str(include_str!(
+            "../../tests/fixtures/reports/csv-iterations.json"
+        ))
+        .expect("rapport csv-iterations valide");
+
+        let run_id = crate::runner::RunId(42);
+        model.run.active = Some(crate::app::model::ActiveRun {
+            id: run_id,
+            target: std::path::PathBuf::from("csv-probe"),
+            recursive: true,
+            is_campaign: true,
+            handle: None,
+        });
+
+        update(
+            &mut model,
+            Message::RunFinished(crate::runner::RunEvent {
+                id: run_id,
+                outcome: crate::runner::RunOutcome::Completed {
+                    report,
+                    exit_code: Some(0),
+                    output: "2 iterations completed".to_string(),
+                },
+            }),
+        );
+
+        let campaign = model.campaign.as_ref().expect("campagne présente");
+        assert_eq!(campaign.total_iterations, 2);
+        assert_eq!(campaign.total, 2);
+        assert_eq!(campaign.passed, 2);
+        assert_eq!(campaign.failed, 0);
+        assert_eq!(campaign.items.len(), 2);
+        assert_eq!(campaign.items[0].iteration_index, 0);
+        assert_eq!(campaign.items[1].iteration_index, 1);
+
+        // Outcomes : la requête req.bru doit contenir la dernière itération avec mention (2, 2)
+        let outcome = model
+            .run
+            .outcomes
+            .get(std::path::Path::new("req.bru"))
+            .expect("outcome présent pour req.bru");
+        assert_eq!(outcome.iteration, Some((2, 2)));
     }
 
     #[test]

@@ -149,6 +149,23 @@ impl RunRequest {
         if self.options.disable_cookies {
             args.push("--disable-cookies".into());
         }
+        if let Some(csv) = &self.options.csv_file_path {
+            args.push("--csv-file-path".into());
+            args.push(csv.into());
+        }
+        if let Some(json) = &self.options.json_file_path {
+            args.push("--json-file-path".into());
+            args.push(json.into());
+        }
+        if let Some(count) = self.options.iteration_count {
+            args.push("--iteration-count".into());
+            args.push(count.to_string().into());
+        }
+        if self.options.parallel
+            && (self.options.csv_file_path.is_some() || self.options.json_file_path.is_some())
+        {
+            args.push("--parallel".into());
+        }
         if let Some(junit_path) = &self.options.reporter_junit {
             args.push("--reporter-junit".into());
             args.push(junit_path.into());
@@ -365,6 +382,70 @@ mod tests {
         let request = RunRequest {
             options: RunnerOptions {
                 ignore_truststore: true,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            ["run", "-r", "--reporter-json", "/dev/fd/3"]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_data_execution_options() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                csv_file_path: Some(PathBuf::from("/data/users.csv")),
+                iteration_count: Some(5),
+                parallel: true,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--csv-file-path",
+                "/data/users.csv",
+                "--iteration-count",
+                "5",
+                "--parallel",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_json_file_path() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                json_file_path: Some(PathBuf::from("/data/users.json")),
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--json-file-path",
+                "/data/users.json",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+    }
+
+    #[test]
+    fn bru_args_parallel_ignored_without_data_file() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                parallel: true,
                 ..RunnerOptions::default()
             },
             ..RunRequest::collection("/c")
