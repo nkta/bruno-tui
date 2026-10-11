@@ -753,6 +753,13 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::RunnerOptionsSaved => {
             "Options de campagne enregistrées pour la session".to_owned()
         }
+        StatusMessage::FileModifiedOnDisk => {
+            "Fichier modifié sur disque : rechargement à la fermeture de la session".to_owned()
+        }
+        StatusMessage::CollectionReloaded => "Collection rechargée".to_owned(),
+        StatusMessage::ReloadFailed(reason) => {
+            format!("Échec du rechargement automatique : {reason}")
+        }
     }
 }
 

@@ -20,12 +20,13 @@ use tokio::sync::mpsc;
 const USAGE_ERROR: u8 = 2;
 
 fn main() -> ExitCode {
-    let (path, secrets, mouse) = match cli::parse(std::env::args_os().skip(1)) {
+    let (path, secrets, mouse, watch) = match cli::parse(std::env::args_os().skip(1)) {
         Ok(Command::Run {
             path,
             secrets,
             mouse,
-        }) => (path, secrets, mouse),
+            watch,
+        }) => (path, secrets, mouse, watch),
         Ok(Command::Help) => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -98,6 +99,7 @@ fn main() -> ExitCode {
             secrets,
             mouse_setup,
             suspended,
+            watch,
         )),
         Err(error) => Ok(Exit::TerminalError(error)),
     };

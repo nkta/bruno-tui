@@ -57,6 +57,10 @@ pub enum AppEvent {
         root: PathBuf,
         resolved: Vec<Resolved>,
     },
+    /// Notification du watcher de système de fichiers après débounce :
+    /// un ou plusieurs fichiers de la collection ont été modifiés sur disque
+    /// (chemins relatifs à la racine).
+    WatchReload(Vec<PathBuf>),
 }
 
 /// Lance le thread qui lit le terminal et publie ses événements.

@@ -90,6 +90,7 @@ fn spawn_run(
                 startup_error: None,
             },
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            false,
         )
         .await;
         let Ok(exit) = result;

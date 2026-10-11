@@ -20,6 +20,7 @@ Options :
 |---|---|
 | `--secret NOM[=CLÉ]` | variable secrète transmise à `bru` (répétable). Cherchée dans le `.env` de la collection puis le shell, sous `CLÉ` ou `NOM`/`NOM_EN_MAJUSCULES` ; une saisie dans le panneau Secrets prime. Jamais de valeur en clair sur la ligne de commande. |
 | `--no-mouse` | n'active pas la capture souris (la sélection native du terminal reste disponible) |
+| `--no-watch` | désactive la surveillance et le rechargement automatique de la collection |
 | `-h`, `--help` | aide |
 | `-V`, `--version` | version |
 
@@ -50,6 +51,15 @@ d'édition non enregistrée demande confirmation.
 | `O` | options de campagne (tags, délai, bail, tests-only, export de rapports JUnit/HTML) |
 | `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
 | `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
+
+La racine de la collection est surveillée en continu : dès qu'un fichier
+`.bru`, `bruno.json`, `collection.bru`, `folder.bru` ou un fichier du dossier
+`environments/` est créé, modifié, supprimé ou renommé, la collection est
+automatiquement rechargée en préservant la sélection (par chemin), les dossiers
+dépliés, le focus et l'environnement actif (l'option `--no-watch` permet de
+désactiver cette surveillance). Si une session d'édition comporte des
+modifications non enregistrées, le rechargement est différé après sa fermeture
+et un avertissement signale la modification sur disque.
 
 ## Panneau Détail
 
