@@ -1769,6 +1769,7 @@ mod tests {
             crate::app::model::ResponseTab::Body,
             crate::app::model::ResponseTab::Headers,
             crate::app::model::ResponseTab::Tests,
+            crate::app::model::ResponseTab::Timeline,
         ] {
             model.response_tab = tab;
             let screen = render(&model, 100, 30).join("\n");
@@ -1796,12 +1797,17 @@ mod tests {
         assert!(body_screen.contains("\"a\": ["), "{body_screen}");
         assert!(!body_screen.contains("content-type"), "{body_screen}");
         assert!(!body_screen.contains("body a"), "{body_screen}");
+        assert!(!body_screen.contains("Requête envoyée"), "{body_screen}");
 
         model.response_tab = crate::app::model::ResponseTab::Headers;
         let headers_screen = render(&model, 100, 30).join("\n");
         assert!(headers_screen.contains("content-type"), "{headers_screen}");
         assert!(!headers_screen.contains("\"a\": ["), "{headers_screen}");
         assert!(!headers_screen.contains("body a"), "{headers_screen}");
+        assert!(
+            !headers_screen.contains("Requête envoyée"),
+            "{headers_screen}"
+        );
 
         model.response_tab = crate::app::model::ResponseTab::Tests;
         let tests_screen = render(&model, 100, 30).join("\n");
@@ -1809,6 +1815,20 @@ mod tests {
         assert!(tests_screen.contains("res.status"), "{tests_screen}");
         assert!(!tests_screen.contains("\"a\": ["), "{tests_screen}");
         assert!(!tests_screen.contains("content-type"), "{tests_screen}");
+        assert!(!tests_screen.contains("Requête envoyée"), "{tests_screen}");
+
+        model.response_tab = crate::app::model::ResponseTab::Timeline;
+        let timeline_screen = render(&model, 100, 30).join("\n");
+        assert!(
+            timeline_screen.contains("Requête envoyée"),
+            "{timeline_screen}"
+        );
+        assert!(
+            timeline_screen.contains("Réponse reçue"),
+            "{timeline_screen}"
+        );
+        assert!(!timeline_screen.contains("\"a\": ["), "{timeline_screen}");
+        assert!(!timeline_screen.contains("body a"), "{timeline_screen}");
     }
 
     #[test]

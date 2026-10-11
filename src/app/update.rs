@@ -5657,7 +5657,9 @@ mod tests {
         assert_eq!(model.response_tab, ResponseTab::Headers);
         update(&mut model, Message::Right);
         assert_eq!(model.response_tab, ResponseTab::Tests);
-        // Cycle circulaire : un troisième Right revient à Corps.
+        update(&mut model, Message::Right);
+        assert_eq!(model.response_tab, ResponseTab::Timeline);
+        // Cycle circulaire : un quatrième Right revient à Corps.
         update(&mut model, Message::Right);
         assert_eq!(model.response_tab, ResponseTab::Body);
     }
@@ -5672,7 +5674,9 @@ mod tests {
         update(&mut model, Message::NextFocus); // Réponse
         assert_eq!(model.response_tab, ResponseTab::Body);
 
-        // Cycle circulaire vers l'arrière : depuis Corps, Left va à Tests.
+        // Cycle circulaire vers l'arrière : depuis Corps, Left va à Timeline.
+        update(&mut model, Message::Left);
+        assert_eq!(model.response_tab, ResponseTab::Timeline);
         update(&mut model, Message::Left);
         assert_eq!(model.response_tab, ResponseTab::Tests);
     }

@@ -51,6 +51,7 @@ pub enum ResponseTab {
     Body,
     Headers,
     Tests,
+    Timeline,
 }
 
 impl ResponseTab {
@@ -58,15 +59,17 @@ impl ResponseTab {
         match self {
             ResponseTab::Body => ResponseTab::Headers,
             ResponseTab::Headers => ResponseTab::Tests,
-            ResponseTab::Tests => ResponseTab::Body,
+            ResponseTab::Tests => ResponseTab::Timeline,
+            ResponseTab::Timeline => ResponseTab::Body,
         }
     }
 
     pub fn previous(self) -> Self {
         match self {
-            ResponseTab::Body => ResponseTab::Tests,
+            ResponseTab::Body => ResponseTab::Timeline,
             ResponseTab::Headers => ResponseTab::Body,
             ResponseTab::Tests => ResponseTab::Headers,
+            ResponseTab::Timeline => ResponseTab::Tests,
         }
     }
 }
