@@ -254,6 +254,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "ouvrir le corps brut dans l'éditeur externe",
             },
             HelpEntry {
+                key: "x",
+                effect: "exporter le corps brut dans un fichier",
+            },
+            HelpEntry {
                 key: "Échap",
                 effect: "ramener le focus à l'arbre",
             },

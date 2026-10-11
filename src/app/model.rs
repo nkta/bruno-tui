@@ -929,7 +929,7 @@ pub fn field_display_name(field: &EditableField, view: &RequestView) -> String {
 }
 
 /// Confirmation en attente avant une action destructive ou sensible (D6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingConfirm {
     /// Fermer la session en cours (Échap) malgré des modifications.
     DiscardEdit,
@@ -937,6 +937,24 @@ pub enum PendingConfirm {
     QuitWithUnsavedEdit,
     /// Copier la commande curl avec les secrets en clair (en-têtes d'auth).
     CopyUnmaskedCurl,
+    /// Écraser un fichier existant lors de l'export du corps de réponse.
+    OverwriteExport { path: PathBuf, bytes: Vec<u8> },
+}
+
+/// État de saisie du chemin pour l'export du corps de réponse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportInputState {
+    pub input: super::text_input::TextInput,
+    pub bytes: Vec<u8>,
+}
+
+impl ExportInputState {
+    pub fn new(default_path: &str, bytes: Vec<u8>) -> Self {
+        Self {
+            input: super::text_input::TextInput::new(default_path, false),
+            bytes,
+        }
+    }
 }
 
 /// Résultat d'une sauvegarde réussie (D7).
@@ -1094,6 +1112,10 @@ pub struct Model {
     /// Indique si la collection racine est sélectionnée pour affichage dans
     /// le panneau Détail (`collection.bru` / `opencollection.yml`).
     pub selected_collection: bool,
+    /// Saisie du chemin pour l'export du corps de réponse.
+    pub export_input: Option<ExportInputState>,
+    /// Persistance de l'historique active (désactivée par `--no-history`).
+    pub history_enabled: bool,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -1208,6 +1230,10 @@ pub enum StatusMessage {
     /// Édition ou enregistrement refusé : la collection est au format
     /// OpenCollection (YAML), que le writer ne sait pas écrire.
     ReadOnlyCollection,
+    /// Corps de réponse exporté dans un fichier.
+    ResponseExported(PathBuf),
+    /// Échec de l'export du corps de réponse.
+    ExportError(String),
 }
 
 /// Champ interactif dans le popup d'options de campagne.
@@ -1546,6 +1572,8 @@ impl Model {
             last_saved_stamps: HashMap::new(),
             pending_reload: false,
             selected_collection: false,
+            export_input: None,
+            history_enabled: false,
         }
     }
 
@@ -1675,6 +1703,9 @@ impl Model {
         }
         if self.tree_filter.as_ref().is_some_and(|f| f.editing) {
             return Some(TextCapture::TreeFilter);
+        }
+        if self.export_input.is_some() {
+            return Some(TextCapture::ExportPath);
         }
         None
     }

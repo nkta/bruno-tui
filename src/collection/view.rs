@@ -65,6 +65,23 @@ impl AuthMode {
             other => Self::Other(other.to_owned()),
         }
     }
+
+    /// Nom de mode en chaîne de caractères (`basic`, `bearer`, etc.).
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::NoAuth => "none",
+            Self::Inherit => "inherit",
+            Self::Basic => "basic",
+            Self::Bearer => "bearer",
+            Self::Digest => "digest",
+            Self::Ntlm => "ntlm",
+            Self::OAuth2 => "oauth2",
+            Self::AwsV4 => "awsv4",
+            Self::Wsse => "wsse",
+            Self::ApiKey => "apikey",
+            Self::Other(other) => other.as_str(),
+        }
+    }
 }
 
 /// Type de corps déclaré par la clé `body` du bloc de méthode.
@@ -142,6 +159,7 @@ pub struct ExtraTabs {
     pub docs: Option<String>,
     pub settings: Vec<KeyValue>,
     pub assertions: Vec<KeyValue>,
+    pub auth_params: Vec<KeyValue>,
 }
 
 /// Vue d'une requête pour l'affichage.
@@ -201,6 +219,10 @@ impl RequestView {
         &self.extra.assertions
     }
 
+    pub fn auth_params(&self) -> &[KeyValue] {
+        &self.extra.auth_params
+    }
+
     /// Construit la vue ; échoue si aucun bloc de méthode HTTP n'existe.
     pub fn from_ast(file: &BruFile) -> Result<Self, ParseError> {
         let method = file
@@ -235,6 +257,28 @@ impl RequestView {
                 BodyView { kind, content }
             });
 
+        let auth = method_entry("auth").map(AuthMode::parse).or_else(|| {
+            file.blocks()
+                .find(|b| b.name.starts_with("auth:"))
+                .map(|b| AuthMode::parse(&b.name["auth:".len()..]))
+        });
+
+        let auth_params = if let Some(mode) = &auth {
+            let block_name = format!("auth:{}", mode.as_str());
+            let mut params = key_values(file, &block_name);
+            if params.is_empty()
+                && let Some(b) = file.blocks().find(|b| b.name.starts_with("auth:"))
+            {
+                params = key_values(file, &b.name);
+            }
+            params
+        } else {
+            file.blocks()
+                .find(|b| b.name.starts_with("auth:"))
+                .map(|b| key_values(file, &b.name))
+                .unwrap_or_default()
+        };
+
         Ok(Self {
             name: meta_name(file),
             kind: file.entry("meta", "type").map(str::to_owned),
@@ -245,7 +289,7 @@ impl RequestView {
             query_params: key_values(file, "params:query"),
             path_params: key_values(file, "params:path"),
             body,
-            auth: method_entry("auth").map(AuthMode::parse),
+            auth,
             has_pre_request_script: file.has_block("script:pre-request"),
             has_post_response_script: file.has_block("script:post-response"),
             has_tests: file.has_block("tests"),
@@ -259,6 +303,7 @@ impl RequestView {
                 docs: file.text("docs"),
                 settings: key_values(file, "settings"),
                 assertions: key_values(file, "assert"),
+                auth_params,
             }),
         })
     }

@@ -38,6 +38,7 @@ Options :
                   sélection native avec Maj+glisser.
   --no-watch      désactive la surveillance et le rechargement automatique
                   de la collection
+  --no-history    désactive la persistance de l'historique des exécutions
   -h, --help      affiche cette aide
   -V, --version   affiche la version
 ";
@@ -58,6 +59,8 @@ pub enum Command {
         mouse: bool,
         /// Surveillance et rechargement automatique de la collection ; `false` avec `--no-watch`.
         watch: bool,
+        /// Persistance de l'historique des exécutions ; `false` avec `--no-history`.
+        history: bool,
     },
     Help,
     Version,
@@ -82,6 +85,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
     let mut secrets: Vec<SecretMapping> = Vec::new();
     let mut mouse = true;
     let mut watch = true;
+    let mut history = true;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -89,6 +93,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
             Some("-V" | "--version") => return Ok(Command::Version),
             Some("--no-mouse") => mouse = false,
             Some("--no-watch") => watch = false,
+            Some("--no-history") => history = false,
             Some("--secret") => {
                 let spec = args.next().ok_or(UsageError::MissingSecretArgument)?;
                 push_secret(&mut secrets, &spec)?;
@@ -112,6 +117,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
         secrets,
         mouse,
         watch,
+        history,
     })
 }
 
@@ -141,6 +147,7 @@ mod tests {
             secrets: Vec::new(),
             mouse: true,
             watch: true,
+            history: true,
         }
     }
 
@@ -188,6 +195,7 @@ mod tests {
             secrets: Vec::new(),
             mouse: false,
             watch: true,
+            history: true,
         };
         assert_eq!(parse_strs(&["./c"]), Ok(run("./c")));
         assert_eq!(parse_strs(&["--no-mouse", "./c"]), Ok(without_mouse("./c")));
@@ -210,6 +218,7 @@ mod tests {
             secrets: Vec::new(),
             mouse: true,
             watch: false,
+            history: true,
         };
         assert_eq!(parse_strs(&["./c"]), Ok(run("./c")));
         assert_eq!(parse_strs(&["--no-watch", "./c"]), Ok(without_watch("./c")));
@@ -223,6 +232,35 @@ mod tests {
             Err(UsageError::UnknownOption("--no-watch=1".into()))
         );
         assert!(USAGE.contains("--no-watch"));
+    }
+
+    #[test]
+    fn no_history_option() {
+        let without_history = |path: &str| Command::Run {
+            path: PathBuf::from(path),
+            secrets: Vec::new(),
+            mouse: true,
+            watch: true,
+            history: false,
+        };
+        assert_eq!(parse_strs(&["./c"]), Ok(run("./c")));
+        assert_eq!(
+            parse_strs(&["--no-history", "./c"]),
+            Ok(without_history("./c"))
+        );
+        assert_eq!(
+            parse_strs(&["./c", "--no-history"]),
+            Ok(without_history("./c"))
+        );
+        assert_eq!(
+            parse_strs(&["--no-history", "--no-history"]),
+            Ok(without_history("."))
+        );
+        assert_eq!(
+            parse_strs(&["--no-history=1"]),
+            Err(UsageError::UnknownOption("--no-history=1".into()))
+        );
+        assert!(USAGE.contains("--no-history"));
     }
 
     #[test]
@@ -243,6 +281,7 @@ mod tests {
                 ],
                 mouse: true,
                 watch: true,
+                history: true,
             })
         );
         assert_eq!(
@@ -252,6 +291,7 @@ mod tests {
                 secrets: vec![mapping("a", None), mapping("b", Some("B"))],
                 mouse: true,
                 watch: true,
+                history: true,
             })
         );
     }
@@ -287,6 +327,7 @@ mod tests {
                 secrets: Vec::new(),
                 mouse: true,
                 watch: true,
+                history: true,
             })
         );
     }

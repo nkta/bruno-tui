@@ -14,7 +14,7 @@ use ratatui::crossterm::event::{self, Event};
 use tokio::sync::mpsc;
 
 use super::clipboard::ClipboardError;
-use super::model::{SavedEdit, SavedEnvironment};
+use super::model::{HistoryEntry, SavedEdit, SavedEnvironment};
 use crate::collection::{Collection, LoadError};
 use crate::runner;
 use crate::secrets::Resolved;
@@ -61,6 +61,17 @@ pub enum AppEvent {
     /// un ou plusieurs fichiers de la collection ont été modifiés sur disque
     /// (chemins relatifs à la racine).
     WatchReload(Vec<PathBuf>),
+    /// Issue d'une exportation de corps de réponse (`Command::ExportResponseBody`).
+    ResponseBodyExported {
+        path: PathBuf,
+        result: Result<(), String>,
+    },
+    /// Historique persistant chargé depuis le disque.
+    HistoryLoaded {
+        root: PathBuf,
+        entries: Vec<HistoryEntry>,
+        notice: Option<String>,
+    },
 }
 
 /// Lance le thread qui lit le terminal et publie ses événements.

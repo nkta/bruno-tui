@@ -4,6 +4,7 @@
 //! d'état. `layout` est partagé avec `update`, qui en déduit la hauteur des
 //! panneaux pour garder la sélection visible et borner le défilement.
 
+pub mod auth;
 pub mod detail;
 pub mod global_search;
 pub mod help;
@@ -751,6 +752,16 @@ fn search_input_line(model: &Model) -> Option<String> {
     search.editing.then(|| format!("/{}", search.draft))
 }
 
+/// Ligne de saisie du chemin d'export du corps de réponse, tant qu'elle est ouverte :
+/// remplace la barre d'état, à la place des rappels de touches habituels.
+fn export_input_line(model: &Model) -> Option<String> {
+    let export = model.export_input.as_ref()?;
+    Some(format!(
+        "Exporter le corps dans : {} (Entrée valider, Échap annuler)",
+        export.input.text()
+    ))
+}
+
 fn status_message_text(message: &StatusMessage) -> String {
     match message {
         StatusMessage::Copied => "Copié dans le presse-papiers".to_owned(),
@@ -792,6 +803,12 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::ReadOnlyCollection => {
             "Collection OpenCollection (YAML) en lecture seule : édition et enregistrement désactivés"
                 .to_owned()
+        }
+        StatusMessage::ResponseExported(path) => {
+            format!("Corps de réponse exporté dans {}", path.display())
+        }
+        StatusMessage::ExportError(reason) => {
+            format!("Échec de l'exportation : {reason}")
         }
     }
 }
@@ -878,7 +895,7 @@ fn environment_session_help_line(session: &crate::app::model::EnvironmentEditSes
 }
 
 fn status_line(model: &Model) -> String {
-    if let Some(confirm) = model.confirm {
+    if let Some(confirm) = &model.confirm {
         return match confirm {
             PendingConfirm::DiscardEdit => "Abandonner les modifications ? (y/n)".to_owned(),
             PendingConfirm::QuitWithUnsavedEdit => {
@@ -886,6 +903,9 @@ fn status_line(model: &Model) -> String {
             }
             PendingConfirm::CopyUnmaskedCurl => {
                 "Copier la commande curl avec les secrets en clair ? (y/n)".to_owned()
+            }
+            PendingConfirm::OverwriteExport { path, .. } => {
+                format!("Écraser {} existant ? (y/n)", path.display())
             }
         };
     }
@@ -910,6 +930,9 @@ fn status_line(model: &Model) -> String {
         return line;
     }
     if let Some(line) = search_input_line(model) {
+        return line;
+    }
+    if let Some(line) = export_input_line(model) {
         return line;
     }
     if let Some(message) = active_run_message(model) {
@@ -939,7 +962,7 @@ fn status_line(model: &Model) -> String {
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Response) => {
-            "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter  z plein écran"
+            "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  x exporter  ? aide  Échap arbre  q quitter  z plein écran"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Diagnostics) => {
@@ -2157,7 +2180,7 @@ mod tests {
         let status = &lines[28];
         assert!(
             status.contains(
-                "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter"
+                "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  x exporter  ? aide  Échap arbre  q quitter"
             ),
             "{status}"
         );
@@ -2992,5 +3015,57 @@ mod tests {
         assert!(screen.contains("Recherche globale"), "{screen}");
         assert!(screen.contains(">"), "{screen}");
         assert!(screen.contains("GET"), "{screen}");
+    }
+
+    #[test]
+    fn export_status_line_and_rendering() {
+        use crate::app::model::ExportInputState;
+
+        let mut model = loaded_model((100, 30));
+
+        // 1. Rappel de touche x en focus Response
+        model.focus = Focus::Response;
+        let line = status_line(&model);
+        assert!(line.contains("x exporter"), "{line}");
+
+        // 2. Saisie d'exportation active
+        model.export_input = Some(ExportInputState::new("./mon-export.json", vec![]));
+        let line = status_line(&model);
+        assert!(
+            line.contains(
+                "Exporter le corps dans : ./mon-export.json (Entrée valider, Échap annuler)"
+            ),
+            "{line}"
+        );
+
+        // 3. Confirmation d'écrasement
+        model.export_input = None;
+        model.confirm = Some(PendingConfirm::OverwriteExport {
+            path: PathBuf::from("./existant.json"),
+            bytes: vec![],
+        });
+        let line = status_line(&model);
+        assert!(
+            line.contains("Écraser ./existant.json existant ? (y/n)"),
+            "{line}"
+        );
+
+        // 4. Messages de statut d'export
+        model.confirm = None;
+        model.last_status = Some(StatusMessage::ResponseExported(PathBuf::from(
+            "./existant.json",
+        )));
+        let line = status_line(&model);
+        assert!(
+            line.contains("Corps de réponse exporté dans ./existant.json"),
+            "{line}"
+        );
+
+        model.last_status = Some(StatusMessage::ExportError("disque plein".into()));
+        let line = status_line(&model);
+        assert!(
+            line.contains("Échec de l'exportation : disque plein"),
+            "{line}"
+        );
     }
 }

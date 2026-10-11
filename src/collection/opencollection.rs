@@ -337,6 +337,33 @@ fn auth(map: &Mapping, notices: &mut Notices, scope: &str) -> Option<AuthMode> {
     }
 }
 
+/// Paramètres d'authentification déclarés hors `type`.
+fn auth_params(map: &Mapping) -> Vec<KeyValue> {
+    let Some(Value::Mapping(auth_map)) = get(map, "auth") else {
+        return Vec::new();
+    };
+    let mut params = Vec::new();
+    for (k, v) in auth_map {
+        if let Value::String(key_str) = k {
+            if key_str == "type" {
+                continue;
+            }
+            let val_str = match v {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            params.push(KeyValue {
+                key: key_str.clone(),
+                value: val_str,
+                enabled: true,
+            });
+        }
+    }
+    params
+}
+
 /// Corps de requête HTTP (`toBrunoBody`) ; `None` sans corps.
 fn body(details: &Mapping, notices: &mut Notices) -> Option<BodyView> {
     let body = mapping(details, "body")?;
@@ -564,6 +591,7 @@ pub fn parse_item(source: &str) -> Result<Parsed<RequestView>, ParseError> {
             docs: content_of(item.get("docs")),
             settings: settings(&item, &mut notices),
             assertions,
+            auth_params: auth_params(auth_source),
         }),
     };
     Ok(Parsed {

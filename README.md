@@ -21,6 +21,7 @@ Options :
 | `--secret NOM[=CLÉ]` | variable secrète transmise à `bru` (répétable). Cherchée dans le `.env` de la collection puis le shell, sous `CLÉ` ou `NOM`/`NOM_EN_MAJUSCULES` ; une saisie dans le panneau Secrets prime. Jamais de valeur en clair sur la ligne de commande. |
 | `--no-mouse` | n'active pas la capture souris (la sélection native du terminal reste disponible) |
 | `--no-watch` | désactive la surveillance et le rechargement automatique de la collection |
+| `--no-history` | désactive la persistance de l'historique des exécutions dans le fichier d'état |
 | `-h`, `--help` | aide |
 | `-V`, `--version` | version |
 
@@ -238,6 +239,7 @@ sur le disque, jamais enregistrée dans l'historique persistant, ni logguée.
 | `c` | copier en commande `curl` (en-têtes d'auth masqués) |
 | `u` | copier en commande `curl` complète (confirmation si des secrets sont présents) |
 | `Ctrl+E` | ouvrir le corps brut de la réponse (non filtré) dans `$VISUAL`, `$EDITOR`, ou `nano` — consultation seule, rien n'est relu |
+| `x` | exporter le corps brut dans un fichier (chemin proposé hors collection, confirmation si existant) |
 
 `Ctrl+E` fonctionne quel que soit le focus courant, tant qu'une requête
 sélectionnée a un résultat avec un corps non vide.
@@ -246,7 +248,10 @@ sélectionnée a un résultat avec un corps non vide.
 
 - **Diagnostics** (`D`) : erreurs de chargement de la collection ; `→`
   saute au nœud concerné dans l'arbre.
-- **Historique** (`H`) : exécutions passées ; `r` relance l'entrée
+- **Historique** (`H`) : journal persistant des exécutions (sauvegardé dans
+  `$XDG_STATE_HOME/bruno-tui/history.json` ou `~/.local/state/bruno-tui/history.json`,
+  borné à 200 entrées par collection, limité strictement aux métadonnées sans secrets
+  ni corps de réponse ; désactivable via `--no-history`) ; `r` relance l'entrée
   sélectionnée.
 - **Secrets** (`S`) : variables `vars:secret` de l'environnement actif et
   celles demandées par `--secret` ; `a` ajoute un nom, `Entrée` saisit sa
