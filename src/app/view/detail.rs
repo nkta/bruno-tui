@@ -176,7 +176,7 @@ fn yes_no(value: bool) -> &'static str {
 /// italique en plus pour rester distinct du style de la clé qui précède
 /// (les deux seraient sinon indiscernables, `theme::LABEL` n'étant que
 /// [`Modifier::DIM`]).
-const DISABLED_ENTRY_VALUE: Style =
+pub(crate) const DISABLED_ENTRY_VALUE: Style =
     Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC));
 
 fn entries(lines: &mut Vec<Line<'static>>, values: &[KeyValue]) {
@@ -213,19 +213,7 @@ fn render_code_block(lines: &mut Vec<Line<'static>>, code: Option<&str>) {
 
 /// Mode d'auth tel qu'écrit dans le fichier.
 pub fn auth_label(mode: &AuthMode) -> &str {
-    match mode {
-        AuthMode::NoAuth => "none",
-        AuthMode::Inherit => "inherit",
-        AuthMode::Basic => "basic",
-        AuthMode::Bearer => "bearer",
-        AuthMode::Digest => "digest",
-        AuthMode::Ntlm => "ntlm",
-        AuthMode::OAuth2 => "oauth2",
-        AuthMode::AwsV4 => "awsv4",
-        AuthMode::Wsse => "wsse",
-        AuthMode::ApiKey => "apikey",
-        AuthMode::Other(other) => other,
-    }
+    mode.as_str()
 }
 
 /// Type de corps tel qu'écrit dans le fichier.
@@ -893,13 +881,34 @@ pub fn request_text_and_fields(
                 },
             );
         }
-        RequestTab::Auth => lines.push(field(
-            "Auth",
-            view.auth
+        RequestTab::Auth => {
+            lines.push(field(
+                "Auth",
+                view.auth
+                    .as_ref()
+                    .map_or("non déclarée", auth_label)
+                    .to_owned(),
+            ));
+            if view
+                .auth
                 .as_ref()
-                .map_or("non déclarée", auth_label)
-                .to_owned(),
-        )),
+                .is_some_and(|m| !matches!(m, AuthMode::NoAuth | AuthMode::Inherit))
+                || !view.auth_params().is_empty()
+            {
+                boxed_section(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    view.auth
+                        .as_ref()
+                        .map(|m| format!("Paramètres ({})", auth_label(m)))
+                        .unwrap_or_else(|| "Paramètres".to_owned()),
+                    |lines, _| {
+                        super::auth::render_auth_entries(lines, view.auth_params());
+                    },
+                );
+            }
+        }
         RequestTab::Vars => {
             boxed_section(
                 &mut lines,
@@ -995,7 +1004,7 @@ pub fn request_tab_is_empty(view: &crate::collection::RequestView, tab: RequestT
         RequestTab::Params => view.query_params.is_empty() && view.path_params.is_empty(),
         RequestTab::Body => view.body.is_none(),
         RequestTab::Headers => view.headers.is_empty(),
-        RequestTab::Auth => view.auth.is_none(),
+        RequestTab::Auth => view.auth.is_none() && view.auth_params().is_empty(),
         RequestTab::Vars => {
             view.vars_pre_request().is_empty() && view.vars_post_response().is_empty()
         }
@@ -2353,6 +2362,61 @@ mod tests {
         let text = detail_of("grp/inherit.bru");
         assert!(text.contains("Auth : inherit"), "{text}");
         assert!(!text.contains("bearer"), "{text}");
+    }
+
+    #[test]
+    fn auth_tab_rendering_with_params_and_masking() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "scripted.bru");
+        model.request_tab = RequestTab::Auth;
+
+        // scripted.bru a `auth: bearer` et `token: {{tok}}`
+        let plain_text = plain(&detail_text(&model));
+        let boxes = detail_section_boxes(&model);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].title, "Paramètres (bearer)");
+        assert!(plain_text.contains("Auth : bearer"));
+        assert!(plain_text.contains("token: {{tok}}"));
+
+        // Requête avec secret littéral et valeur variable
+        let bru_src = r#"meta {
+  name: auth-test
+  type: http
+  seq: 1
+}
+
+post {
+  url: https://example.com/login
+  body: none
+  auth: basic
+}
+
+auth:basic {
+  username: admin
+  password: supersecretpassword
+  token: {{my_token}}
+  ~cle_api: 12345
+}
+"#;
+        let file = crate::collection::BruFile::parse(bru_src.to_owned()).expect("parse");
+        let view = crate::collection::RequestView::from_ast(&file).expect("view");
+        let (text, _, boxes) = request_text_and_fields(
+            &crate::collection::RequestNode {
+                path: std::path::PathBuf::from("auth-test.bru"),
+                view,
+                ast: Some(file),
+            },
+            None,
+            RequestTab::Auth,
+        );
+        let plain_custom = plain(&text);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].title, "Paramètres (basic)");
+        assert!(plain_custom.contains("Auth : basic"));
+        assert!(plain_custom.contains("username: admin"));
+        assert!(plain_custom.contains("password: ********"));
+        assert!(plain_custom.contains("token: {{my_token}}"));
+        assert!(plain_custom.contains("cle_api: ******** (désactivé)"));
     }
 
     #[test]

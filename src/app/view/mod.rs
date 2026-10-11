@@ -4,6 +4,7 @@
 //! d'état. `layout` est partagé avec `update`, qui en déduit la hauteur des
 //! panneaux pour garder la sélection visible et borner le défilement.
 
+pub mod auth;
 pub mod detail;
 pub mod global_search;
 pub mod help;
