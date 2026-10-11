@@ -1334,6 +1334,7 @@ mod tests {
             id: crate::runner::RunId(1),
             target: "simple-get.bru".into(),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         let line = status_line(&model);
@@ -1986,7 +1987,7 @@ mod tests {
 
     #[test]
     fn campaign_panel_renders_header_and_failures() {
-        use crate::app::model::{CampaignFailure, CampaignSummary};
+        use crate::app::model::{CampaignFailure, CampaignFilter, CampaignSummary};
         use std::path::PathBuf;
 
         let mut model = loaded_model((100, 30));
@@ -1997,6 +1998,8 @@ mod tests {
             failed: 3,
             skipped: 0,
             duration_secs: 1.42,
+            items: Vec::new(),
+            filter: CampaignFilter::default(),
             failures: vec![
                 CampaignFailure {
                     path: PathBuf::from("req1.bru"),
@@ -2485,6 +2488,7 @@ mod tests {
                 id: RunId(7),
                 target: "folder".into(),
                 recursive: true,
+                is_campaign: true,
                 handle: None,
             });
         };

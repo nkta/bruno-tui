@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 use super::filter::{FilterState, evaluate};
 use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
-    CampaignFailure, CampaignSummary, ClipboardSource, CollectionState, DetailSelection, Drag,
-    DragPanel, EditSession, EditState, EditableField, EnvironmentEditSession, EnvironmentEditState,
-    Exit, Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, RequestTab, ResponseTab,
-    RunnerOptionsField, RunnerOptionsPopup, SecretError, SecretInput, StatusMessage, all_rows,
-    environment_name_at, field_enabled, field_value, field_value_committed, secret_env_vars,
-    secret_lookups, secret_rows, section_entries, selected_response_body, tree_node_at,
-    visible_rows,
+    CampaignFailure, CampaignFilter, CampaignItem, CampaignItemStatus, CampaignSummary,
+    ClipboardSource, CollectionState, DetailSelection, Drag, DragPanel, EditSession, EditState,
+    EditableField, EnvironmentEditSession, EnvironmentEditState, Exit, Focus, HistoryEntry,
+    HistoryOutcome, InputTarget, Model, RequestTab, ResponseTab, RunnerOptionsField,
+    RunnerOptionsPopup, SecretError, SecretInput, StatusMessage, all_rows, environment_name_at,
+    field_enabled, field_value, field_value_committed, secret_env_vars, secret_lookups,
+    secret_rows, section_entries, selected_response_body, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::text_input::TextInput;
@@ -47,6 +47,7 @@ pub enum Command {
     StartRun {
         request: RunRequest,
         target: std::path::PathBuf,
+        is_campaign: bool,
     },
     /// Copier ce texte dans le presse-papiers du système ; la boucle
     /// l'exécute dans `spawn_blocking` et renvoie le résultat à `update`
@@ -489,6 +490,14 @@ fn apply(model: &mut Model, message: Message) -> Command {
         }
         Message::RunSelected if model.focus == Focus::Secrets => launch_pending_run(model),
         Message::RunSelected => run_selected(model),
+        // `R` n'agit que depuis le panneau Campagne : ailleurs (dont une
+        // session d'édition), une majuscule tapée par erreur ne relance rien.
+        Message::RunFailedRequests if model.focus == Focus::Campaign => run_failed_requests(model),
+        Message::RunFailedRequests => Command::None,
+        Message::CycleCampaignFilter => {
+            cycle_campaign_filter(model);
+            Command::None
+        }
         Message::CancelRun => {
             cancel_run(model);
             Command::None
@@ -497,12 +506,14 @@ fn apply(model: &mut Model, message: Message) -> Command {
             id,
             target,
             recursive,
+            is_campaign,
             handle,
         } => {
             model.run.active = Some(super::model::ActiveRun {
                 id,
                 target,
                 recursive,
+                is_campaign,
                 handle: Some(handle),
             });
             Command::None
@@ -568,7 +579,9 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::OpenTreeFilter => {
-            if model.focus == Focus::Tree && model.loaded().is_some() {
+            if model.focus == Focus::Campaign {
+                cycle_campaign_filter(model);
+            } else if model.focus == Focus::Tree && model.loaded().is_some() {
                 // Filtrer peut déplacer la sélection : refusé tant qu'une
                 // édition non enregistrée la verrouille.
                 if selection_locked(model) {
@@ -1113,6 +1126,81 @@ fn start_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> 
             options,
         },
         target,
+        is_campaign: recursive,
+    }
+}
+
+/// Lance une exécution ciblée uniquement sur les requêtes en échec de la dernière campagne,
+/// avec les options de campagne courantes et sans récursion.
+fn start_run_failures(
+    model: &mut Model,
+    target: std::path::PathBuf,
+    failure_paths: Vec<std::path::PathBuf>,
+) -> Command {
+    let Some(root) = model.loaded().map(|collection| collection.root.clone()) else {
+        return Command::None;
+    };
+    model.run.last_failure = None;
+    let (options, reports) = model
+        .runner_options
+        .build_runner_options(&model.reports_dir);
+    model.last_reports = reports;
+    Command::StartRun {
+        request: RunRequest {
+            collection_root: root,
+            targets: failure_paths,
+            recursive: false,
+            env: model.current_environment.clone(),
+            env_vars: secret_env_vars(model),
+            options,
+        },
+        target,
+        is_campaign: true,
+    }
+}
+
+/// Action « relancer seulement les échecs » : lance un unique `bru run` avec les chemins
+/// des requêtes en échec en arguments positionnels et les options de campagne courantes.
+fn run_failed_requests(model: &mut Model) -> Command {
+    if model.run.active.is_some() || model.loaded().is_none() {
+        return Command::None;
+    }
+    let Some(campaign) = &model.campaign else {
+        model.last_status = Some(StatusMessage::NoFailedRequests);
+        return Command::None;
+    };
+    let mut failure_paths: Vec<std::path::PathBuf> = campaign
+        .items
+        .iter()
+        .filter(|item| item.status == CampaignItemStatus::Failed)
+        .map(|item| item.path.clone())
+        .collect();
+    if failure_paths.is_empty() && !campaign.failures.is_empty() {
+        failure_paths = campaign.failures.iter().map(|f| f.path.clone()).collect();
+    }
+    if failure_paths.is_empty() {
+        model.last_status = Some(StatusMessage::NoFailedRequests);
+        return Command::None;
+    }
+    let target = campaign.target.clone();
+    if should_propose_secrets(model) {
+        let missing = first_missing_declared_secret(model);
+        model.secrets.pending_run = Some((target, true));
+        model.secrets.selected = missing;
+        model.secrets.input = None;
+        model.secrets.error = None;
+        model.focus = Focus::Secrets;
+        return Command::None;
+    }
+    start_run_failures(model, target, failure_paths)
+}
+
+/// Fait tourner le filtre de statut de la campagne (Échecs -> Réussis -> Ignorés -> Tous -> Échecs)
+/// et repositionne le curseur en tête de la liste.
+fn cycle_campaign_filter(model: &mut Model) {
+    if let Some(campaign) = &mut model.campaign {
+        campaign.filter = campaign.filter.next();
+        model.campaign_selected = 0;
     }
 }
 
@@ -1346,7 +1434,7 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
     }
     model.history.push_front(entry);
 
-    if active.recursive
+    if (active.recursive || active.is_campaign)
         && let crate::runner::RunOutcome::Completed { ref report, .. } = event.outcome
     {
         let results: Vec<_> = report
@@ -1358,22 +1446,56 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
         let failed = results.iter().filter(|r| r.is_failure()).count();
         let skipped = results
             .iter()
-            .filter(|r| r.skipped && !r.is_failure())
+            .filter(|r| {
+                (r.skipped || r.status == crate::runner::report::ResultStatus::Skipped)
+                    && !r.is_failure()
+            })
             .count();
         let passed = total.saturating_sub(failed + skipped);
         let duration_secs: f64 = results.iter().map(|r| r.run_duration).sum();
 
-        let failures = results
+        let items: Vec<CampaignItem> = results
             .iter()
-            .filter(|r| r.is_failure())
-            .map(|r| CampaignFailure {
-                path: std::path::PathBuf::from(&r.test.filename),
-                name: r.name.clone(),
-                http_code: match r.response.status {
+            .map(|r| {
+                let status = if r.is_failure() {
+                    CampaignItemStatus::Failed
+                } else if r.skipped || r.status == crate::runner::report::ResultStatus::Skipped {
+                    CampaignItemStatus::Skipped
+                } else {
+                    CampaignItemStatus::Passed
+                };
+                let reason = match status {
+                    CampaignItemStatus::Failed => Some(extract_failure_reason(r)),
+                    CampaignItemStatus::Skipped => r
+                        .response
+                        .status_text
+                        .clone()
+                        .or_else(|| Some("ignoré".to_owned())),
+                    CampaignItemStatus::Passed => None,
+                };
+                let http_code = match r.response.status {
                     ResponseStatus::Http(code) => Some(code),
                     _ => None,
-                },
-                reason: extract_failure_reason(r),
+                };
+                CampaignItem {
+                    path: std::path::PathBuf::from(&r.test.filename),
+                    name: r.name.clone(),
+                    status,
+                    http_code,
+                    duration_secs: r.run_duration,
+                    reason,
+                }
+            })
+            .collect();
+
+        let failures = items
+            .iter()
+            .filter(|i| i.status == CampaignItemStatus::Failed)
+            .map(|i| CampaignFailure {
+                path: i.path.clone(),
+                name: i.name.clone(),
+                http_code: i.http_code,
+                reason: i.reason.clone().unwrap_or_else(|| "échec".to_owned()),
             })
             .collect();
 
@@ -1384,6 +1506,8 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
             failed,
             skipped,
             duration_secs,
+            items,
+            filter: CampaignFilter::default(),
             failures,
         });
         model.campaign_selected = 0;
@@ -2861,7 +2985,8 @@ fn navigate_campaign(model: &mut Model, message: Message) {
         model.campaign_selected = 0;
         return;
     };
-    let count = campaign.failures.len();
+    let filtered = campaign.filtered_items();
+    let count = filtered.len();
     if count == 0 {
         model.campaign_selected = 0;
         return;
@@ -2876,8 +3001,8 @@ fn navigate_campaign(model: &mut Model, message: Message) {
         Message::PageUp => model.campaign_selected = before.saturating_sub(page),
         Message::PageDown => model.campaign_selected = (before + page).min(count - 1),
         Message::Right | Message::Enter => {
-            if let Some(failure) = campaign.failures.get(before) {
-                let target_path = failure.path.clone();
+            if let Some(item) = filtered.get(before) {
+                let target_path = item.path.clone();
                 select_request_and_focus_detail(model, &target_path);
             }
         }
@@ -4383,7 +4508,9 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         match update(&mut model, Message::RunSelected) {
-            Command::StartRun { request, target } => {
+            Command::StartRun {
+                request, target, ..
+            } => {
                 assert_eq!(target, Path::new("simple-get.bru"));
                 assert_eq!(
                     request.targets,
@@ -4402,7 +4529,9 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "grp");
         match update(&mut model, Message::RunSelected) {
-            Command::StartRun { request, target } => {
+            Command::StartRun {
+                request, target, ..
+            } => {
                 assert_eq!(target, Path::new("grp"));
                 assert_eq!(request.targets, vec![std::path::PathBuf::from("grp")]);
                 assert!(request.recursive);
@@ -4431,6 +4560,7 @@ mod tests {
             id: runner::RunId(1),
             target: "post-json.bru".into(),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         assert!(matches!(
@@ -4459,7 +4589,9 @@ mod tests {
         // Cas 1 : aucune exécution en cours -> Command::StartRun
         let command = update(&mut model, Message::RunSelected);
         match command {
-            Command::StartRun { request, target } => {
+            Command::StartRun {
+                request, target, ..
+            } => {
                 assert_eq!(target, Path::new("grp"));
                 assert_eq!(request.targets, vec![std::path::PathBuf::from("grp")]);
                 assert!(request.recursive);
@@ -4472,6 +4604,7 @@ mod tests {
             id: runner::RunId(42),
             target: std::path::PathBuf::from("other"),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         let command = update(&mut model, Message::RunSelected);
@@ -5062,6 +5195,7 @@ mod tests {
             id: new_id,
             target: std::path::PathBuf::from("simple-get.bru"),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         let new_report = sample_report(&["simple-get.bru"]);
@@ -5100,6 +5234,7 @@ mod tests {
             id: runner::RunId(7),
             target: "grp".into(),
             recursive: true,
+            is_campaign: true,
             handle: None,
         });
         let report = sample_report(&["grp/x.bru", "grp/y.bru"]);
@@ -5128,6 +5263,7 @@ mod tests {
             id: runner::RunId(3),
             target: "simple-get.bru".into(),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         let command = update(
@@ -5157,6 +5293,7 @@ mod tests {
             id: runner::RunId(1),
             target: "simple-get.bru".into(),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         let command = update(
@@ -5199,6 +5336,7 @@ mod tests {
             id: handle.id(),
             target: std::path::PathBuf::from("ok.bru"),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         let event = rx.recv().await.expect("événement");
@@ -5264,6 +5402,7 @@ mod tests {
             id: handle.id(),
             target: std::path::PathBuf::from("green.bru"),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         let event = rx.recv().await.expect("événement");
@@ -5304,6 +5443,7 @@ mod tests {
             id,
             target: std::path::PathBuf::from("sleeping.bru"),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         for _ in 0..100 {
@@ -5336,6 +5476,7 @@ mod tests {
             id: handle.id(),
             target: std::path::PathBuf::from("failed.bru"),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         let event = rx.recv().await.expect("événement");
@@ -5357,6 +5498,7 @@ mod tests {
                 id,
                 target: target.clone(),
                 recursive: false,
+                is_campaign: false,
                 handle: None,
             });
             update(
@@ -7821,6 +7963,7 @@ mod tests {
             id: runner::RunId(1),
             target: PathBuf::from("x"),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         assert!(matches!(
@@ -8245,6 +8388,7 @@ mod tests {
             id,
             target: PathBuf::from("grp"),
             recursive: true,
+            is_campaign: true,
             handle: None,
         });
 
@@ -8367,6 +8511,7 @@ mod tests {
             id: non_rec_id,
             target: PathBuf::from("simple-get.bru"),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         let single_report = sample_report(&["simple-get.bru"]);
@@ -8396,6 +8541,25 @@ mod tests {
             failed: 2,
             skipped: 0,
             duration_secs: 0.3,
+            items: vec![
+                CampaignItem {
+                    path: PathBuf::from("grp/x.bru"),
+                    name: "x".into(),
+                    status: CampaignItemStatus::Failed,
+                    http_code: Some(500),
+                    duration_secs: 0.1,
+                    reason: Some("server error".into()),
+                },
+                CampaignItem {
+                    path: PathBuf::from("grp/sub/deep.bru"),
+                    name: "deep".into(),
+                    status: CampaignItemStatus::Failed,
+                    http_code: Some(400),
+                    duration_secs: 0.2,
+                    reason: Some("bad request".into()),
+                },
+            ],
+            filter: CampaignFilter::default(),
             failures: vec![
                 CampaignFailure {
                     path: PathBuf::from("grp/x.bru"),
@@ -8791,6 +8955,295 @@ mod tests {
         update(&mut model, Message::FocusTree);
         assert!(model.tree_filter.is_none());
         assert_eq!(model.tree.expanded, initial_expanded);
+    }
+
+    #[test]
+    fn campaign_filter_cycling_and_navigation_across_statuses() {
+        let mut model = loaded_model((100, 30));
+        model.campaign = Some(CampaignSummary {
+            target: PathBuf::from("grp"),
+            total: 3,
+            passed: 1,
+            failed: 1,
+            skipped: 1,
+            duration_secs: 0.5,
+            items: vec![
+                CampaignItem {
+                    path: PathBuf::from("grp/sub/deep.bru"),
+                    name: "deep".into(),
+                    status: CampaignItemStatus::Passed,
+                    http_code: Some(200),
+                    duration_secs: 0.1,
+                    reason: None,
+                },
+                CampaignItem {
+                    path: PathBuf::from("grp/x.bru"),
+                    name: "x".into(),
+                    status: CampaignItemStatus::Failed,
+                    http_code: Some(500),
+                    duration_secs: 0.2,
+                    reason: Some("server error".into()),
+                },
+                CampaignItem {
+                    path: PathBuf::from("grp/skip.bru"),
+                    name: "skip".into(),
+                    status: CampaignItemStatus::Skipped,
+                    http_code: None,
+                    duration_secs: 0.0,
+                    reason: None,
+                },
+            ],
+            filter: CampaignFilter::Failed,
+            failures: vec![CampaignFailure {
+                path: PathBuf::from("grp/x.bru"),
+                name: "x".into(),
+                http_code: Some(500),
+                reason: "server error".into(),
+            }],
+        });
+        model.focus = Focus::Campaign;
+        assert_eq!(model.campaign_selected, 0);
+
+        // 1. Filtre par défaut : Failed (1 seul item : grp/x.bru)
+        let campaign = model.campaign.as_ref().unwrap();
+        assert_eq!(campaign.filter, CampaignFilter::Failed);
+        assert_eq!(campaign.filtered_items().len(), 1);
+        assert_eq!(
+            campaign.filtered_items()[0].path,
+            PathBuf::from("grp/x.bru")
+        );
+
+        // 2. Cycle vers Passed via Message::CycleCampaignFilter
+        update(&mut model, Message::CycleCampaignFilter);
+        let campaign = model.campaign.as_ref().unwrap();
+        assert_eq!(campaign.filter, CampaignFilter::Passed);
+        assert_eq!(model.campaign_selected, 0);
+        assert_eq!(campaign.filtered_items().len(), 1);
+        assert_eq!(
+            campaign.filtered_items()[0].path,
+            PathBuf::from("grp/sub/deep.bru")
+        );
+
+        // Sélection croisée depuis le filtre Passed
+        update(&mut model, Message::Enter);
+        assert_eq!(model.focus, Focus::Detail);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("grp/sub/deep.bru")
+        );
+
+        // Retour au panneau Campagne et cycle vers Skipped via touche 'f' (OpenTreeFilter quand focus Campagne)
+        model.focus = Focus::Campaign;
+        update(&mut model, Message::OpenTreeFilter);
+        let campaign = model.campaign.as_ref().unwrap();
+        assert_eq!(campaign.filter, CampaignFilter::Skipped);
+        assert_eq!(model.campaign_selected, 0);
+        assert_eq!(campaign.filtered_items().len(), 1);
+        assert_eq!(
+            campaign.filtered_items()[0].path,
+            PathBuf::from("grp/skip.bru")
+        );
+
+        // Cycle vers All
+        update(&mut model, Message::CycleCampaignFilter);
+        let campaign = model.campaign.as_ref().unwrap();
+        assert_eq!(campaign.filter, CampaignFilter::All);
+        assert_eq!(model.campaign_selected, 0);
+        assert_eq!(campaign.filtered_items().len(), 3);
+
+        // Navigation dans Tous
+        update(&mut model, Message::Down);
+        assert_eq!(model.campaign_selected, 1);
+        update(&mut model, Message::Down);
+        assert_eq!(model.campaign_selected, 2);
+        update(&mut model, Message::Down);
+        assert_eq!(model.campaign_selected, 2, "borné à la fin de la liste");
+
+        // Cycle revient à Failed, la sélection est réinitialisée à 0
+        update(&mut model, Message::CycleCampaignFilter);
+        let campaign = model.campaign.as_ref().unwrap();
+        assert_eq!(campaign.filter, CampaignFilter::Failed);
+        assert_eq!(model.campaign_selected, 0);
+    }
+
+    #[test]
+    fn campaign_run_failed_requests_starts_run_with_failure_paths() {
+        let mut model = runner_probe_model();
+        model.runner_options = crate::runner::RunnerOptionsConfig {
+            tags: vec!["smoke".into()],
+            exclude_tags: Vec::new(),
+            delay_ms: Some(25),
+            bail: false,
+            tests_only: false,
+            export_junit: false,
+            export_html: false,
+            skip_headers: true,
+        };
+        model.campaign = Some(CampaignSummary {
+            target: PathBuf::from("grp"),
+            total: 3,
+            passed: 1,
+            failed: 2,
+            skipped: 0,
+            duration_secs: 0.5,
+            items: vec![
+                CampaignItem {
+                    path: PathBuf::from("ok.bru"),
+                    name: "ok".into(),
+                    status: CampaignItemStatus::Passed,
+                    http_code: Some(200),
+                    duration_secs: 0.1,
+                    reason: None,
+                },
+                CampaignItem {
+                    path: PathBuf::from("folder/down.bru"),
+                    name: "down".into(),
+                    status: CampaignItemStatus::Failed,
+                    http_code: None,
+                    duration_secs: 0.2,
+                    reason: Some("connect error".into()),
+                },
+                CampaignItem {
+                    path: PathBuf::from("json.bru"),
+                    name: "json".into(),
+                    status: CampaignItemStatus::Failed,
+                    http_code: Some(500),
+                    duration_secs: 0.2,
+                    reason: Some("assertion failed".into()),
+                },
+            ],
+            filter: CampaignFilter::Failed,
+            failures: vec![
+                CampaignFailure {
+                    path: PathBuf::from("folder/down.bru"),
+                    name: "down".into(),
+                    http_code: None,
+                    reason: "connect error".into(),
+                },
+                CampaignFailure {
+                    path: PathBuf::from("json.bru"),
+                    name: "json".into(),
+                    http_code: Some(500),
+                    reason: "assertion failed".into(),
+                },
+            ],
+        });
+
+        model.focus = Focus::Campaign;
+        let cmd = update(&mut model, Message::RunFailedRequests);
+
+        match cmd {
+            Command::StartRun {
+                request,
+                is_campaign,
+                ..
+            } => {
+                assert!(
+                    is_campaign,
+                    "doit être marqué comme campagne pour mettre à jour le bilan"
+                );
+                assert!(!request.recursive, "ne doit pas être récursif");
+                assert_eq!(
+                    request.targets,
+                    vec![PathBuf::from("folder/down.bru"), PathBuf::from("json.bru")]
+                );
+                assert_eq!(request.options.tags, vec!["smoke"]);
+                assert_eq!(request.options.delay_ms, Some(25));
+
+                let args = request.bru_args();
+                assert_eq!(args[0], "run");
+                assert_eq!(args[1], "folder/down.bru");
+                assert_eq!(args[2], "json.bru");
+                assert!(!args.iter().any(|a| a == "-r"), "aucun drapeau -r");
+                assert!(args.iter().any(|a| a == "--delay"));
+            }
+            other => panic!("attendu StartRun, reçu {other:?}"),
+        }
+    }
+
+    #[test]
+    fn campaign_run_failed_requests_empty_or_no_failures() {
+        let mut model = runner_probe_model();
+
+        // 0. Hors du panneau Campagne : `R` est ignoré.
+        let cmd = update(&mut model, Message::RunFailedRequests);
+        assert!(matches!(cmd, Command::None));
+        assert_eq!(model.last_status, None);
+        model.focus = Focus::Campaign;
+
+        // 1. Sans campagne active
+        let cmd = update(&mut model, Message::RunFailedRequests);
+        assert!(matches!(cmd, Command::None));
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NoFailedRequests)
+        ));
+
+        // 2. Avec campagne mais aucun échec
+        model.campaign = Some(CampaignSummary {
+            target: PathBuf::from("grp"),
+            total: 2,
+            passed: 2,
+            failed: 0,
+            skipped: 0,
+            duration_secs: 0.2,
+            items: vec![CampaignItem {
+                path: PathBuf::from("ok.bru"),
+                name: "ok".into(),
+                status: CampaignItemStatus::Passed,
+                http_code: Some(200),
+                duration_secs: 0.1,
+                reason: None,
+            }],
+            filter: CampaignFilter::Failed,
+            failures: Vec::new(),
+        });
+        model.last_status = None;
+        let cmd = update(&mut model, Message::RunFailedRequests);
+        assert!(matches!(cmd, Command::None));
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NoFailedRequests)
+        ));
+    }
+
+    #[test]
+    fn campaign_run_failed_requests_when_already_running() {
+        let mut model = runner_probe_model();
+        model.campaign = Some(CampaignSummary {
+            target: PathBuf::from("grp"),
+            total: 1,
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            duration_secs: 0.1,
+            items: vec![CampaignItem {
+                path: PathBuf::from("down.bru"),
+                name: "down".into(),
+                status: CampaignItemStatus::Failed,
+                http_code: None,
+                duration_secs: 0.1,
+                reason: Some("error".into()),
+            }],
+            filter: CampaignFilter::Failed,
+            failures: vec![CampaignFailure {
+                path: PathBuf::from("down.bru"),
+                name: "down".into(),
+                http_code: None,
+                reason: "error".into(),
+            }],
+        });
+        model.run.active = Some(ActiveRun {
+            id: runner::RunId(1),
+            target: PathBuf::from("grp"),
+            recursive: true,
+            is_campaign: true,
+            handle: None,
+        });
+
+        let cmd = update(&mut model, Message::RunFailedRequests);
+        assert!(matches!(cmd, Command::None));
+        assert!(model.run.active.is_some());
     }
 }
 
@@ -9871,6 +10324,7 @@ mod mouse_tests {
             id: crate::runner::RunId(3),
             target: "simple-get.bru".into(),
             recursive: false,
+            is_campaign: false,
             handle: None,
         });
         update(&mut model, Message::ToggleHelp);

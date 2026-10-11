@@ -116,7 +116,11 @@ pub async fn run<B: Backend>(
             let command = update(&mut model, message);
             match command {
                 Command::None => {}
-                Command::StartRun { request, target } => {
+                Command::StartRun {
+                    request,
+                    target,
+                    is_campaign,
+                } => {
                     let recursive = request.recursive;
                     let handle = runner.start(request);
                     update(
@@ -125,6 +129,7 @@ pub async fn run<B: Backend>(
                             id: handle.id(),
                             target,
                             recursive,
+                            is_campaign,
                             handle,
                         },
                     );

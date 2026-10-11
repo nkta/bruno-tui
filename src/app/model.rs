@@ -177,6 +177,63 @@ pub enum HistoryOutcome {
     Cancelled,
 }
 
+/// Statut d'une requête au sein d'une campagne de tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CampaignItemStatus {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+/// Filtre actif sur la liste des requêtes de la campagne.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CampaignFilter {
+    #[default]
+    Failed,
+    Passed,
+    Skipped,
+    All,
+}
+
+impl CampaignFilter {
+    /// Fait tourner le filtre : Échecs -> Réussis -> Ignorés -> Tous -> Échecs.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Failed => Self::Passed,
+            Self::Passed => Self::Skipped,
+            Self::Skipped => Self::All,
+            Self::All => Self::Failed,
+        }
+    }
+
+    /// Libellé affiché dans l'en-tête du panneau.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "Tous",
+            Self::Failed => "Échecs",
+            Self::Passed => "Réussis",
+            Self::Skipped => "Ignorés",
+        }
+    }
+}
+
+/// Une requête exécutée au sein d'une campagne.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CampaignItem {
+    /// Chemin du fichier de la requête (relatif à la racine de la collection).
+    pub path: PathBuf,
+    /// Nom déclaré de la requête.
+    pub name: String,
+    /// Statut du verdict.
+    pub status: CampaignItemStatus,
+    /// Code HTTP s'il existe.
+    pub http_code: Option<u16>,
+    /// Durée d'exécution en secondes.
+    pub duration_secs: f64,
+    /// Raison d'échec ou de saut si présente.
+    pub reason: Option<String>,
+}
+
 /// Résumé de la dernière campagne d'exécution récursive de TNR.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CampaignSummary {
@@ -192,8 +249,47 @@ pub struct CampaignSummary {
     pub skipped: usize,
     /// Durée totale d'exécution en secondes.
     pub duration_secs: f64,
+    /// Toutes les requêtes exécutées dans la campagne.
+    pub items: Vec<CampaignItem>,
+    /// Filtre de statut actif.
+    pub filter: CampaignFilter,
     /// Liste ordonnée des requêtes en échec.
     pub failures: Vec<CampaignFailure>,
+}
+
+impl CampaignSummary {
+    /// Renvoie les requêtes correspondant au filtre actif.
+    pub fn filtered_items(&self) -> Vec<CampaignItem> {
+        if self.items.is_empty() && !self.failures.is_empty() {
+            let legacy_items: Vec<CampaignItem> = self
+                .failures
+                .iter()
+                .map(|f| CampaignItem {
+                    path: f.path.clone(),
+                    name: f.name.clone(),
+                    status: CampaignItemStatus::Failed,
+                    http_code: f.http_code,
+                    duration_secs: 0.0,
+                    reason: Some(f.reason.clone()),
+                })
+                .collect();
+            return match self.filter {
+                CampaignFilter::All | CampaignFilter::Failed => legacy_items,
+                CampaignFilter::Passed | CampaignFilter::Skipped => Vec::new(),
+            };
+        }
+
+        self.items
+            .iter()
+            .filter(|item| match self.filter {
+                CampaignFilter::All => true,
+                CampaignFilter::Failed => item.status == CampaignItemStatus::Failed,
+                CampaignFilter::Passed => item.status == CampaignItemStatus::Passed,
+                CampaignFilter::Skipped => item.status == CampaignItemStatus::Skipped,
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 /// Information sur une requête en échec lors d'une campagne.
@@ -261,6 +357,8 @@ pub struct ActiveRun {
     /// Chemin lancé : la requête, ou le dossier en mode récursif.
     pub target: PathBuf,
     pub recursive: bool,
+    /// Indique s'il s'agit d'une campagne de tests (récursive ou relance des échecs).
+    pub is_campaign: bool,
     /// `None` juste après une annulation déjà demandée : un second appui sur
     /// la touche d'annulation reste sans effet (idempotent).
     pub handle: Option<runner::RunHandle>,
@@ -2257,5 +2355,127 @@ mod tests {
         // Aucune sélection
         model.tree.rows.clear();
         assert_eq!(selected_response_body(&model), None);
+    }
+
+    #[test]
+    fn campaign_filter_cycle_and_labels() {
+        let filter = CampaignFilter::Failed;
+        assert_eq!(filter.label(), "Échecs");
+
+        let filter = filter.next();
+        assert_eq!(filter, CampaignFilter::Passed);
+        assert_eq!(filter.label(), "Réussis");
+
+        let filter = filter.next();
+        assert_eq!(filter, CampaignFilter::Skipped);
+        assert_eq!(filter.label(), "Ignorés");
+
+        let filter = filter.next();
+        assert_eq!(filter, CampaignFilter::All);
+        assert_eq!(filter.label(), "Tous");
+
+        let filter = filter.next();
+        assert_eq!(filter, CampaignFilter::Failed);
+    }
+
+    #[test]
+    fn campaign_summary_filtered_items_behavior() {
+        let items = vec![
+            CampaignItem {
+                path: PathBuf::from("a.bru"),
+                name: "a".into(),
+                status: CampaignItemStatus::Passed,
+                http_code: Some(200),
+                duration_secs: 0.1,
+                reason: None,
+            },
+            CampaignItem {
+                path: PathBuf::from("b.bru"),
+                name: "b".into(),
+                status: CampaignItemStatus::Failed,
+                http_code: Some(500),
+                duration_secs: 0.2,
+                reason: Some("error".into()),
+            },
+            CampaignItem {
+                path: PathBuf::from("c.bru"),
+                name: "c".into(),
+                status: CampaignItemStatus::Skipped,
+                http_code: None,
+                duration_secs: 0.0,
+                reason: None,
+            },
+        ];
+
+        let mut summary = CampaignSummary {
+            target: PathBuf::from("grp"),
+            total: 3,
+            passed: 1,
+            failed: 1,
+            skipped: 1,
+            duration_secs: 0.3,
+            items,
+            filter: CampaignFilter::Failed,
+            failures: vec![CampaignFailure {
+                path: PathBuf::from("b.bru"),
+                name: "b".into(),
+                http_code: Some(500),
+                reason: "error".into(),
+            }],
+        };
+
+        // Filtre par défaut : Échecs
+        let filtered = summary.filtered_items();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, PathBuf::from("b.bru"));
+        assert_eq!(filtered[0].status, CampaignItemStatus::Failed);
+
+        // Filtre Réussis
+        summary.filter = CampaignFilter::Passed;
+        let filtered = summary.filtered_items();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, PathBuf::from("a.bru"));
+        assert_eq!(filtered[0].status, CampaignItemStatus::Passed);
+
+        // Filtre Ignorés
+        summary.filter = CampaignFilter::Skipped;
+        let filtered = summary.filtered_items();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, PathBuf::from("c.bru"));
+        assert_eq!(filtered[0].status, CampaignItemStatus::Skipped);
+
+        // Filtre Tous
+        summary.filter = CampaignFilter::All;
+        let filtered = summary.filtered_items();
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered[0].path, PathBuf::from("a.bru"));
+        assert_eq!(filtered[1].path, PathBuf::from("b.bru"));
+        assert_eq!(filtered[2].path, PathBuf::from("c.bru"));
+    }
+
+    #[test]
+    fn campaign_summary_failures_fallback_when_items_empty() {
+        let summary = CampaignSummary {
+            target: PathBuf::from("grp"),
+            total: 1,
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            duration_secs: 0.1,
+            items: Vec::new(),
+            filter: CampaignFilter::Failed,
+            failures: vec![CampaignFailure {
+                path: PathBuf::from("legacy.bru"),
+                name: "legacy".into(),
+                http_code: Some(502),
+                reason: "bad gateway".into(),
+            }],
+        };
+
+        let filtered = summary.filtered_items();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, PathBuf::from("legacy.bru"));
+        assert_eq!(filtered[0].status, CampaignItemStatus::Failed);
+        assert_eq!(filtered[0].reason, Some("bad gateway".into()));
     }
 }

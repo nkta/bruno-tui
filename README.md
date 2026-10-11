@@ -155,10 +155,13 @@ sélectionnée a un résultat avec un corps non vide.
   valeur, `d` l'oublie. Une valeur secrète n'est jamais écrite sur disque
   ni affichée en clair.
 - **Campagne** (`C`) : bilan de la dernière exécution récursive (campagne de
-  TNR) ; en-tête avec cible, options actives, taux de succès et durée, puis
-  liste des requêtes en échec avec code HTTP et raison d'échec ; `Entrée` ou `→`
-  sélectionne la requête dans l'arbre et donne le focus au Détail ; `r` relance
-  la campagne avec les options courantes.
+  TNR) ; en-tête avec cible, options actives, taux de succès, durée, filtre
+  actif et compteurs (`Tous`, `Échecs`, `Réussis`, `Ignorés`) ; liste des
+  requêtes filtrée (par défaut les `Échecs`) avec code HTTP, statut ou raison
+  d'échec ; `f` fait tourner le filtre (`Échecs` / `Réussis` / `Ignorés` / `Tous`) ;
+  `Entrée` ou `→` sélectionne la requête dans l'arbre et donne le focus au Détail ;
+  `R` relance uniquement les requêtes en échec avec les options courantes ;
+  `r` relance l'ensemble de la campagne.
 - **Options du runner** (`O`) : popup de configuration des options d'exécution
   récursive mémorisées en session :
   - **Tags inclus** (`--tags`) et **tags exclus** (`--exclude-tags`) sous forme

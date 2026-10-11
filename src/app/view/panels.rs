@@ -12,8 +12,8 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use super::{inner, panel, theme};
 use crate::app::diagnostics::diagnostics;
 use crate::app::model::{
-    EnvironmentEditSession, EnvironmentEditState, Focus, HistoryEntry, HistoryOutcome, Model,
-    RunnerOptionsPopup, SecretError, SecretInput, secret_rows,
+    CampaignFilter, CampaignItemStatus, EnvironmentEditSession, EnvironmentEditState, Focus,
+    HistoryEntry, HistoryOutcome, Model, RunnerOptionsPopup, SecretError, SecretInput, secret_rows,
 };
 use crate::secrets::SecretSource;
 
@@ -129,7 +129,12 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
     } else {
         theme::FAILURE
     };
-    let header_line = Line::from(vec![
+    let skipped_str = if campaign.skipped <= 1 {
+        format!("{} ignoré", campaign.skipped)
+    } else {
+        format!("{} ignorés", campaign.skipped)
+    };
+    let mut header_spans = vec![
         Span::styled("Cible : ", theme::LABEL),
         Span::styled(
             campaign.target.display().to_string(),
@@ -142,12 +147,43 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
         ),
         Span::raw("  ·  "),
         Span::styled(failures_str, failures_style),
-        Span::raw("  ·  "),
-        Span::styled(
-            format_duration(campaign.duration_secs),
-            Style::new().add_modifier(Modifier::DIM),
-        ),
-    ]);
+    ];
+    if campaign.skipped > 0 {
+        header_spans.push(Span::raw("  ·  "));
+        header_spans.push(Span::styled(skipped_str, theme::LABEL));
+    }
+    header_spans.push(Span::raw("  ·  "));
+    header_spans.push(Span::styled(
+        format_duration(campaign.duration_secs),
+        Style::new().add_modifier(Modifier::DIM),
+    ));
+    let header_line = Line::from(header_spans);
+
+    // Ligne de filtre de statut avec compteurs
+    let filters = [
+        (CampaignFilter::All, campaign.total),
+        (CampaignFilter::Failed, campaign.failed),
+        (CampaignFilter::Passed, campaign.passed),
+        (CampaignFilter::Skipped, campaign.skipped),
+    ];
+    let mut filter_spans = vec![Span::styled("Filtre : ", theme::LABEL)];
+    for (i, (f, count)) in filters.iter().enumerate() {
+        if i > 0 {
+            filter_spans.push(Span::raw("  ·  "));
+        }
+        let text = format!("{} ({count})", f.label());
+        if campaign.filter == *f {
+            filter_spans.push(Span::styled(format!("[ {text} ]"), theme::SELECTION));
+        } else {
+            filter_spans.push(Span::styled(text, theme::LABEL));
+        }
+    }
+    filter_spans.push(Span::raw("  "));
+    filter_spans.push(Span::styled(
+        "(f changer · R relancer échecs)",
+        theme::LABEL,
+    ));
+    let filter_line = Line::from(filter_spans);
 
     let options_str = model.runner_options.summary();
     let options_line = Line::from(vec![
@@ -164,7 +200,7 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
         Span::styled("(O pour modifier)", theme::LABEL),
     ]);
 
-    let mut header = vec![header_line, options_line];
+    let mut header = vec![header_line, filter_line, options_line];
     if !model.last_reports.is_empty() {
         let reports_str = model
             .last_reports
@@ -179,48 +215,68 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
     }
     header.push(Line::default());
 
-    let header_height = u16::try_from(header.len()).unwrap_or(3);
+    let header_height = u16::try_from(header.len()).unwrap_or(4);
     let [header_area, list_area] =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(inner_area);
 
     frame.render_widget(Paragraph::new(header), header_area);
 
-    if campaign.failures.is_empty() {
+    let items = campaign.filtered_items();
+    if items.is_empty() {
+        let empty_msg = match campaign.filter {
+            CampaignFilter::Failed => "aucun échec",
+            CampaignFilter::Passed => "aucune requête réussie",
+            CampaignFilter::Skipped => "aucune requête ignorée",
+            CampaignFilter::All => "aucune requête",
+        };
         frame.render_widget(
-            Paragraph::new(Line::styled("aucun échec", theme::EMPTY_MESSAGE)),
+            Paragraph::new(Line::styled(empty_msg, theme::EMPTY_MESSAGE)),
             list_area,
         );
         return;
     }
 
-    let items: Vec<ListItem> = campaign
-        .failures
+    let list_items: Vec<ListItem> = items
         .iter()
-        .map(|failure| {
+        .map(|item| {
             let mut spans = vec![
                 Span::styled(
-                    failure.path.display().to_string(),
+                    item.path.display().to_string(),
                     Style::new().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
-                Span::styled(format!("({})", failure.name), theme::LABEL),
+                Span::styled(format!("({})", item.name), theme::LABEL),
                 Span::raw("  ·  "),
             ];
-            // Sans réponse HTTP (hôte injoignable…), seule la raison s'affiche.
-            if let Some(code) = failure.http_code {
+            // Code HTTP si présent
+            if let Some(code) = item.http_code {
                 spans.push(Span::styled(format!("HTTP {code}"), theme::LABEL));
                 spans.push(Span::raw("  ·  "));
             }
-            spans.push(Span::styled(failure.reason.clone(), theme::FAILURE));
-            let line = Line::from(spans);
-            ListItem::new(line)
+            match item.status {
+                CampaignItemStatus::Failed => {
+                    let reason = item.reason.as_deref().unwrap_or("échec");
+                    spans.push(Span::styled(reason.to_string(), theme::FAILURE));
+                }
+                CampaignItemStatus::Passed => {
+                    spans.push(Span::styled("succès", theme::SUCCESS));
+                }
+                CampaignItemStatus::Skipped => {
+                    let reason = item.reason.as_deref().unwrap_or("ignoré");
+                    spans.push(Span::styled(
+                        reason.to_string(),
+                        Style::new().fg(Color::Yellow),
+                    ));
+                }
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
-    let selected = Some(model.campaign_selected.min(campaign.failures.len() - 1));
+    let selected = Some(model.campaign_selected.min(items.len().saturating_sub(1)));
     let mut list_state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(
-        List::new(items).highlight_style(theme::SELECTION),
+        List::new(list_items).highlight_style(theme::SELECTION),
         list_area,
         &mut list_state,
     );

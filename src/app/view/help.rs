@@ -346,11 +346,19 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Entrée / →",
-                effect: "sélectionner la requête en échec et ouvrir son détail",
+                effect: "sélectionner la requête et ouvrir son détail",
             },
             HelpEntry {
                 key: "] / [",
-                effect: "requête en échec suivante / précédente",
+                effect: "requête suivante / précédente dans la liste",
+            },
+            HelpEntry {
+                key: "f",
+                effect: "changer le filtre (Échecs / Réussis / Ignorés / Tous)",
+            },
+            HelpEntry {
+                key: "R",
+                effect: "relancer uniquement les requêtes en échec",
             },
             HelpEntry {
                 key: "r",
