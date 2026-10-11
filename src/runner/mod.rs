@@ -4,11 +4,16 @@
 //! par un pipe hérité (jamais sur disque) et le restitue sous forme typée.
 
 pub mod error;
+pub mod options;
 pub mod process;
 pub mod report;
 pub mod request;
 
 pub use error::{ReportErrorKind, RunError, RunOutcome};
+pub use options::{
+    RunnerOptions, RunnerOptionsConfig, RunnerOptionsError, default_reports_dir,
+    generate_report_path, parse_delay, parse_tags,
+};
 pub use process::{BruRunner, RunEvent, RunHandle, RunId};
 pub use report::Report;
 pub use request::{RunRequest, SecretString};
