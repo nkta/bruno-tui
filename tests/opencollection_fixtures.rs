@@ -262,6 +262,10 @@ fn hand_written_request_covers_every_displayed_tab() {
         Some("bru.setVar(\"status\", res.getStatus());")
     );
     assert!(view.has_tests);
+    assert_eq!(
+        view.tests(),
+        Some("test(\"status 200\", function() {\n  expect(res.getStatus()).to.equal(200);\n});")
+    );
     assert!(view.has_assert);
     assert_eq!(
         view.assertions(),

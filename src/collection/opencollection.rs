@@ -274,7 +274,7 @@ fn post_response_variables(map: &Mapping, notices: &mut Notices, scope: &str) ->
 struct Scripts {
     pre_request: Option<String>,
     post_response: Option<String>,
-    tests: bool,
+    tests: Option<String>,
 }
 
 fn scripts(map: &Mapping, notices: &mut Notices, scope: &str) -> Scripts {
@@ -299,7 +299,13 @@ fn scripts(map: &Mapping, notices: &mut Notices, scope: &str) -> Scripts {
                 }
                 None => found.post_response = Some(code),
             },
-            Some("tests") => found.tests = true,
+            Some("tests") => match &mut found.tests {
+                Some(existing) => {
+                    existing.push('\n');
+                    existing.push_str(&code);
+                }
+                None => found.tests = Some(code),
+            },
             _ => notices.push(format!("type de script `{scope}scripts` non affiché")),
         }
     }
@@ -547,13 +553,14 @@ pub fn parse_item(source: &str) -> Result<Parsed<RequestView>, ParseError> {
         auth,
         has_pre_request_script: found.pre_request.is_some(),
         has_post_response_script: found.post_response.is_some(),
-        has_tests: found.tests,
+        has_tests: found.tests.is_some(),
         has_assert: !assertions.is_empty(),
         extra: Box::new(ExtraTabs {
             vars_pre_request: variables(runtime),
             vars_post_response: post_response_variables(runtime, &mut notices, "runtime."),
             script_pre_request: found.pre_request,
             script_post_response: found.post_response,
+            tests: found.tests,
             docs: content_of(item.get("docs")),
             settings: settings(&item, &mut notices),
             assertions,
@@ -590,7 +597,7 @@ fn defaults_meta(
         has_auth,
         has_pre_request_script: found.pre_request.is_some(),
         has_post_response_script: found.post_response.is_some(),
-        has_tests: found.tests,
+        has_tests: found.tests.is_some(),
         has_vars,
         ast: None,
     }

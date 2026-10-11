@@ -247,6 +247,10 @@ fn scripted_view() {
         Some("if (res.getStatus() !== 200) {\n  console.log(\"oops\");\n}")
     );
     assert!(view.has_tests);
+    assert_eq!(
+        view.tests(),
+        Some("test(\"ok\", function () {\n  expect(res.getStatus()).to.equal(200);\n});")
+    );
     assert!(view.has_assert);
     assert_eq!(view.auth, Some(AuthMode::Bearer));
     assert_eq!(

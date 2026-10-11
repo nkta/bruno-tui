@@ -945,7 +945,17 @@ pub fn request_text_and_fields(
                 entries(&mut lines, view.assertions());
             }
         }
-        RequestTab::Tests => lines.push(field("Tests", yes_no(view.has_tests))),
+        RequestTab::Tests => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Tests".to_owned(),
+                |lines, _| {
+                    render_code_block(lines, view.tests());
+                },
+            );
+        }
         RequestTab::Docs => {
             boxed_section(
                 &mut lines,
@@ -996,7 +1006,7 @@ pub fn request_tab_is_empty(view: &crate::collection::RequestView, tab: RequestT
                     .is_none_or(|s| s.trim().is_empty())
         }
         RequestTab::Assert => !view.has_assert && view.assertions().is_empty(),
-        RequestTab::Tests => !view.has_tests,
+        RequestTab::Tests => view.tests().is_none_or(|t| t.trim().is_empty()),
         RequestTab::Docs => view.docs().is_none_or(|d| d.trim().is_empty()),
         RequestTab::Settings => view.settings().is_empty(),
     }
@@ -2205,7 +2215,10 @@ mod tests {
             "1 if (res.getStatus() !== 200) {",
             "2   console.log(\"oops\");",
             "3 }",
-            "Tests : oui",
+            "Tests",
+            "1 test(\"ok\", function () {",
+            "2   expect(res.getStatus()).to.equal(200);",
+            "3 });",
             "Assertions : oui",
             "res.status: eq 200",
             "Auth : bearer",
@@ -2288,6 +2301,30 @@ mod tests {
         let empty_plain = plain(&detail_text(&model));
         let empty_boxes = detail_section_boxes(&model);
         assert_eq!(empty_boxes.len(), 2);
+        assert!(empty_plain.contains("aucun"));
+    }
+
+    #[test]
+    fn tests_tab_rendering() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "scripted.bru");
+        model.request_tab = RequestTab::Tests;
+
+        // Onglet Tests avec tests présents
+        let tests_plain = plain(&detail_text(&model));
+        let boxes = detail_section_boxes(&model);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].title, "Tests");
+        assert!(tests_plain.contains("1 test(\"ok\", function () {"));
+        assert!(tests_plain.contains("2   expect(res.getStatus()).to.equal(200);"));
+        assert!(tests_plain.contains("3 });"));
+
+        // Onglet Tests sans tests
+        select(&mut model, "simple-get.bru");
+        model.request_tab = RequestTab::Tests;
+        let empty_plain = plain(&detail_text(&model));
+        let empty_boxes = detail_section_boxes(&model);
+        assert_eq!(empty_boxes.len(), 1);
         assert!(empty_plain.contains("aucun"));
     }
 
