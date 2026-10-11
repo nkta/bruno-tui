@@ -7,6 +7,7 @@ use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 use super::filter::{FilterState, evaluate};
+use super::global_search::GlobalSearchPopup;
 use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
     CampaignFailure, CampaignSummary, ClipboardSource, CollectionState, DetailSelection, Drag,
@@ -224,6 +225,10 @@ fn apply(model: &mut Model, message: Message) -> Command {
 
     if model.runner_options_popup.is_some() && !is_background_result(&message) {
         return apply_runner_options_popup(model, message);
+    }
+
+    if model.global_search.is_some() && !is_background_result(&message) {
+        return apply_global_search(model, message);
     }
 
     match message {
@@ -483,6 +488,15 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 model.runner_options_popup = match model.runner_options_popup.take() {
                     Some(_) => None,
                     None => Some(RunnerOptionsPopup::from_config(&model.runner_options)),
+                };
+            }
+            Command::None
+        }
+        Message::ToggleGlobalSearch => {
+            if model.loaded().is_some() {
+                model.global_search = match model.global_search.take() {
+                    Some(_) => None,
+                    None => Some(GlobalSearchPopup::new()),
                 };
             }
             Command::None
@@ -1077,6 +1091,161 @@ fn apply_runner_options_popup(model: &mut Model, message: Message) -> Command {
                     model.runner_options_popup = None;
                 }
             }
+            Command::None
+        }
+        _ => Command::None,
+    }
+}
+
+/// Traite les messages lorsque le popup de recherche globale est ouvert.
+fn apply_global_search(model: &mut Model, message: Message) -> Command {
+    let candidates = model
+        .loaded()
+        .map(|c| crate::app::global_search::collect_candidates(&c.tree))
+        .unwrap_or_default();
+    let query = model
+        .global_search
+        .as_ref()
+        .map(|p| p.input.text().to_owned())
+        .unwrap_or_default();
+    let results = crate::app::global_search::search(&candidates, &query);
+    let visible_height = super::view::global_search::global_search_visible_height(model);
+
+    match message {
+        Message::ForceQuit => {
+            model.global_search = None;
+            if model.editing.as_ref().is_some_and(EditSession::has_unsaved) {
+                model.confirm = Some(super::model::PendingConfirm::QuitWithUnsavedEdit);
+            } else {
+                model.exit = Some(Exit::Normal);
+            }
+            Command::None
+        }
+        Message::ToggleGlobalSearch | Message::CancelGlobalSearch => {
+            model.global_search = None;
+            Command::None
+        }
+        Message::GlobalSearchInput(c) => {
+            if let Some(popup) = &mut model.global_search {
+                popup.input.insert(c);
+                popup.reset_selection();
+            }
+            Command::None
+        }
+        Message::GlobalSearchBackspace => {
+            if let Some(popup) = &mut model.global_search {
+                popup.input.backspace();
+                popup.reset_selection();
+            }
+            Command::None
+        }
+        Message::GlobalSearchDelete => {
+            if let Some(popup) = &mut model.global_search {
+                popup.input.delete();
+                popup.reset_selection();
+            }
+            Command::None
+        }
+        Message::GlobalSearchLeft => {
+            if let Some(popup) = &mut model.global_search {
+                popup.input.left();
+            }
+            Command::None
+        }
+        Message::GlobalSearchRight => {
+            if let Some(popup) = &mut model.global_search {
+                popup.input.right();
+            }
+            Command::None
+        }
+        Message::GlobalSearchHome => {
+            if let Some(popup) = &mut model.global_search {
+                popup.input.home();
+            }
+            Command::None
+        }
+        Message::GlobalSearchEnd => {
+            if let Some(popup) = &mut model.global_search {
+                popup.input.end();
+            }
+            Command::None
+        }
+        Message::GlobalSearchUp => {
+            if let Some(popup) = &mut model.global_search {
+                popup.selected = popup.selected.saturating_sub(1);
+                popup.ensure_visible(visible_height);
+            }
+            Command::None
+        }
+        Message::GlobalSearchDown => {
+            if let Some(popup) = &mut model.global_search {
+                if !results.is_empty() {
+                    popup.selected = (popup.selected + 1).min(results.len() - 1);
+                }
+                popup.ensure_visible(visible_height);
+            }
+            Command::None
+        }
+        Message::GlobalSearchPageUp => {
+            if let Some(popup) = &mut model.global_search {
+                popup.selected = popup.selected.saturating_sub(visible_height);
+                popup.ensure_visible(visible_height);
+            }
+            Command::None
+        }
+        Message::GlobalSearchPageDown => {
+            if let Some(popup) = &mut model.global_search {
+                if !results.is_empty() {
+                    popup.selected = (popup.selected + visible_height).min(results.len() - 1);
+                }
+                popup.ensure_visible(visible_height);
+            }
+            Command::None
+        }
+        Message::ConfirmGlobalSearch => {
+            let selected_path = model.global_search.as_ref().and_then(|popup| {
+                results
+                    .get(popup.selected)
+                    .map(|r| r.candidate.path.clone())
+            });
+            model.global_search = None;
+            if let Some(target) = selected_path {
+                select_request_and_focus_detail(model, &target);
+            }
+            Command::None
+        }
+        Message::Mouse(input) => {
+            if input.kind == MouseKind::Press {
+                let popup_area = super::view::global_search_popup_area(Rect::new(
+                    0,
+                    0,
+                    model.size.0,
+                    model.size.1,
+                ));
+                let position = Position::new(input.column, input.row);
+                if !popup_area.contains(position) {
+                    model.global_search = None;
+                } else {
+                    let list_y = popup_area.y + 3;
+                    if input.row >= list_y {
+                        let row_offset = (input.row - list_y) as usize;
+                        if let Some(popup) = &model.global_search {
+                            let clicked_idx = popup.scroll + row_offset;
+                            if let Some(res) = results.get(clicked_idx) {
+                                let target = res.candidate.path.clone();
+                                model.global_search = None;
+                                select_request_and_focus_detail(model, &target);
+                            }
+                        }
+                    }
+                }
+            }
+            Command::None
+        }
+        Message::Resize { width, height } => {
+            model.size = (width, height);
+            scroll_tree_into_view(model);
+            model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
             Command::None
         }
         _ => Command::None,
@@ -10377,5 +10546,92 @@ mod mouse_tests {
             }
             other => panic!("attendu StartRun, reçu {other:?}"),
         }
+    }
+
+    // --- Tests de la recherche globale (Ctrl+K) ---
+
+    #[test]
+    fn test_global_search_open_close_toggle() {
+        let mut model = loaded_model((100, 30));
+        assert!(model.global_search.is_none());
+
+        // Ouverture via ToggleGlobalSearch
+        update(&mut model, Message::ToggleGlobalSearch);
+        assert!(model.global_search.is_some());
+        assert_eq!(model.global_search.as_ref().unwrap().input.text(), "");
+        assert_eq!(model.global_search.as_ref().unwrap().selected, 0);
+
+        // Fermeture via ToggleGlobalSearch (bascule)
+        update(&mut model, Message::ToggleGlobalSearch);
+        assert!(model.global_search.is_none());
+
+        // Réouverture puis fermeture par CancelGlobalSearch (Échap)
+        update(&mut model, Message::ToggleGlobalSearch);
+        assert!(model.global_search.is_some());
+        update(&mut model, Message::CancelGlobalSearch);
+        assert!(model.global_search.is_none());
+    }
+
+    #[test]
+    fn test_global_search_live_input_and_navigation() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleGlobalSearch);
+
+        // Saisie en direct de 'g', 'e', 't'
+        update(&mut model, Message::GlobalSearchInput('g'));
+        update(&mut model, Message::GlobalSearchInput('e'));
+        update(&mut model, Message::GlobalSearchInput('t'));
+        assert_eq!(model.global_search.as_ref().unwrap().input.text(), "get");
+        assert_eq!(model.global_search.as_ref().unwrap().selected, 0);
+
+        // Navigation vers le bas puis vers le haut
+        update(&mut model, Message::GlobalSearchDown);
+        assert_eq!(model.global_search.as_ref().unwrap().selected, 1);
+        update(&mut model, Message::GlobalSearchUp);
+        assert_eq!(model.global_search.as_ref().unwrap().selected, 0);
+
+        // Effacement par Backspace
+        update(&mut model, Message::GlobalSearchBackspace);
+        assert_eq!(model.global_search.as_ref().unwrap().input.text(), "ge");
+    }
+
+    #[test]
+    fn test_global_search_confirm_selects_and_focuses_detail() {
+        use std::path::Path;
+        let mut model = loaded_model((100, 30));
+        assert_eq!(model.focus, Focus::Tree);
+
+        // Ouvrir et chercher "scripted"
+        update(&mut model, Message::ToggleGlobalSearch);
+        for c in "scripted".chars() {
+            update(&mut model, Message::GlobalSearchInput(c));
+        }
+
+        // Valider avec Entrée
+        update(&mut model, Message::ConfirmGlobalSearch);
+        assert!(model.global_search.is_none());
+        assert_eq!(model.focus, Focus::Detail);
+        assert_eq!(
+            model.selected_node().unwrap().path(),
+            Path::new("scripted.bru")
+        );
+    }
+
+    #[test]
+    fn test_global_search_mouse_click_outside_closes() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleGlobalSearch);
+        assert!(model.global_search.is_some());
+
+        // Clic à l'extérieur du popup (en coin 0, 0)
+        update(
+            &mut model,
+            Message::Mouse(MouseInput {
+                kind: MouseKind::Press,
+                column: 0,
+                row: 0,
+            }),
+        );
+        assert!(model.global_search.is_none());
     }
 }

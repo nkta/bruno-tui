@@ -44,6 +44,8 @@ pub enum TextCapture {
     /// Sélecteur de méthode ouvert (`add-method-editing`) : seules la
     /// navigation, la validation et l'annulation ont un sens.
     MethodPicker,
+    /// Recherche globale par nom, méthode, chemin et URL (`Ctrl+K`).
+    GlobalSearch,
 }
 
 /// Touche d'édition du tampon pendant la saisie d'un champ
@@ -267,6 +269,34 @@ pub enum Message {
     ToggleZoom,
     /// `O`, hors saisie : ouvre ou ferme le popup d'options de campagne.
     ToggleRunnerOptions,
+    /// `Ctrl+K`, hors saisie : ouvre ou ferme le popup de recherche globale.
+    ToggleGlobalSearch,
+    /// Caractère tapé pendant la recherche globale.
+    GlobalSearchInput(char),
+    /// `Retour arrière` pendant la recherche globale.
+    GlobalSearchBackspace,
+    /// `Supprimer` pendant la recherche globale.
+    GlobalSearchDelete,
+    /// Déplacement curseur à gauche pendant la recherche globale.
+    GlobalSearchLeft,
+    /// Déplacement curseur à droite pendant la recherche globale.
+    GlobalSearchRight,
+    /// Début pendant la recherche globale.
+    GlobalSearchHome,
+    /// Fin pendant la recherche globale.
+    GlobalSearchEnd,
+    /// `↑` pendant la recherche globale : sélectionne le résultat précédent.
+    GlobalSearchUp,
+    /// `↓` pendant la recherche globale : sélectionne le résultat suivant.
+    GlobalSearchDown,
+    /// `PageUp` pendant la recherche globale.
+    GlobalSearchPageUp,
+    /// `PageDown` pendant la recherche globale.
+    GlobalSearchPageDown,
+    /// `Entrée` pendant la recherche globale : valide et sélectionne la requête.
+    ConfirmGlobalSearch,
+    /// `Échap` pendant la recherche globale : ferme le popup.
+    CancelGlobalSearch,
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -321,6 +351,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Some(Message::ForceQuit),
+            KeyCode::Char('k') => Some(Message::ToggleGlobalSearch),
             KeyCode::Char('x') => Some(Message::CancelRun),
             KeyCode::Char('s') => Some(Message::SaveEdit),
             KeyCode::Char('e') => Some(Message::OpenResponseInEditor),
@@ -387,6 +418,28 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::TreeFilter => tree_filter_capture_message(key),
         TextCapture::SecretName | TextCapture::SecretValue => secret_capture_message(key),
         TextCapture::MethodPicker => method_picker_capture_message(key),
+        TextCapture::GlobalSearch => global_search_capture_message(key),
+    }
+}
+
+/// Capture pendant le popup de recherche globale : saisie directe au clavier,
+/// flèches pour naviguer dans la liste, Entrée pour valider, Échap pour fermer.
+fn global_search_capture_message(key: KeyEvent) -> Option<Message> {
+    match key.code {
+        KeyCode::Up => Some(Message::GlobalSearchUp),
+        KeyCode::Down => Some(Message::GlobalSearchDown),
+        KeyCode::PageUp => Some(Message::GlobalSearchPageUp),
+        KeyCode::PageDown => Some(Message::GlobalSearchPageDown),
+        KeyCode::Enter => Some(Message::ConfirmGlobalSearch),
+        KeyCode::Esc => Some(Message::CancelGlobalSearch),
+        KeyCode::Backspace => Some(Message::GlobalSearchBackspace),
+        KeyCode::Delete => Some(Message::GlobalSearchDelete),
+        KeyCode::Left => Some(Message::GlobalSearchLeft),
+        KeyCode::Right => Some(Message::GlobalSearchRight),
+        KeyCode::Home => Some(Message::GlobalSearchHome),
+        KeyCode::End => Some(Message::GlobalSearchEnd),
+        KeyCode::Char(c) => Some(Message::GlobalSearchInput(c)),
+        _ => None,
     }
 }
 

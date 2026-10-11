@@ -5,6 +5,7 @@
 //! panneaux pour garder la sélection visible et borner le défilement.
 
 pub mod detail;
+pub mod global_search;
 pub mod help;
 pub mod hit;
 pub mod panels;
@@ -12,6 +13,7 @@ pub mod status;
 pub mod theme;
 pub mod tree;
 
+pub use global_search::{global_search_popup_area, render_global_search_popup};
 pub use help::{help_max_scroll, help_popup_area};
 pub use panels::runner_options_popup_area;
 
@@ -371,6 +373,13 @@ pub fn view(model: &Model, frame: &mut Frame) {
         frame.render_widget(Clear, popup_area);
         frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
         panels::render_runner_options_popup(popup, frame, popup_area);
+    }
+
+    if let Some(popup) = &model.global_search {
+        let popup_area = global_search_popup_area(frame.area());
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
+        render_global_search_popup(model, popup, frame, popup_area);
     }
 
     frame.render_widget(
@@ -850,6 +859,9 @@ fn status_line(model: &Model) -> String {
             return "↑↓ naviguer  Espace basculer  Entrée modifier / valider  Échap fermer"
                 .to_owned();
         }
+    }
+    if model.global_search.is_some() {
+        return "Saisie en direct · ↑↓ choisir  Entrée sélectionner  Échap fermer".to_owned();
     }
     if let Some(line) = tree_filter_input_line(model) {
         return line;
@@ -2890,5 +2902,22 @@ mod tests {
 
         model.focus = Focus::Response;
         assert!(status_line(&model).contains("z plein écran"));
+    }
+
+    #[test]
+    fn global_search_popup_rendering_and_status_line() {
+        use crate::app::global_search::GlobalSearchPopup;
+
+        let mut model = loaded_model((100, 30));
+        assert!(model.global_search.is_none());
+
+        model.global_search = Some(GlobalSearchPopup::new());
+        let line = status_line(&model);
+        assert!(line.contains("Saisie en direct · ↑↓ choisir"), "{line}");
+
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Recherche globale"), "{screen}");
+        assert!(screen.contains(">"), "{screen}");
+        assert!(screen.contains("GET"), "{screen}");
     }
 }

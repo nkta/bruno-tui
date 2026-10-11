@@ -58,6 +58,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "quitter en toutes circonstances",
             },
             HelpEntry {
+                key: "Ctrl+K",
+                effect: "recherche globale (nom, méthode, chemin, URL)",
+            },
+            HelpEntry {
                 key: "M",
                 effect: "activer/désactiver la capture souris",
             },
