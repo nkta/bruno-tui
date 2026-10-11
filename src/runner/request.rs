@@ -166,6 +166,13 @@ impl RunRequest {
         {
             args.push("--parallel".into());
         }
+        if self.options.sandbox != crate::runner::options::SandboxMode::Safe {
+            args.push("--sandbox".into());
+            args.push(self.options.sandbox.as_str().into());
+        }
+        if self.options.verbose {
+            args.push("--verbose".into());
+        }
         if let Some(junit_path) = &self.options.reporter_junit {
             args.push("--reporter-junit".into());
             args.push(junit_path.into());
@@ -446,6 +453,48 @@ mod tests {
         let request = RunRequest {
             options: RunnerOptions {
                 parallel: true,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            ["run", "-r", "--reporter-json", "/dev/fd/3"]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_sandbox_developer_and_verbose() {
+        use crate::runner::options::SandboxMode;
+        let request = RunRequest {
+            options: RunnerOptions {
+                sandbox: SandboxMode::Developer,
+                verbose: true,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--sandbox",
+                "developer",
+                "--verbose",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_sandbox_safe_default_produces_no_flag() {
+        use crate::runner::options::SandboxMode;
+        let request = RunRequest {
+            options: RunnerOptions {
+                sandbox: SandboxMode::Safe,
+                verbose: false,
                 ..RunnerOptions::default()
             },
             ..RunRequest::collection("/c")

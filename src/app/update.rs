@@ -1130,6 +1130,8 @@ fn apply_runner_options_popup(model: &mut Model, message: Message) -> Command {
                 | RunnerOptionsField::NoProxy
                 | RunnerOptionsField::DisableCookies
                 | RunnerOptionsField::Parallel
+                | RunnerOptionsField::Sandbox
+                | RunnerOptionsField::Verbose
                 | RunnerOptionsField::ReporterJunit
                 | RunnerOptionsField::ReporterHtml
                 | RunnerOptionsField::SkipHeaders => {
@@ -11319,10 +11321,36 @@ mod mouse_tests {
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().disable_cookies);
 
-        // ReporterJunit (champ 15) : 5x Down depuis DisableCookies
+        // Sandbox (champ 15) : 5x Down depuis DisableCookies (champ 10)
         for _ in 0..5 {
             update(&mut model, Message::Down);
         }
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::Sandbox
+        );
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().sandbox,
+            crate::runner::SandboxMode::Safe
+        );
+        update(&mut model, Message::ToggleField);
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().sandbox,
+            crate::runner::SandboxMode::Developer
+        );
+
+        // Verbose (champ 16)
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::Verbose
+        );
+        assert!(!model.runner_options_popup.as_ref().unwrap().verbose);
+        update(&mut model, Message::ToggleField);
+        assert!(model.runner_options_popup.as_ref().unwrap().verbose);
+
+        // ReporterJunit (champ 17)
+        update(&mut model, Message::Down);
         assert_eq!(
             model.runner_options_popup.as_ref().unwrap().current_field(),
             crate::app::model::RunnerOptionsField::ReporterJunit
@@ -11330,12 +11358,12 @@ mod mouse_tests {
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().reporter_junit);
 
-        // ReporterHtml (champ 16)
+        // ReporterHtml (champ 18)
         update(&mut model, Message::Down);
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().reporter_html);
 
-        // SkipHeaders (champ 17, actif par défaut, on le bascule à false)
+        // SkipHeaders (champ 19, actif par défaut, on le bascule à false)
         update(&mut model, Message::Down);
         update(&mut model, Message::ToggleField);
         assert!(!model.runner_options_popup.as_ref().unwrap().skip_headers);
@@ -11348,6 +11376,11 @@ mod mouse_tests {
         assert!(model.runner_options.insecure);
         assert!(model.runner_options.noproxy);
         assert!(model.runner_options.disable_cookies);
+        assert_eq!(
+            model.runner_options.sandbox,
+            crate::runner::SandboxMode::Developer
+        );
+        assert!(model.runner_options.verbose);
         assert!(model.runner_options.export_junit);
         assert!(model.runner_options.export_html);
         assert!(!model.runner_options.skip_headers);
@@ -11450,8 +11483,8 @@ mod mouse_tests {
         assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
         assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
 
-        // Naviguer jusqu'au bouton Enregistrer (champ 18, 16 fois Down depuis champ 2) et presser Entrée
-        for _ in 0..16 {
+        // Naviguer jusqu'au bouton Enregistrer (champ 20, 18 fois Down depuis champ 2) et presser Entrée
+        for _ in 0..18 {
             update(&mut model, Message::Down);
         }
         assert_eq!(
@@ -11712,8 +11745,8 @@ mod mouse_tests {
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().parallel);
 
-        // Aller à SaveButton (champ 18) : 4x Down
-        for _ in 0..4 {
+        // Aller à SaveButton (champ 20) : 6x Down
+        for _ in 0..6 {
             update(&mut model, Message::Down);
         }
         assert_eq!(

@@ -25,6 +25,30 @@ pub enum RunnerOptionsError {
     ParallelWithoutDataFile,
 }
 
+/// Mode d'isolation JavaScript du runner `bru` (`--sandbox`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SandboxMode {
+    #[default]
+    Safe,
+    Developer,
+}
+
+impl SandboxMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Safe => "safe",
+            Self::Developer => "developer",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Safe => Self::Developer,
+            Self::Developer => Self::Safe,
+        }
+    }
+}
+
 /// Options effectives transmises à [`crate::runner::RunRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerOptions {
@@ -58,6 +82,10 @@ pub struct RunnerOptions {
     pub iteration_count: Option<u32>,
     /// Exécution des itérations en parallèle (`--parallel`).
     pub parallel: bool,
+    /// Mode d'isolation sandbox JavaScript (`--sandbox <safe|developer>`).
+    pub sandbox: SandboxMode,
+    /// Sortie verbeuse de débogage (`--verbose`).
+    pub verbose: bool,
     /// Chemin du fichier de rapport JUnit (`--reporter-junit <path>`).
     pub reporter_junit: Option<PathBuf>,
     /// Chemin du fichier de rapport HTML (`--reporter-html <path>`).
@@ -84,6 +112,8 @@ impl Default for RunnerOptions {
             json_file_path: None,
             iteration_count: None,
             parallel: false,
+            sandbox: SandboxMode::Safe,
+            verbose: false,
             reporter_junit: None,
             reporter_html: None,
             reporter_skip_all_headers: true,
@@ -109,6 +139,8 @@ impl RunnerOptions {
             || self.json_file_path.is_some()
             || self.iteration_count.is_some()
             || self.parallel
+            || self.sandbox != SandboxMode::Safe
+            || self.verbose
             || self.reporter_junit.is_some()
             || self.reporter_html.is_some()
     }
@@ -132,6 +164,8 @@ pub struct RunnerOptionsConfig {
     pub json_file_path: Option<PathBuf>,
     pub iteration_count: Option<u32>,
     pub parallel: bool,
+    pub sandbox: SandboxMode,
+    pub verbose: bool,
     pub export_junit: bool,
     pub export_html: bool,
     pub skip_headers: bool,
@@ -155,6 +189,8 @@ impl Default for RunnerOptionsConfig {
             json_file_path: None,
             iteration_count: None,
             parallel: false,
+            sandbox: SandboxMode::Safe,
+            verbose: false,
             export_junit: false,
             export_html: false,
             skip_headers: true,
@@ -180,6 +216,8 @@ impl RunnerOptionsConfig {
             || self.json_file_path.is_some()
             || self.iteration_count.is_some()
             || self.parallel
+            || self.sandbox != SandboxMode::Safe
+            || self.verbose
             || self.export_junit
             || self.export_html
     }
@@ -242,6 +280,12 @@ impl RunnerOptionsConfig {
         if self.parallel {
             parts.push("parallel".to_string());
         }
+        if self.sandbox != SandboxMode::Safe {
+            parts.push(format!("sandbox: {}", self.sandbox.as_str()));
+        }
+        if self.verbose {
+            parts.push("verbose".to_string());
+        }
         if self.export_junit {
             parts.push("junit".to_string());
         }
@@ -292,6 +336,8 @@ impl RunnerOptionsConfig {
             json_file_path: self.json_file_path.clone(),
             iteration_count: self.iteration_count,
             parallel: self.parallel,
+            sandbox: self.sandbox,
+            verbose: self.verbose,
             reporter_junit,
             reporter_html,
             reporter_skip_all_headers: self.skip_headers,
@@ -510,9 +556,11 @@ mod tests {
         config.csv_file_path = Some(PathBuf::from("/path/to/data.csv"));
         config.iteration_count = Some(3);
         config.parallel = true;
+        config.sandbox = SandboxMode::Developer;
+        config.verbose = true;
         assert_eq!(
             config.summary(),
-            "tags: smoke · délai: 200ms · bail · insecure · cacert: ca.pem · ignore-truststore · noproxy · disable-cookies · csv: data.csv · itérations: 3 · parallel · junit"
+            "tags: smoke · délai: 200ms · bail · insecure · cacert: ca.pem · ignore-truststore · noproxy · disable-cookies · csv: data.csv · itérations: 3 · parallel · sandbox: developer · verbose · junit"
         );
     }
 
@@ -527,6 +575,8 @@ mod tests {
             csv_file_path: Some(PathBuf::from("Cargo.toml")),
             iteration_count: Some(5),
             parallel: true,
+            sandbox: SandboxMode::Developer,
+            verbose: true,
             export_junit: true,
             export_html: true,
             skip_headers: true,
@@ -540,6 +590,8 @@ mod tests {
         assert_eq!(opts.csv_file_path, Some(PathBuf::from("Cargo.toml")));
         assert_eq!(opts.iteration_count, Some(5));
         assert!(opts.parallel);
+        assert_eq!(opts.sandbox, SandboxMode::Developer);
+        assert!(opts.verbose);
         assert!(opts.reporter_junit.is_some());
         assert!(opts.reporter_html.is_some());
         assert!(opts.reporter_skip_all_headers);

@@ -1094,20 +1094,23 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
-    // --- Section Rapports ---
-    lines.push(Line::styled("── Rapports & Export ──", theme::SECTION));
+    // --- Section Divers ---
+    lines.push(Line::styled("── Divers ──", theme::SECTION));
 
-    // Champ 15: Rapport JUnit
+    // Champ 15: Sandbox
     let c15 = popup.cursor == 15;
     if c15 {
         selected_line_idx = lines.len();
     }
-    let junit_check = if popup.reporter_junit { "[x]" } else { "[ ]" };
+    let sandbox_val = match popup.sandbox {
+        crate::runner::SandboxMode::Safe => "safe (défaut)",
+        crate::runner::SandboxMode::Developer => "developer",
+    };
     lines.push(Line::from(vec![
         Span::styled(if c15 { "▶ " } else { "  " }, theme::FOCUS),
-        Span::styled("Rapport JUnit XML  : ", theme::LABEL),
+        Span::styled("Bac à sable JS     : ", theme::LABEL),
         Span::styled(
-            format!("{junit_check} Exporter rapport JUnit (--reporter-junit)"),
+            format!("[ {sandbox_val} ] (Espace pour basculer : safe / developer)"),
             if c15 {
                 theme::SELECTION
             } else {
@@ -1116,17 +1119,17 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
-    // Champ 16: Rapport HTML
+    // Champ 16: Verbose
     let c16 = popup.cursor == 16;
     if c16 {
         selected_line_idx = lines.len();
     }
-    let html_check = if popup.reporter_html { "[x]" } else { "[ ]" };
+    let verbose_check = if popup.verbose { "[x]" } else { "[ ]" };
     lines.push(Line::from(vec![
         Span::styled(if c16 { "▶ " } else { "  " }, theme::FOCUS),
-        Span::styled("Rapport HTML       : ", theme::LABEL),
+        Span::styled("Sortie détaillée   : ", theme::LABEL),
         Span::styled(
-            format!("{html_check} Exporter rapport HTML (--reporter-html)"),
+            format!("{verbose_check} Activer la sortie verbeuse (--verbose)"),
             if c16 {
                 theme::SELECTION
             } else {
@@ -1135,18 +1138,59 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
-    // Champ 17: Masquer en-têtes sensibles
+    // --- Section Rapports ---
+    lines.push(Line::styled("── Rapports & Export ──", theme::SECTION));
+
+    // Champ 17: Rapport JUnit
     let c17 = popup.cursor == 17;
     if c17 {
         selected_line_idx = lines.len();
     }
-    let skip_check = if popup.skip_headers { "[x]" } else { "[ ]" };
+    let junit_check = if popup.reporter_junit { "[x]" } else { "[ ]" };
     lines.push(Line::from(vec![
         Span::styled(if c17 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Rapport JUnit XML  : ", theme::LABEL),
+        Span::styled(
+            format!("{junit_check} Exporter rapport JUnit (--reporter-junit)"),
+            if c17 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 18: Rapport HTML
+    let c18 = popup.cursor == 18;
+    if c18 {
+        selected_line_idx = lines.len();
+    }
+    let html_check = if popup.reporter_html { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c18 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Rapport HTML       : ", theme::LABEL),
+        Span::styled(
+            format!("{html_check} Exporter rapport HTML (--reporter-html)"),
+            if c18 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 19: Masquer en-têtes sensibles
+    let c19 = popup.cursor == 19;
+    if c19 {
+        selected_line_idx = lines.len();
+    }
+    let skip_check = if popup.skip_headers { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c19 { "▶ " } else { "  " }, theme::FOCUS),
         Span::styled("Masquer en-têtes   : ", theme::LABEL),
         Span::styled(
             format!("{skip_check} Omettre en-têtes sensibles (--reporter-skip-all-headers)"),
-            if c17 {
+            if c19 {
                 theme::SELECTION
             } else {
                 Style::default()
@@ -1156,15 +1200,15 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
 
     lines.push(Line::default());
 
-    // Boutons (Champs 18 et 19)
-    let c18 = popup.cursor == 18;
-    let c19 = popup.cursor == 19;
-    if c18 || c19 {
+    // Boutons (Champs 20 et 21)
+    let c20 = popup.cursor == 20;
+    let c21 = popup.cursor == 21;
+    if c20 || c21 {
         selected_line_idx = lines.len();
     }
     let save_btn = Span::styled(
         " [ Enregistrer ] ",
-        if c18 {
+        if c20 {
             theme::SELECTION
         } else {
             theme::SECTION
@@ -1172,7 +1216,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     );
     let run_btn = Span::styled(
         " [ Lancer la campagne (r) ] ",
-        if c19 {
+        if c21 {
             theme::SELECTION
         } else {
             theme::SECTION

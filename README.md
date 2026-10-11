@@ -257,6 +257,8 @@ sélectionnée a un résultat avec un corps non vide.
     et exécution concurrente (`--parallel`, requiert un fichier de données). En présence de plusieurs
     itérations, le bilan de campagne totalise chaque exécution avec son numéro d'itération (`#N`),
     et le panneau Réponse affiche la dernière itération (`itération N/M`).
+  - **Divers** : mode de bac à sable JavaScript (`--sandbox`, choix entre `safe` par défaut
+    et `developer`), et sortie détaillée (`--verbose`) pour le débogage.
   - **Exports de rapports** JUnit XML (`--reporter-junit`) et HTML (`--reporter-html`)
     délégués à `bru` : écrits hors collection (`$XDG_STATE_HOME/bruno-tui/reports/` ou
     `~/.local/state/bruno-tui/reports/`, repli vers `./reports`), horodatés avec le nom

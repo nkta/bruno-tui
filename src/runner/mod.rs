@@ -12,7 +12,7 @@ pub mod request;
 
 pub use error::{ReportErrorKind, RunError, RunOutcome};
 pub use options::{
-    RunnerOptions, RunnerOptionsConfig, RunnerOptionsError, default_reports_dir,
+    RunnerOptions, RunnerOptionsConfig, RunnerOptionsError, SandboxMode, default_reports_dir,
     generate_report_path, parse_delay, parse_existing_file_path, parse_iteration_count, parse_tags,
 };
 pub use process::{BruRunner, RunEvent, RunHandle, RunId};

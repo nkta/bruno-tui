@@ -14,7 +14,7 @@ use crate::collection::{
     BodyContent, BodyKind, Collection, KeyValue, LoadError, RequestView, TreeNode,
 };
 use crate::runner::{
-    self, RunnerOptionsConfig, RunnerOptionsError, SecretString, default_reports_dir,
+    self, RunnerOptionsConfig, RunnerOptionsError, SandboxMode, SecretString, default_reports_dir,
 };
 use crate::secrets::{Resolved, SecretLookup, SecretMapping, SecretSource, is_valid_name};
 use crate::writer::{EntrySection, EnvironmentVarEdit, FieldEdit, FileStamp};
@@ -1202,6 +1202,8 @@ pub enum RunnerOptionsField {
     JsonFilePath,
     IterationCount,
     Parallel,
+    Sandbox,
+    Verbose,
     ReporterJunit,
     ReporterHtml,
     SkipHeaders,
@@ -1210,7 +1212,7 @@ pub enum RunnerOptionsField {
 }
 
 impl RunnerOptionsField {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 22;
 
     pub fn from_index(index: usize) -> Self {
         match index {
@@ -1229,10 +1231,12 @@ impl RunnerOptionsField {
             12 => Self::JsonFilePath,
             13 => Self::IterationCount,
             14 => Self::Parallel,
-            15 => Self::ReporterJunit,
-            16 => Self::ReporterHtml,
-            17 => Self::SkipHeaders,
-            18 => Self::SaveButton,
+            15 => Self::Sandbox,
+            16 => Self::Verbose,
+            17 => Self::ReporterJunit,
+            18 => Self::ReporterHtml,
+            19 => Self::SkipHeaders,
+            20 => Self::SaveButton,
             _ => Self::RunButton,
         }
     }
@@ -1261,6 +1265,8 @@ impl RunnerOptionsField {
                 | Self::NoProxy
                 | Self::DisableCookies
                 | Self::Parallel
+                | Self::Sandbox
+                | Self::Verbose
                 | Self::ReporterJunit
                 | Self::ReporterHtml
                 | Self::SkipHeaders
@@ -1286,6 +1292,8 @@ pub struct RunnerOptionsPopup {
     pub json_file_path_input: TextInput,
     pub iteration_count_input: TextInput,
     pub parallel: bool,
+    pub sandbox: SandboxMode,
+    pub verbose: bool,
     pub reporter_junit: bool,
     pub reporter_html: bool,
     pub skip_headers: bool,
@@ -1350,6 +1358,8 @@ impl RunnerOptionsPopup {
                 false,
             ),
             parallel: config.parallel,
+            sandbox: config.sandbox,
+            verbose: config.verbose,
             reporter_junit: config.export_junit,
             reporter_html: config.export_html,
             skip_headers: config.skip_headers,
@@ -1398,6 +1408,8 @@ impl RunnerOptionsPopup {
             json_file_path,
             iteration_count,
             parallel: self.parallel,
+            sandbox: self.sandbox,
+            verbose: self.verbose,
             export_junit: self.reporter_junit,
             export_html: self.reporter_html,
             skip_headers: self.skip_headers,
@@ -1420,6 +1432,8 @@ impl RunnerOptionsPopup {
             RunnerOptionsField::NoProxy => self.noproxy = !self.noproxy,
             RunnerOptionsField::DisableCookies => self.disable_cookies = !self.disable_cookies,
             RunnerOptionsField::Parallel => self.parallel = !self.parallel,
+            RunnerOptionsField::Sandbox => self.sandbox = self.sandbox.toggle(),
+            RunnerOptionsField::Verbose => self.verbose = !self.verbose,
             RunnerOptionsField::ReporterJunit => self.reporter_junit = !self.reporter_junit,
             RunnerOptionsField::ReporterHtml => self.reporter_html = !self.reporter_html,
             RunnerOptionsField::SkipHeaders => self.skip_headers = !self.skip_headers,
