@@ -267,6 +267,8 @@ pub enum Message {
     ToggleZoom,
     /// `O`, hors saisie : ouvre ou ferme le popup d'options de campagne.
     ToggleRunnerOptions,
+    /// Modification de fichiers sur disque signalée par le watcher après débounce.
+    WatchReload(Vec<PathBuf>),
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -291,6 +293,7 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
         AppEvent::SecretsResolved { root, resolved } => {
             Some(Message::SecretsResolved { root, resolved })
         }
+        AppEvent::WatchReload(paths) => Some(Message::WatchReload(paths)),
     }
 }
 
@@ -663,6 +666,10 @@ mod tests {
         assert!(matches!(
             to_message(loaded, None),
             Some(Message::CollectionLoaded(Err(_)))
+        ));
+        assert!(matches!(
+            to_message(AppEvent::WatchReload(vec![PathBuf::from("a.bru")]), None),
+            Some(Message::WatchReload(paths)) if paths == [PathBuf::from("a.bru")]
         ));
 
         // Aucun `bru` réel nécessaire : un `RunOutcome::Cancelled` suffit à

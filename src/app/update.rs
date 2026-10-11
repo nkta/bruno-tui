@@ -90,16 +90,32 @@ pub enum Command {
         program: String,
         text: String,
     },
+    /// Recharger la collection depuis `model.source` ; la boucle l'exécute
+    /// dans `spawn_blocking` via `CollectionLoader::load` et renvoie le
+    /// résultat à `update` via `Message::CollectionLoaded`.
+    ReloadCollection,
 }
 
 /// Applique un message au modèle.
 pub fn update(model: &mut Model, message: Message) -> Command {
-    let command = apply(model, message);
+    let had_session = model.editing.is_some() || model.environment_editing.is_some();
+    let mut command = apply(model, message);
     // Pendant une session d'édition, l'onglet affiché du détail suit le
     // champ sous le curseur : il devient l'onglet choisi, pour que le
     // détail ne saute pas d'onglet à la fin de la session.
     if model.editing.is_some() {
         model.request_tab = model.shown_request_tab();
+    }
+    // Si une session d'édition vient de se fermer et qu'un rechargement était en attente :
+    if had_session
+        && model.editing.is_none()
+        && model.environment_editing.is_none()
+        && model.pending_reload
+    {
+        model.pending_reload = false;
+        if matches!(command, Command::None) {
+            command = Command::ReloadCollection;
+        }
     }
     command
 }
@@ -260,20 +276,78 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 }
                 Err(_) => Command::None,
             };
-            model.collection = match result {
-                Ok(collection) => CollectionState::Loaded(collection),
-                Err(error) => CollectionState::Failed(error),
-            };
-            reset_secrets_for_collection(model);
-            model.tree.expanded.clear();
-            model.tree_filter = None;
-            refresh_rows(model);
-            model.tree.selected = 0;
-            model.tree.offset = 0;
-            model.detail_scroll = 0;
-            model.current_environment = None;
-            if matches!(model.focus, Focus::EnvironmentPicker | Focus::Secrets) {
-                model.focus = Focus::Tree;
+            let is_reloading = matches!(model.collection, CollectionState::Loaded(_));
+            // Échec d'un rechargement automatique (fichier momentanément
+            // invalide pendant l'enregistrement d'un éditeur, par exemple) :
+            // l'ancienne collection reste affichée, seul le statut signale l'échec.
+            if is_reloading && let Err(error) = &result {
+                model.last_status =
+                    Some(super::model::StatusMessage::ReloadFailed(error.to_string()));
+                return Command::None;
+            }
+            let prev_selected_path = model.selected_node().map(|n| n.path().to_path_buf());
+
+            match result {
+                Ok(collection) => {
+                    // Conserver l'environnement actif s'il existe toujours
+                    if let Some(ref current_env) = model.current_environment {
+                        let still_exists = collection
+                            .environments
+                            .iter()
+                            .any(|e| e.as_ref().is_ok_and(|env| &env.name == current_env));
+                        if !still_exists {
+                            model.current_environment = None;
+                        }
+                    }
+
+                    model.collection = CollectionState::Loaded(collection);
+                    reset_secrets_for_collection(model);
+                    // Conserver les dossiers dépliés (`expanded` n'est pas vidé) ;
+                    // un filtre actif est levé en restaurant l'état d'avant filtre.
+                    if let Some(filter) = model.tree_filter.take() {
+                        model.tree.expanded = filter.saved_expanded;
+                    }
+                    refresh_rows(model);
+
+                    // Conserver la sélection par chemin
+                    if let Some(prev_path) = prev_selected_path {
+                        if let Some(index) = model.tree.rows.iter().position(|row| {
+                            model
+                                .node_at(&row.address)
+                                .is_some_and(|n| n.path() == prev_path)
+                        }) {
+                            model.tree.selected = index;
+                        } else {
+                            model.tree.selected = model
+                                .tree
+                                .selected
+                                .min(model.tree.rows.len().saturating_sub(1));
+                        }
+                    } else {
+                        model.tree.selected = 0;
+                    }
+                    scroll_tree_into_view(model);
+                    if is_reloading {
+                        model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
+                        model.last_status = Some(super::model::StatusMessage::CollectionReloaded);
+                    } else {
+                        model.detail_scroll = 0;
+                    }
+                }
+                Err(error) => {
+                    model.collection = CollectionState::Failed(error);
+                    reset_secrets_for_collection(model);
+                    model.tree.expanded.clear();
+                    model.tree_filter = None;
+                    refresh_rows(model);
+                    model.tree.selected = 0;
+                    model.tree.offset = 0;
+                    model.detail_scroll = 0;
+                    model.current_environment = None;
+                    if matches!(model.focus, Focus::EnvironmentPicker | Focus::Secrets) {
+                        model.focus = Focus::Tree;
+                    }
+                }
             }
             command
         }
@@ -395,7 +469,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
             if let Some(session) = &model.editing {
                 model.last_status = None;
                 if session.has_unsaved() {
-                    model.confirm = Some(super::model::PendingConfirm::DiscardEdit);
+                    model.confirm = Some(crate::app::model::PendingConfirm::DiscardEdit);
                 } else {
                     model.editing = None;
                 }
@@ -721,6 +795,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::ToggleMouseCapture => Command::SetMouseCapture(!model.mouse.capture),
+        Message::WatchReload(paths) => handle_watch_reload(model, paths),
         Message::MouseCaptureChanged { enabled, result } => {
             match result {
                 Ok(()) => {
@@ -1302,6 +1377,7 @@ fn is_background_result(message: &Message) -> bool {
             | Message::EnvironmentSaved { .. }
             | Message::MouseCaptureChanged { .. }
             | Message::SecretsResolved { .. }
+            | Message::WatchReload(_)
     )
 }
 
@@ -2331,6 +2407,7 @@ fn edit_saved(
             session.pending.clear();
             session.dirty = false;
             session.set_preview(saved.view.clone());
+            model.last_saved_stamps.insert(path.clone(), saved.stamp);
             model.replace_request_node(&path, saved.ast, saved.view);
         }
         Err(error) => {
@@ -2400,6 +2477,7 @@ fn environment_saved(
             session.stamp = saved.stamp;
             session.dirty = false;
             session.pending.clear();
+            model.last_saved_stamps.insert(path.clone(), saved.stamp);
             Some((saved.ast, session.variables.clone()))
         }
         Err(error) => {
@@ -2424,6 +2502,59 @@ fn environment_saved(
                 break;
             }
         }
+    }
+}
+
+/// Traite une notification de modification de fichiers surveillés sur disque.
+fn handle_watch_reload(model: &mut Model, paths: Vec<std::path::PathBuf>) -> Command {
+    use super::watch::is_watched_path;
+
+    let relevant_paths: Vec<std::path::PathBuf> =
+        paths.into_iter().filter(|p| is_watched_path(p)).collect();
+    if relevant_paths.is_empty() {
+        return Command::None;
+    }
+
+    // Vérifie si ces modifications proviennent de nos propres écritures du TUI (Ctrl+S).
+    // Si tous les chemins modifiés correspondent à un fichier enregistré récemment par le TUI
+    // dont le FileStamp sur disque correspond à notre empreinte, il ne s'agit pas d'une modification externe.
+    let root = model
+        .loaded()
+        .map(|c| c.root.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    // Chemins relatifs à la racine, comme les clés de `last_saved_stamps`.
+    let all_self_saved = relevant_paths.iter().all(|path| {
+        model
+            .last_saved_stamps
+            .get(path)
+            .is_some_and(|saved_stamp| {
+                FileStamp::capture(&root.join(path)).is_ok_and(|current| current == *saved_stamp)
+            })
+    });
+
+    if all_self_saved {
+        return Command::None;
+    }
+
+    // Session d'édition ouverte avec des modifications non enregistrées :
+    // NE PAS écraser. Afficher un avertissement dans le statut (« fichier modifié sur disque »),
+    // recharger seulement après la fermeture de la session.
+    let has_unsaved_session = model.editing.as_ref().is_some_and(EditSession::has_unsaved)
+        || model
+            .environment_editing
+            .as_ref()
+            .is_some_and(EnvironmentEditSession::has_unsaved);
+
+    if has_unsaved_session {
+        model.pending_reload = true;
+        model.last_status = Some(super::model::StatusMessage::FileModifiedOnDisk);
+        Command::None
+    } else {
+        model.editing = None;
+        model.environment_editing = None;
+        model.pending_reload = false;
+        Command::ReloadCollection
     }
 }
 
@@ -5019,7 +5150,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_reload_resets_current_environment_and_picker_focus() {
+    fn collection_reload_keeps_current_environment_and_picker_focus() {
         let mut model = loaded_model((100, 30));
         model.current_environment = Some("local".into());
         model.focus = Focus::EnvironmentPicker;
@@ -5028,8 +5159,15 @@ mod tests {
         let reloaded = crate::collection::BruLoader.load(&model.source.clone());
         update(&mut model, Message::CollectionLoaded(reloaded));
 
+        assert_eq!(model.current_environment, Some("local".into()));
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
+
+        // Si l'environnement n'existe plus dans la collection rechargée, il est réinitialisé
+        model.current_environment = Some("supprime".into());
+        let reloaded = crate::collection::BruLoader.load(&model.source.clone());
+        update(&mut model, Message::CollectionLoaded(reloaded));
         assert_eq!(model.current_environment, None);
-        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.focus, Focus::EnvironmentPicker);
     }
 
     #[test]
@@ -7840,7 +7978,7 @@ mod tests {
         model.focus = Focus::Secrets;
         let reloaded = crate::collection::BruLoader.load(&model.source.clone());
         update(&mut model, Message::CollectionLoaded(reloaded));
-        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.focus, Focus::Secrets);
         assert!(model.secrets.acknowledged.is_empty());
         assert!(model.secrets.pending_run.is_none());
         assert_eq!(model.secrets.typed.len(), 1);
@@ -8791,6 +8929,155 @@ mod tests {
         update(&mut model, Message::FocusTree);
         assert!(model.tree_filter.is_none());
         assert_eq!(model.tree.expanded, initial_expanded);
+    }
+
+    // --- Rechargement automatique de collection (Lot F) -----------------
+
+    #[test]
+    fn reload_preserves_selection_by_path_expanded_folders_and_focus() {
+        let mut model = loaded_model((100, 30));
+        // Déplier grp et grp/sub, sélectionner grp/sub/deep.bru
+        select(&mut model, "grp/sub/deep.bru");
+        model.focus = Focus::Detail;
+        let selected_path = model.selected_node().map(|n| n.path().to_path_buf());
+        assert_eq!(selected_path, Some(PathBuf::from("grp/sub/deep.bru")));
+        assert!(model.tree.expanded.contains(Path::new("grp")));
+        assert!(model.tree.expanded.contains(Path::new("grp/sub")));
+
+        // Rechargement
+        use crate::collection::CollectionLoader;
+        let reloaded = crate::collection::BruLoader.load(&model.source.clone());
+        let cmd = update(&mut model, Message::CollectionLoaded(reloaded));
+        assert!(matches!(
+            cmd,
+            Command::ResolveSecrets { .. } | Command::None
+        ));
+
+        // Sélection préservée par chemin
+        let reloaded_selected = model.selected_node().map(|n| n.path().to_path_buf());
+        assert_eq!(reloaded_selected, Some(PathBuf::from("grp/sub/deep.bru")));
+        // Dossiers dépliés préservés
+        assert!(model.tree.expanded.contains(Path::new("grp")));
+        assert!(model.tree.expanded.contains(Path::new("grp/sub")));
+        // Focus préservé
+        assert_eq!(model.focus, Focus::Detail);
+        // Message de statut indiquant le rechargement
+        assert_eq!(model.last_status, Some(StatusMessage::CollectionReloaded));
+    }
+
+    #[test]
+    fn reload_preserves_execution_history() {
+        let mut model = loaded_model((100, 30));
+        model.history.push_back(HistoryEntry {
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            target: PathBuf::from("simple-get.bru"),
+            recursive: false,
+            outcome: crate::app::model::HistoryOutcome::Cancelled,
+        });
+
+        use crate::collection::CollectionLoader;
+        let reloaded = crate::collection::BruLoader.load(&model.source.clone());
+        update(&mut model, Message::CollectionLoaded(reloaded));
+
+        assert_eq!(model.history.len(), 1);
+        assert_eq!(model.history[0].target, PathBuf::from("simple-get.bru"));
+    }
+
+    #[test]
+    fn watch_reload_with_unsaved_edit_defers_reload_and_shows_warning() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        // Marquer la session dirty
+        model.editing.as_mut().unwrap().dirty = true;
+        assert!(model.editing.as_ref().unwrap().has_unsaved());
+
+        // Événement de modification sur disque
+        let cmd = update(
+            &mut model,
+            Message::WatchReload(vec![PathBuf::from("simple-get.bru")]),
+        );
+
+        // La commande ne recharge pas immédiatement
+        assert!(matches!(cmd, Command::None));
+        // Statut d'avertissement affiché
+        assert_eq!(model.last_status, Some(StatusMessage::FileModifiedOnDisk));
+        // Rechargement en attente
+        assert!(model.pending_reload);
+        // L'édition n'est pas écrasée
+        assert!(model.editing.is_some());
+        assert!(model.editing.as_ref().unwrap().dirty);
+
+        // Fermeture de la session d'édition (par exemple validation d'abandon)
+        model.confirm = Some(crate::app::model::PendingConfirm::DiscardEdit);
+        let close_cmd = update(&mut model, Message::ConfirmYes);
+
+        // La fermeture déclenche le rechargement différé
+        assert!(matches!(close_cmd, Command::ReloadCollection));
+        assert!(!model.pending_reload);
+        assert!(model.editing.is_none());
+    }
+
+    #[test]
+    fn watch_reload_without_unsaved_edit_reloads_immediately() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        // Session propre (aucune modification)
+        assert!(!model.editing.as_ref().unwrap().has_unsaved());
+
+        let cmd = update(
+            &mut model,
+            Message::WatchReload(vec![PathBuf::from("simple-get.bru")]),
+        );
+
+        // Recharge immédiatement et referme la session propre
+        assert!(matches!(cmd, Command::ReloadCollection));
+        assert!(model.editing.is_none());
+        assert!(!model.pending_reload);
+        assert_ne!(model.last_status, Some(StatusMessage::FileModifiedOnDisk));
+    }
+
+    #[test]
+    fn watch_reload_ignored_for_non_watched_paths() {
+        let mut model = loaded_model((100, 30));
+        let cmd = update(
+            &mut model,
+            Message::WatchReload(vec![
+                PathBuf::from("README.md"),
+                PathBuf::from(".git/index"),
+            ]),
+        );
+
+        assert!(matches!(cmd, Command::None));
+        assert!(!model.pending_reload);
+    }
+
+    #[test]
+    fn watch_reload_from_tui_save_causes_no_false_warning() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        let session = model.editing.as_mut().unwrap();
+        session.dirty = true;
+        let stamp = session.stamp;
+
+        // Simule que le TUI vient de sauvegarder ce fichier avec ce stamp
+        model
+            .last_saved_stamps
+            .insert(PathBuf::from("simple-get.bru"), stamp);
+
+        // L'événement du watcher arrive pour ce fichier
+        // Le stamp sur disque de simple-get.bru correspond à celui de la fixture
+        let full_path = model.loaded().unwrap().root.join("simple-get.bru");
+        if let Ok(current_stamp) = crate::writer::FileStamp::capture(&full_path) {
+            model
+                .last_saved_stamps
+                .insert(PathBuf::from("simple-get.bru"), current_stamp);
+            let cmd = update(
+                &mut model,
+                Message::WatchReload(vec![PathBuf::from("simple-get.bru")]),
+            );
+
+            // Aucun avertissement, aucun rechargement inutile
+            assert!(matches!(cmd, Command::None));
+            assert_ne!(model.last_status, Some(StatusMessage::FileModifiedOnDisk));
+            assert!(!model.pending_reload);
+        }
     }
 }
 

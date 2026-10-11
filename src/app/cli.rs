@@ -36,6 +36,8 @@ Options :
                   terminal reste disponible. En cours de session, M bascule
                   la capture ; la plupart des terminaux gardent aussi la
                   sélection native avec Maj+glisser.
+  --no-watch      désactive la surveillance et le rechargement automatique
+                  de la collection
   -h, --help      affiche cette aide
   -V, --version   affiche la version
 ";
@@ -54,6 +56,8 @@ pub enum Command {
         secrets: Vec<SecretMapping>,
         /// Capture souris au démarrage ; `false` avec `--no-mouse`.
         mouse: bool,
+        /// Surveillance et rechargement automatique de la collection ; `false` avec `--no-watch`.
+        watch: bool,
     },
     Help,
     Version,
@@ -77,12 +81,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
     let mut path: Option<PathBuf> = None;
     let mut secrets: Vec<SecretMapping> = Vec::new();
     let mut mouse = true;
+    let mut watch = true;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("-h" | "--help") => return Ok(Command::Help),
             Some("-V" | "--version") => return Ok(Command::Version),
             Some("--no-mouse") => mouse = false,
+            Some("--no-watch") => watch = false,
             Some("--secret") => {
                 let spec = args.next().ok_or(UsageError::MissingSecretArgument)?;
                 push_secret(&mut secrets, &spec)?;
@@ -105,6 +111,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
         path: path.unwrap_or_else(|| PathBuf::from(".")),
         secrets,
         mouse,
+        watch,
     })
 }
 
@@ -133,6 +140,7 @@ mod tests {
             path: PathBuf::from(path),
             secrets: Vec::new(),
             mouse: true,
+            watch: true,
         }
     }
 
@@ -179,6 +187,7 @@ mod tests {
             path: PathBuf::from(path),
             secrets: Vec::new(),
             mouse: false,
+            watch: true,
         };
         assert_eq!(parse_strs(&["./c"]), Ok(run("./c")));
         assert_eq!(parse_strs(&["--no-mouse", "./c"]), Ok(without_mouse("./c")));
@@ -192,6 +201,28 @@ mod tests {
             Err(UsageError::UnknownOption("--no-mouse=1".into()))
         );
         assert!(USAGE.contains("--no-mouse"));
+    }
+
+    #[test]
+    fn no_watch_option() {
+        let without_watch = |path: &str| Command::Run {
+            path: PathBuf::from(path),
+            secrets: Vec::new(),
+            mouse: true,
+            watch: false,
+        };
+        assert_eq!(parse_strs(&["./c"]), Ok(run("./c")));
+        assert_eq!(parse_strs(&["--no-watch", "./c"]), Ok(without_watch("./c")));
+        assert_eq!(parse_strs(&["./c", "--no-watch"]), Ok(without_watch("./c")));
+        assert_eq!(
+            parse_strs(&["--no-watch", "--no-watch"]),
+            Ok(without_watch("."))
+        );
+        assert_eq!(
+            parse_strs(&["--no-watch=1"]),
+            Err(UsageError::UnknownOption("--no-watch=1".into()))
+        );
+        assert!(USAGE.contains("--no-watch"));
     }
 
     #[test]
@@ -211,6 +242,7 @@ mod tests {
                     mapping("token", None),
                 ],
                 mouse: true,
+                watch: true,
             })
         );
         assert_eq!(
@@ -219,6 +251,7 @@ mod tests {
                 path: PathBuf::from("./c"),
                 secrets: vec![mapping("a", None), mapping("b", Some("B"))],
                 mouse: true,
+                watch: true,
             })
         );
     }
@@ -253,6 +286,7 @@ mod tests {
                 path: PathBuf::from(raw),
                 secrets: Vec::new(),
                 mouse: true,
+                watch: true,
             })
         );
     }

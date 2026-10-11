@@ -19,6 +19,7 @@ pub mod text_input;
 pub mod tree_filter;
 pub mod update;
 pub mod view;
+pub mod watch;
 
 use std::ffi::OsString;
 use std::io;
@@ -68,6 +69,7 @@ pub async fn run<B: Backend>(
     secrets: Vec<SecretMapping>,
     mouse: MouseSetup,
     suspended: Arc<AtomicBool>,
+    watch: bool,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
@@ -76,6 +78,14 @@ pub async fn run<B: Backend>(
     if let Some(reason) = mouse.startup_error {
         model.last_status = Some(model::StatusMessage::MouseCaptureError(reason));
     }
+
+    let mut _watcher = if watch {
+        crate::collection::config::find_root(&source)
+            .ok()
+            .and_then(|root| watch::start_watcher(root, sender.clone()).ok())
+    } else {
+        None
+    };
 
     let (run_tx, mut run_rx) = mpsc::channel(EVENT_BUFFER);
     let runner = BruRunner::with_program(bru_program, run_tx);
@@ -92,8 +102,9 @@ pub async fn run<B: Backend>(
 
     {
         let sender = sender.clone();
+        let init_loader = Arc::clone(&loader);
         tokio::task::spawn_blocking(move || {
-            let result = loader.load(&source);
+            let result = init_loader.load(&source);
             // Boucle terminée : plus personne n'attend la collection.
             let _ = sender.blocking_send(AppEvent::CollectionLoaded(result));
         });
@@ -107,6 +118,12 @@ pub async fn run<B: Backend>(
                 "flux d'événements fermé",
             )));
         };
+        if let AppEvent::CollectionLoaded(Ok(ref collection)) = event
+            && _watcher.is_none()
+            && watch
+        {
+            _watcher = watch::start_watcher(collection.root.clone(), sender.clone()).ok();
+        }
         // Un événement écarté (survol souris, focus du terminal) ne change
         // rien au modèle : pas de redessin.
         let Some(message) = to_message(event, model.text_capture()) else {
@@ -282,6 +299,15 @@ pub async fn run<B: Backend>(
                         }
                         Ok(Ok(())) => {}
                     }
+                }
+                Command::ReloadCollection => {
+                    let loader = Arc::clone(&loader);
+                    let source = model.source.clone();
+                    let sender = sender.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = loader.load(&source);
+                        let _ = sender.blocking_send(AppEvent::CollectionLoaded(result));
+                    });
                 }
             }
         }

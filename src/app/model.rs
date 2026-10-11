@@ -903,6 +903,10 @@ pub struct Model {
     pub reports_dir: PathBuf,
     /// Chemins des rapports exportés lors de la dernière exécution récursive.
     pub last_reports: Vec<PathBuf>,
+    /// Empreintes des derniers fichiers enregistrés par le TUI lui-même (`Ctrl+S`).
+    pub last_saved_stamps: HashMap<PathBuf, FileStamp>,
+    /// Un rechargement de collection est en attente de la fermeture de la session d'édition.
+    pub pending_reload: bool,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -1007,6 +1011,13 @@ pub enum StatusMessage {
     NoFailedRequests,
     /// Options de campagne enregistrées pour la session.
     RunnerOptionsSaved,
+    /// Un fichier surveillé a été modifié sur disque alors qu'une session
+    /// d'édition avec des modifications non enregistrées est ouverte.
+    FileModifiedOnDisk,
+    /// La collection a été rechargée suite à une modification sur disque.
+    CollectionReloaded,
+    /// Le rechargement automatique a échoué ; l'ancienne collection reste affichée.
+    ReloadFailed(String),
 }
 
 /// Champ interactif dans le popup d'options de campagne.
@@ -1198,6 +1209,8 @@ impl Model {
             runner_options_popup: None,
             reports_dir: default_reports_dir(),
             last_reports: Vec::new(),
+            last_saved_stamps: HashMap::new(),
+            pending_reload: false,
         }
     }
 

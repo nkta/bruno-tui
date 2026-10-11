@@ -99,6 +99,7 @@ fn spawn_run_sized(
             Vec::new(),
             bruno_tui::app::mouse::MouseSetup::terminal(false),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            false,
         )
         .await;
         let Ok(exit) = result;
