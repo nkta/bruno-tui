@@ -1,7 +1,7 @@
 # bruno-tui
 
 TUI en Rust pour explorer et éditer des collections [Bruno](https://www.usebruno.com/)
-(fichiers `.bru`) dans le terminal. L'exécution d'une requête est toujours
+(fichiers `.bru`, ou OpenCollection YAML en lecture seule) dans le terminal. L'exécution d'une requête est toujours
 déléguée au vrai CLI `bru` : ce projet n'interprète ni les variables, ni les
 scripts, ni les tests — seulement l'affichage et l'édition des fichiers.
 
@@ -23,6 +23,36 @@ Options :
 | `-h`, `--help` | aide |
 | `-V`, `--version` | version |
 
+## Formats de collection
+
+Le format est détecté comme dans Bruno 4, sur le premier répertoire
+parent qui marque une collection :
+
+| Fichier à la racine | Format | Édition |
+|---|---|---|
+| `opencollection.yml` | OpenCollection YAML (`*.yml`, `folder.yml`, `environments/*.yml`) | lecture seule |
+| `bruno.json` (sans `opencollection.yml`) | bru-lang (`*.bru`) | oui |
+
+Si les deux fichiers sont présents, `opencollection.yml` l'emporte.
+
+Pour une collection YAML :
+
+- l'arbre, le détail et les environnements s'affichent comme pour une
+  collection `.bru` ; le titre indique « OpenCollection YAML · lecture
+  seule » ;
+- l'exécution reste déléguée à `bru run` (chemins `.yml` relatifs à la
+  racine) et les résultats du rapport sont rattachés aux requêtes ;
+- l'édition est désactivée : `Entrée`/`e` dans le détail, `e` dans le
+  panneau Environnement et `Ctrl+S` affichent « Collection OpenCollection
+  (YAML) en lecture seule » ;
+- seules les requêtes `http` et `graphql` sont affichées ; les autres
+  types (`grpc`, `websocket`, ...) et les fichiers invalides apparaissent
+  en erreur dans l'arbre ;
+- les clés que le TUI ne sait pas afficher sont ignorées et listées comme
+  avis dans le panneau Diagnostics (`D`), sans jamais citer de valeur ;
+- le nom d'un environnement est son nom de fichier sans extension, celui
+  qu'attend `bru run --env`.
+
 ## Vue d'ensemble
 
 L'écran est divisé en panneaux : **Collection** (arbre), **Détail** (requête
@@ -42,7 +72,7 @@ d'édition non enregistrée demande confirmation.
 | `f` | filtrer l'arbre de la collection (en direct ; Entrée valide, Échap annule ou efface) |
 | `Ctrl+K` | recherche globale par nom, méthode, chemin et URL (popup centré en direct ; ↑↓ choisir, Entrée valide, Échap ferme) |
 | `M` | activer/désactiver la capture souris |
-| `D` | panneau Diagnostics (erreurs de chargement) |
+| `D` | panneau Diagnostics (erreurs de chargement, avis sur les champs YAML ignorés) |
 | `H` | panneau Historique des exécutions |
 | `S` | panneau Variables secrètes |
 | `?` | aide des raccourcis (popup centré) |

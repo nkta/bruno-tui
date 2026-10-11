@@ -555,6 +555,8 @@ impl CollectionLoader for FakeLoader {
             root: PathBuf::from("/fake"),
             name: "fake".into(),
             settings: None,
+            format: Default::default(),
+            notices: Vec::new(),
             tree: vec![TreeNode::Folder(FolderNode {
                 path: "dir".into(),
                 name: "dir".into(),

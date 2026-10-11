@@ -11,13 +11,24 @@ use thiserror::Error;
 /// Erreur fatale : la collection n'a pas pu être chargée du tout.
 #[derive(Debug, Error)]
 pub enum LoadError {
-    #[error("`{path}` n'est pas dans une collection Bruno : aucun bruno.json trouvé en remontant")]
+    #[error(
+        "`{path}` n'est pas dans une collection Bruno : aucun bruno.json ni opencollection.yml trouvé en remontant"
+    )]
     NotACollection { path: PathBuf },
 
     /// Seule la position est conservée : le message serde brut peut citer
     /// des valeurs du fichier.
     #[error("bruno.json invalide dans `{path}` (ligne {line}, colonne {column})")]
     InvalidConfig {
+        path: PathBuf,
+        line: usize,
+        column: usize,
+    },
+
+    /// Seule la position est conservée : le message YAML brut peut citer
+    /// des valeurs du fichier. Ligne et colonne valent 0 si inconnues.
+    #[error("opencollection.yml invalide dans `{path}` (ligne {line}, colonne {column})")]
+    InvalidOpenCollection {
         path: PathBuf,
         line: usize,
         column: usize,
@@ -56,8 +67,34 @@ pub enum ParseError {
     #[error("aucun bloc de méthode HTTP (get, post, put, ...)")]
     MissingMethod,
 
+    /// Fichier YAML mal formé ; seule la position est conservée.
+    #[error("YAML invalide{}", yaml_position(*.line, *.column))]
+    InvalidYaml {
+        line: Option<usize>,
+        column: Option<usize>,
+    },
+
+    #[error("le document YAML n'est pas un dictionnaire")]
+    NotAMapping,
+
+    #[error("aucun type de requête (`info.type`)")]
+    MissingItemType,
+
+    /// `kind` est un type connu de Bruno (`grpc`, `websocket`, ...) ou
+    /// `inconnu` : jamais une valeur arbitraire du fichier.
+    #[error("type de requête `{kind}` non pris en charge par le TUI")]
+    UnsupportedItemType { kind: String },
+
     #[error("arborescence trop profonde (plus de {max} niveaux)")]
     TooDeep { max: usize },
+}
+
+fn yaml_position(line: Option<usize>, column: Option<usize>) -> String {
+    match (line, column) {
+        (Some(line), Some(column)) => format!(" (ligne {line}, colonne {column})"),
+        (Some(line), None) => format!(" (ligne {line})"),
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]

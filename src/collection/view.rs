@@ -48,7 +48,9 @@ pub enum AuthMode {
 }
 
 impl AuthMode {
-    fn parse(value: &str) -> Self {
+    /// Interprète un nom de mode (`basic`, `bearer`, ...), identique en
+    /// bru-lang et en OpenCollection.
+    pub(crate) fn parse(value: &str) -> Self {
         match value {
             "none" => Self::NoAuth,
             "inherit" => Self::Inherit,
@@ -303,7 +305,7 @@ impl EnvironmentExtends {
 /// `@usebruno/lang`) : non vide, 255 caractères au plus, ni caractère
 /// réservé ni nom de périphérique, sans espace ou `-` en tête ni `.` ou
 /// espace en fin. Un nom invalide est ignoré par Bruno ; on l'ignore aussi.
-fn valid_environment_name(name: &str) -> Option<String> {
+pub(crate) fn valid_environment_name(name: &str) -> Option<String> {
     let name = name.trim();
     let reserved_char = |c: char| "<>:\"/\\|?*".contains(c) || c.is_control();
     let upper = name.to_ascii_uppercase();

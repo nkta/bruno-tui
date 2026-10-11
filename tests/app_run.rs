@@ -164,6 +164,8 @@ fn stub_collection(root: PathBuf, paths: &[&str]) -> Collection {
         root,
         name: "stub".to_owned(),
         settings: None,
+        format: Default::default(),
+        notices: Vec::new(),
         tree: paths.iter().map(|path| stub_request(path)).collect(),
         environments: Vec::new(),
     }
