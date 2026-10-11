@@ -2115,6 +2115,7 @@ mod tests {
                 method: Some("GET".into()),
                 url: Some("https://x/ping".into()),
                 headers: Some(Default::default()),
+                data: None,
             },
             response: ResponseInfo {
                 status: ResponseStatus::Http(200),

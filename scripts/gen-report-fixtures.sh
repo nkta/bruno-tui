@@ -16,6 +16,8 @@ COLLECTION="$ROOT/tests/fixtures/collections/runner-probe"
 OUT="$ROOT/tests/fixtures/reports/mixed.json"
 ERRORED_COLLECTION="$ROOT/tests/fixtures/collections/runner-probe-errored"
 ERRORED_OUT="$ROOT/tests/fixtures/reports/pre-request-error.json"
+POST_COLLECTION="$ROOT/tests/fixtures/collections/runner-probe-post"
+POST_OUT="$ROOT/tests/fixtures/reports/post-with-body.json"
 PORT=18765
 
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$COLLECTION/www" \
@@ -38,6 +40,14 @@ CODE=$?
 set -e
 
 echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $OUT"
+
+cd "$POST_COLLECTION"
+set +e
+bru run -r --reporter-json /dev/fd/3 3>"$POST_OUT" >/dev/null 2>&1
+CODE=$?
+set -e
+
+echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $POST_OUT"
 
 cd "$ERRORED_COLLECTION"
 set +e

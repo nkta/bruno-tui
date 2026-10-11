@@ -119,9 +119,9 @@ pub struct RequestFile {
 
 /// Requête telle qu'envoyée par `bru`, variables résolues.
 ///
-/// Méthode, URL et en-têtes valent `None` quand la requête n'a pas été
-/// envoyée (échec avant envoi, par exemple un script pré-requête qui lève
-/// une exception) : `bru` les rapporte alors à `null`.
+/// Méthode, URL, en-têtes et corps valent `None` quand la requête n'a pas
+/// été envoyée (échec avant envoi, par exemple un script pré-requête qui
+/// lève une exception) : `bru` les rapporte alors à `null`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RequestInfo {
     #[serde(default)]
@@ -130,6 +130,9 @@ pub struct RequestInfo {
     pub url: Option<String>,
     #[serde(default)]
     pub headers: Option<BTreeMap<String, Value>>,
+    /// Corps envoyé tel quel par `bru`, ou `None` si absent/non envoyé.
+    #[serde(default)]
+    pub data: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

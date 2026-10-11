@@ -3627,6 +3627,7 @@ mod tests {
                 method: Some("GET".into()),
                 url: Some("http://x".into()),
                 headers: Some(Default::default()),
+                data: None,
             },
             response: ResponseInfo {
                 status: ResponseStatus::Http(200),

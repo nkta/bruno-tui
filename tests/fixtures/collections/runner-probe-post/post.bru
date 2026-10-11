@@ -1,0 +1,24 @@
+meta {
+  name: post
+  type: http
+  seq: 1
+}
+
+post {
+  url: http://127.0.0.1:18765/index.html
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+  X-Custom-Header: hello-world
+  Authorization: Bearer my-secret-token
+}
+
+body:json {
+  {
+    "greeting": "hello",
+    "target": "world"
+  }
+}
