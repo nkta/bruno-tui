@@ -248,11 +248,13 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
     let list_items: Vec<ListItem> = items
         .iter()
         .map(|item| {
+            let path_display = if campaign.total_iterations > 1 {
+                format!("{}  #{}", item.path.display(), item.iteration_index + 1)
+            } else {
+                item.path.display().to_string()
+            };
             let mut spans = vec![
-                Span::styled(
-                    item.path.display().to_string(),
-                    Style::new().add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(path_display, Style::new().add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
                 Span::styled(format!("({})", item.name), theme::LABEL),
                 Span::raw("  ·  "),
@@ -726,8 +728,8 @@ fn format_duration(secs: f64) -> String {
 /// Largeur cible : la ligne la plus longue (`--reporter-skip-all-headers`)
 /// tient en entier sur un terminal de 96 colonnes ou plus.
 pub fn runner_options_popup_area(area: Rect) -> Rect {
-    let width = 92.min(area.width.saturating_sub(4)).max(42);
-    let height = 16.min(area.height.saturating_sub(2)).max(12);
+    let width = 84.min(area.width.saturating_sub(4)).max(42);
+    let height = 21.min(area.height.saturating_sub(2)).max(12);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width, height)
@@ -735,16 +737,17 @@ pub fn runner_options_popup_area(area: Rect) -> Rect {
 
 /// Dessine le popup de configuration des options de campagne.
 pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame, area: Rect) {
-    let block = theme::bordered()
-        .title(" Options de campagne (TNR) — touche O ")
-        .border_style(theme::FOCUS);
-    let inner_area = block.inner(area);
-    frame.render_widget(block, area);
-
     let mut lines = Vec::new();
+    let mut selected_line_idx = 0;
+
+    // --- Section Exécution & Filtres ---
+    lines.push(Line::styled("── Filtres & Exécution ──", theme::SECTION));
 
     // Champ 0: Tags inclus
     let c0 = popup.cursor == 0;
+    if c0 {
+        selected_line_idx = lines.len();
+    }
     let tags_val = if popup.tags_input.text().is_empty() {
         "(aucun)"
     } else {
@@ -768,6 +771,9 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
 
     // Champ 1: Tags exclus
     let c1 = popup.cursor == 1;
+    if c1 {
+        selected_line_idx = lines.len();
+    }
     let excl_val = if popup.exclude_tags_input.text().is_empty() {
         "(aucun)"
     } else {
@@ -791,6 +797,9 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
 
     // Champ 2: Délai en ms
     let c2 = popup.cursor == 2;
+    if c2 {
+        selected_line_idx = lines.len();
+    }
     let delay_val = if popup.delay_input.text().is_empty() {
         "aucun"
     } else {
@@ -814,6 +823,9 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
 
     // Champ 3: Bail
     let c3 = popup.cursor == 3;
+    if c3 {
+        selected_line_idx = lines.len();
+    }
     let bail_check = if popup.bail { "[x]" } else { "[ ]" };
     lines.push(Line::from(vec![
         Span::styled(if c3 { "▶ " } else { "  " }, theme::FOCUS),
@@ -830,6 +842,9 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
 
     // Champ 4: Tests-only
     let c4 = popup.cursor == 4;
+    if c4 {
+        selected_line_idx = lines.len();
+    }
     let tests_check = if popup.tests_only { "[x]" } else { "[ ]" };
     lines.push(Line::from(vec![
         Span::styled(if c4 { "▶ " } else { "  " }, theme::FOCUS),
@@ -844,14 +859,20 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
-    // Champ 5: Rapport JUnit
+    // --- Section Réseau & TLS ---
+    lines.push(Line::styled("── Réseau & TLS ──", theme::SECTION));
+
+    // Champ 5: Insecure
     let c5 = popup.cursor == 5;
-    let junit_check = if popup.reporter_junit { "[x]" } else { "[ ]" };
+    if c5 {
+        selected_line_idx = lines.len();
+    }
+    let insecure_check = if popup.insecure { "[x]" } else { "[ ]" };
     lines.push(Line::from(vec![
         Span::styled(if c5 { "▶ " } else { "  " }, theme::FOCUS),
-        Span::styled("Rapport JUnit XML  : ", theme::LABEL),
+        Span::styled("Connexions TLS     : ", theme::LABEL),
         Span::styled(
-            format!("{junit_check} Exporter rapport JUnit (--reporter-junit)"),
+            format!("{insecure_check} Autoriser connexions non sécurisées (--insecure)"),
             if c5 {
                 theme::SELECTION
             } else {
@@ -860,15 +881,48 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
-    // Champ 6: Rapport HTML
+    // Champ 6: Cacert
     let c6 = popup.cursor == 6;
-    let html_check = if popup.reporter_html { "[x]" } else { "[ ]" };
+    if c6 {
+        selected_line_idx = lines.len();
+    }
+    let cacert_val = if popup.cacert_input.text().is_empty() {
+        "(aucun)"
+    } else {
+        popup.cacert_input.text()
+    };
+    let cacert_style = if c6 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
     lines.push(Line::from(vec![
         Span::styled(if c6 { "▶ " } else { "  " }, theme::FOCUS),
-        Span::styled("Rapport HTML       : ", theme::LABEL),
+        Span::styled("Certificat CA      : ", theme::LABEL),
+        Span::styled(format!("[ {cacert_val} ]"), cacert_style),
+        if c6 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 7: IgnoreTruststore
+    let c7 = popup.cursor == 7;
+    if c7 {
+        selected_line_idx = lines.len();
+    }
+    let ignore_ts_check = if popup.ignore_truststore {
+        "[x]"
+    } else {
+        "[ ]"
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c7 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Truststore système : ", theme::LABEL),
         Span::styled(
-            format!("{html_check} Exporter rapport HTML (--reporter-html)"),
-            if c6 {
+            format!("{ignore_ts_check} Ignorer truststore par défaut (--ignore-truststore)"),
+            if c7 {
                 theme::SELECTION
             } else {
                 Style::default()
@@ -876,15 +930,267 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
-    // Champ 7: Masquer en-têtes sensibles
-    let c7 = popup.cursor == 7;
+    // Champ 8: ClientCertConfig
+    let c8 = popup.cursor == 8;
+    if c8 {
+        selected_line_idx = lines.len();
+    }
+    let client_cert_val = if popup.client_cert_config_input.text().is_empty() {
+        "(aucun)"
+    } else {
+        popup.client_cert_config_input.text()
+    };
+    let client_cert_style = if c8 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c8 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Certificat client  : ", theme::LABEL),
+        Span::styled(format!("[ {client_cert_val} ]"), client_cert_style),
+        if c8 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 9: NoProxy
+    let c9 = popup.cursor == 9;
+    if c9 {
+        selected_line_idx = lines.len();
+    }
+    let noproxy_check = if popup.noproxy { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c9 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Désactiver proxys  : ", theme::LABEL),
+        Span::styled(
+            format!("{noproxy_check} Désactiver tous les proxys (--noproxy)"),
+            if c9 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 10: DisableCookies
+    let c10 = popup.cursor == 10;
+    if c10 {
+        selected_line_idx = lines.len();
+    }
+    let cookies_check = if popup.disable_cookies { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c10 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Cookies            : ", theme::LABEL),
+        Span::styled(
+            format!("{cookies_check} Désactiver les cookies (--disable-cookies)"),
+            if c10 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // --- Section Données & Itérations ---
+    lines.push(Line::styled("── Données & Itérations ──", theme::SECTION));
+
+    // Champ 11: CsvFilePath
+    let c11 = popup.cursor == 11;
+    if c11 {
+        selected_line_idx = lines.len();
+    }
+    let csv_val = if popup.csv_file_path_input.text().is_empty() {
+        "(aucun)"
+    } else {
+        popup.csv_file_path_input.text()
+    };
+    let csv_style = if c11 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c11 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Fichier CSV        : ", theme::LABEL),
+        Span::styled(format!("[ {csv_val} ]"), csv_style),
+        if c11 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 12: JsonFilePath
+    let c12 = popup.cursor == 12;
+    if c12 {
+        selected_line_idx = lines.len();
+    }
+    let json_val = if popup.json_file_path_input.text().is_empty() {
+        "(aucun)"
+    } else {
+        popup.json_file_path_input.text()
+    };
+    let json_style = if c12 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c12 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Fichier JSON       : ", theme::LABEL),
+        Span::styled(format!("[ {json_val} ]"), json_style),
+        if c12 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 13: IterationCount
+    let c13 = popup.cursor == 13;
+    if c13 {
+        selected_line_idx = lines.len();
+    }
+    let it_val = if popup.iteration_count_input.text().is_empty() {
+        "défaut (1)"
+    } else {
+        popup.iteration_count_input.text()
+    };
+    let it_style = if c13 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c13 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Nb d'itérations    : ", theme::LABEL),
+        Span::styled(format!("[ {it_val} ]"), it_style),
+        if c13 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 14: Parallel
+    let c14 = popup.cursor == 14;
+    if c14 {
+        selected_line_idx = lines.len();
+    }
+    let parallel_check = if popup.parallel { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c14 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Exécution //       : ", theme::LABEL),
+        Span::styled(
+            format!("{parallel_check} Exécuter en parallèle (--parallel, avec CSV/JSON)"),
+            if c14 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // --- Section Divers ---
+    lines.push(Line::styled("── Divers ──", theme::SECTION));
+
+    // Champ 15: Sandbox
+    let c15 = popup.cursor == 15;
+    if c15 {
+        selected_line_idx = lines.len();
+    }
+    let sandbox_val = match popup.sandbox {
+        crate::runner::SandboxMode::Safe => "safe (défaut)",
+        crate::runner::SandboxMode::Developer => "developer",
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c15 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Bac à sable JS     : ", theme::LABEL),
+        Span::styled(
+            format!("[ {sandbox_val} ] (Espace pour basculer : safe / developer)"),
+            if c15 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 16: Verbose
+    let c16 = popup.cursor == 16;
+    if c16 {
+        selected_line_idx = lines.len();
+    }
+    let verbose_check = if popup.verbose { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c16 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Sortie détaillée   : ", theme::LABEL),
+        Span::styled(
+            format!("{verbose_check} Activer la sortie verbeuse (--verbose)"),
+            if c16 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // --- Section Rapports ---
+    lines.push(Line::styled("── Rapports & Export ──", theme::SECTION));
+
+    // Champ 17: Rapport JUnit
+    let c17 = popup.cursor == 17;
+    if c17 {
+        selected_line_idx = lines.len();
+    }
+    let junit_check = if popup.reporter_junit { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c17 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Rapport JUnit XML  : ", theme::LABEL),
+        Span::styled(
+            format!("{junit_check} Exporter rapport JUnit (--reporter-junit)"),
+            if c17 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 18: Rapport HTML
+    let c18 = popup.cursor == 18;
+    if c18 {
+        selected_line_idx = lines.len();
+    }
+    let html_check = if popup.reporter_html { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c18 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Rapport HTML       : ", theme::LABEL),
+        Span::styled(
+            format!("{html_check} Exporter rapport HTML (--reporter-html)"),
+            if c18 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 19: Masquer en-têtes sensibles
+    let c19 = popup.cursor == 19;
+    if c19 {
+        selected_line_idx = lines.len();
+    }
     let skip_check = if popup.skip_headers { "[x]" } else { "[ ]" };
     lines.push(Line::from(vec![
-        Span::styled(if c7 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled(if c19 { "▶ " } else { "  " }, theme::FOCUS),
         Span::styled("Masquer en-têtes   : ", theme::LABEL),
         Span::styled(
             format!("{skip_check} Omettre en-têtes sensibles (--reporter-skip-all-headers)"),
-            if c7 {
+            if c19 {
                 theme::SELECTION
             } else {
                 Style::default()
@@ -894,16 +1200,27 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
 
     lines.push(Line::default());
 
-    // Boutons (Champs 8 et 9)
-    let c8 = popup.cursor == 8;
-    let c9 = popup.cursor == 9;
+    // Boutons (Champs 20 et 21)
+    let c20 = popup.cursor == 20;
+    let c21 = popup.cursor == 21;
+    if c20 || c21 {
+        selected_line_idx = lines.len();
+    }
     let save_btn = Span::styled(
         " [ Enregistrer ] ",
-        if c8 { theme::SELECTION } else { theme::SECTION },
+        if c20 {
+            theme::SELECTION
+        } else {
+            theme::SECTION
+        },
     );
     let run_btn = Span::styled(
         " [ Lancer la campagne (r) ] ",
-        if c9 { theme::SELECTION } else { theme::SECTION },
+        if c21 {
+            theme::SELECTION
+        } else {
+            theme::SECTION
+        },
     );
     lines.push(Line::from(vec![
         Span::raw("   "),
@@ -924,7 +1241,23 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ));
     }
 
-    frame.render_widget(Paragraph::new(lines), inner_area);
+    let block = theme::bordered()
+        .title(" Options de campagne (TNR) — touche O ")
+        .border_style(theme::FOCUS);
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let visible_height = inner_area.height as usize;
+    let total_lines = lines.len();
+    let scroll = if total_lines <= visible_height {
+        0
+    } else {
+        let max_scroll = total_lines.saturating_sub(visible_height);
+        let scroll_target = selected_line_idx.saturating_sub(visible_height / 2);
+        scroll_target.min(max_scroll)
+    };
+
+    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner_area);
 }
 
 #[cfg(test)]

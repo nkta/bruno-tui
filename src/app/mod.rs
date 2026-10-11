@@ -140,7 +140,7 @@ pub async fn run<B: Backend>(
                     is_campaign,
                 } => {
                     let recursive = request.recursive;
-                    let handle = runner.start(request);
+                    let handle = runner.start(*request);
                     update(
                         &mut model,
                         Message::RunStarted {

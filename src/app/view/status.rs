@@ -137,15 +137,15 @@ pub fn status_summary(model: &Model) -> Line<'static> {
         ));
     }
     match request_path.and_then(|path| model.run.outcomes.get(path)) {
-        Some(outcome) => result_summary(&outcome.result),
+        Some(outcome) => result_summary(&outcome.result, outcome.iteration),
         None => Line::default(),
     }
 }
 
 /// Résumé d'un résultat : statut coloré et son libellé, temps, taille
 /// (seulement d'après `content-length`), puis verdict et décompte des
-/// vérifications. Rien d'autre du résultat (en-têtes, corps, erreur).
-fn result_summary(result: &RequestResult) -> Line<'static> {
+/// vérifications, et mention d'itération si multiple. Rien d'autre du résultat.
+fn result_summary(result: &RequestResult, iteration: Option<(u32, u32)>) -> Line<'static> {
     let response = &result.response;
     let mut status_value = badge_text(&response.status);
     if let Some(label) = response.status_text.as_deref().filter(|t| !t.is_empty()) {
@@ -174,6 +174,9 @@ fn result_summary(result: &RequestResult) -> Line<'static> {
         format!("  {mark} {passed}/{total}")
     };
     spans.push(Span::styled(verdict, style));
+    if let Some((n, m)) = iteration {
+        spans.push(Span::styled(format!("  itération {n}/{m}"), theme::LABEL));
+    }
     Line::from(spans)
 }
 
@@ -376,7 +379,7 @@ mod tests {
         ))
         .expect("pre-request-error.json doit se désérialiser");
         let result = report.iterations()[0].results[0].clone();
-        let text = plain(&[result_summary(&result)]);
+        let text = plain(&[result_summary(&result, None)]);
         assert!(text.starts_with("aucune réponse"), "{text}");
         assert!(text.contains('●'), "{text}");
         let error = result.error.as_deref().expect("erreur rapportée");
@@ -421,9 +424,16 @@ mod tests {
             ("content-length", "21".into()),
         ]);
         result.response.data = Value::String("secret-body".into());
-        let text = plain(&[result_summary(&result)]);
+        let text = plain(&[result_summary(&result, None)]);
         assert!(!text.contains("secret"), "{text}");
         assert!(!text.contains("session"), "{text}");
         assert!(text.contains("21 o"), "{text}");
+    }
+
+    #[test]
+    fn result_summary_includes_iteration_when_specified() {
+        let result = with_headers(&[]);
+        let text = plain(&[result_summary(&result, Some((2, 3)))]);
+        assert!(text.contains("itération 2/3"), "{text}");
     }
 }

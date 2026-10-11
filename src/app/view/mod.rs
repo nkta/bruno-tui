@@ -2061,6 +2061,7 @@ mod tests {
                     reason: "connect ECONNREFUSED".into(),
                 },
             ],
+            total_iterations: 1,
         });
         model.focus = Focus::Campaign;
         let screen = render(&model, 100, 30).join("\n");

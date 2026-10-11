@@ -14,7 +14,7 @@ use crate::collection::{
     BodyContent, BodyKind, Collection, KeyValue, LoadError, RequestView, TreeNode,
 };
 use crate::runner::{
-    self, RunnerOptionsConfig, RunnerOptionsError, SecretString, default_reports_dir,
+    self, RunnerOptionsConfig, RunnerOptionsError, SandboxMode, SecretString, default_reports_dir,
 };
 use crate::secrets::{Resolved, SecretLookup, SecretMapping, SecretSource, is_valid_name};
 use crate::writer::{EntrySection, EnvironmentVarEdit, FieldEdit, FileStamp};
@@ -245,6 +245,8 @@ pub struct CampaignItem {
     pub duration_secs: f64,
     /// Raison d'échec ou de saut si présente.
     pub reason: Option<String>,
+    /// Index de l'itération (0-indexed).
+    pub iteration_index: u32,
 }
 
 /// Résumé de la dernière campagne d'exécution récursive de TNR.
@@ -268,6 +270,8 @@ pub struct CampaignSummary {
     pub filter: CampaignFilter,
     /// Liste ordonnée des requêtes en échec.
     pub failures: Vec<CampaignFailure>,
+    /// Nombre total d'itérations de la campagne.
+    pub total_iterations: usize,
 }
 
 impl CampaignSummary {
@@ -284,6 +288,7 @@ impl CampaignSummary {
                     http_code: f.http_code,
                     duration_secs: 0.0,
                     reason: Some(f.reason.clone()),
+                    iteration_index: 0,
                 })
                 .collect();
             return match self.filter {
@@ -390,6 +395,8 @@ pub struct RequestOutcome {
     pub console: std::sync::Arc<str>,
     /// Indique si la console provient d'une exécution récursive (globale à la campagne).
     pub is_global_console: bool,
+    /// Mention d'itération (N, M) quand il y a plusieurs itérations.
+    pub iteration: Option<(u32, u32)>,
 }
 
 impl RequestOutcome {
@@ -399,6 +406,7 @@ impl RequestOutcome {
             exit_code,
             console: std::sync::Arc::from(""),
             is_global_console: false,
+            iteration: None,
         }
     }
 
@@ -413,7 +421,15 @@ impl RequestOutcome {
             exit_code,
             console,
             is_global_console,
+            iteration: None,
         }
+    }
+
+    pub fn with_iteration(mut self, current: u32, total: u32) -> Self {
+        if total > 1 {
+            self.iteration = Some((current, total));
+        }
+        self
     }
 }
 
@@ -1176,6 +1192,18 @@ pub enum RunnerOptionsField {
     Delay,
     Bail,
     TestsOnly,
+    Insecure,
+    Cacert,
+    IgnoreTruststore,
+    ClientCertConfig,
+    NoProxy,
+    DisableCookies,
+    CsvFilePath,
+    JsonFilePath,
+    IterationCount,
+    Parallel,
+    Sandbox,
+    Verbose,
     ReporterJunit,
     ReporterHtml,
     SkipHeaders,
@@ -1184,7 +1212,7 @@ pub enum RunnerOptionsField {
 }
 
 impl RunnerOptionsField {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 22;
 
     pub fn from_index(index: usize) -> Self {
         match index {
@@ -1193,16 +1221,38 @@ impl RunnerOptionsField {
             2 => Self::Delay,
             3 => Self::Bail,
             4 => Self::TestsOnly,
-            5 => Self::ReporterJunit,
-            6 => Self::ReporterHtml,
-            7 => Self::SkipHeaders,
-            8 => Self::SaveButton,
+            5 => Self::Insecure,
+            6 => Self::Cacert,
+            7 => Self::IgnoreTruststore,
+            8 => Self::ClientCertConfig,
+            9 => Self::NoProxy,
+            10 => Self::DisableCookies,
+            11 => Self::CsvFilePath,
+            12 => Self::JsonFilePath,
+            13 => Self::IterationCount,
+            14 => Self::Parallel,
+            15 => Self::Sandbox,
+            16 => Self::Verbose,
+            17 => Self::ReporterJunit,
+            18 => Self::ReporterHtml,
+            19 => Self::SkipHeaders,
+            20 => Self::SaveButton,
             _ => Self::RunButton,
         }
     }
 
     pub fn is_text(&self) -> bool {
-        matches!(self, Self::Tags | Self::ExcludeTags | Self::Delay)
+        matches!(
+            self,
+            Self::Tags
+                | Self::ExcludeTags
+                | Self::Delay
+                | Self::Cacert
+                | Self::ClientCertConfig
+                | Self::CsvFilePath
+                | Self::JsonFilePath
+                | Self::IterationCount
+        )
     }
 
     pub fn is_toggle(&self) -> bool {
@@ -1210,6 +1260,13 @@ impl RunnerOptionsField {
             self,
             Self::Bail
                 | Self::TestsOnly
+                | Self::Insecure
+                | Self::IgnoreTruststore
+                | Self::NoProxy
+                | Self::DisableCookies
+                | Self::Parallel
+                | Self::Sandbox
+                | Self::Verbose
                 | Self::ReporterJunit
                 | Self::ReporterHtml
                 | Self::SkipHeaders
@@ -1225,6 +1282,18 @@ pub struct RunnerOptionsPopup {
     pub delay_input: TextInput,
     pub bail: bool,
     pub tests_only: bool,
+    pub insecure: bool,
+    pub cacert_input: TextInput,
+    pub ignore_truststore: bool,
+    pub client_cert_config_input: TextInput,
+    pub noproxy: bool,
+    pub disable_cookies: bool,
+    pub csv_file_path_input: TextInput,
+    pub json_file_path_input: TextInput,
+    pub iteration_count_input: TextInput,
+    pub parallel: bool,
+    pub sandbox: SandboxMode,
+    pub verbose: bool,
     pub reporter_junit: bool,
     pub reporter_html: bool,
     pub skip_headers: bool,
@@ -1245,6 +1314,52 @@ impl RunnerOptionsPopup {
             ),
             bail: config.bail,
             tests_only: config.tests_only,
+            insecure: config.insecure,
+            cacert_input: TextInput::new(
+                &config
+                    .cacert
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
+            ignore_truststore: config.ignore_truststore,
+            client_cert_config_input: TextInput::new(
+                &config
+                    .client_cert_config
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
+            noproxy: config.noproxy,
+            disable_cookies: config.disable_cookies,
+            csv_file_path_input: TextInput::new(
+                &config
+                    .csv_file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
+            json_file_path_input: TextInput::new(
+                &config
+                    .json_file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
+            iteration_count_input: TextInput::new(
+                &config
+                    .iteration_count
+                    .map(|c| c.to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
+            parallel: config.parallel,
+            sandbox: config.sandbox,
+            verbose: config.verbose,
             reporter_junit: config.export_junit,
             reporter_html: config.export_html,
             skip_headers: config.skip_headers,
@@ -1259,12 +1374,42 @@ impl RunnerOptionsPopup {
         let tags = crate::runner::parse_tags(self.tags_input.text())?;
         let exclude_tags = crate::runner::parse_tags(self.exclude_tags_input.text())?;
         let delay_ms = crate::runner::parse_delay(self.delay_input.text())?;
+        let cacert = crate::runner::parse_existing_file_path(self.cacert_input.text())?;
+        if self.ignore_truststore && cacert.is_none() {
+            return Err(RunnerOptionsError::IgnoreTruststoreWithoutCacert);
+        }
+        let client_cert_config =
+            crate::runner::parse_existing_file_path(self.client_cert_config_input.text())?;
+        let csv_file_path =
+            crate::runner::parse_existing_file_path(self.csv_file_path_input.text())?;
+        let json_file_path =
+            crate::runner::parse_existing_file_path(self.json_file_path_input.text())?;
+        if csv_file_path.is_some() && json_file_path.is_some() {
+            return Err(RunnerOptionsError::MutuallyExclusiveDataFiles);
+        }
+        let iteration_count =
+            crate::runner::parse_iteration_count(self.iteration_count_input.text())?;
+        if self.parallel && csv_file_path.is_none() && json_file_path.is_none() {
+            return Err(RunnerOptionsError::ParallelWithoutDataFile);
+        }
         Ok(RunnerOptionsConfig {
             tags,
             exclude_tags,
             delay_ms,
             bail: self.bail,
             tests_only: self.tests_only,
+            insecure: self.insecure,
+            cacert,
+            ignore_truststore: self.ignore_truststore,
+            client_cert_config,
+            noproxy: self.noproxy,
+            disable_cookies: self.disable_cookies,
+            csv_file_path,
+            json_file_path,
+            iteration_count,
+            parallel: self.parallel,
+            sandbox: self.sandbox,
+            verbose: self.verbose,
             export_junit: self.reporter_junit,
             export_html: self.reporter_html,
             skip_headers: self.skip_headers,
@@ -1280,6 +1425,15 @@ impl RunnerOptionsPopup {
         match self.current_field() {
             RunnerOptionsField::Bail => self.bail = !self.bail,
             RunnerOptionsField::TestsOnly => self.tests_only = !self.tests_only,
+            RunnerOptionsField::Insecure => self.insecure = !self.insecure,
+            RunnerOptionsField::IgnoreTruststore => {
+                self.ignore_truststore = !self.ignore_truststore
+            }
+            RunnerOptionsField::NoProxy => self.noproxy = !self.noproxy,
+            RunnerOptionsField::DisableCookies => self.disable_cookies = !self.disable_cookies,
+            RunnerOptionsField::Parallel => self.parallel = !self.parallel,
+            RunnerOptionsField::Sandbox => self.sandbox = self.sandbox.toggle(),
+            RunnerOptionsField::Verbose => self.verbose = !self.verbose,
             RunnerOptionsField::ReporterJunit => self.reporter_junit = !self.reporter_junit,
             RunnerOptionsField::ReporterHtml => self.reporter_html = !self.reporter_html,
             RunnerOptionsField::SkipHeaders => self.skip_headers = !self.skip_headers,
@@ -1293,6 +1447,11 @@ impl RunnerOptionsPopup {
             RunnerOptionsField::Tags => Some(&mut self.tags_input),
             RunnerOptionsField::ExcludeTags => Some(&mut self.exclude_tags_input),
             RunnerOptionsField::Delay => Some(&mut self.delay_input),
+            RunnerOptionsField::Cacert => Some(&mut self.cacert_input),
+            RunnerOptionsField::ClientCertConfig => Some(&mut self.client_cert_config_input),
+            RunnerOptionsField::CsvFilePath => Some(&mut self.csv_file_path_input),
+            RunnerOptionsField::JsonFilePath => Some(&mut self.json_file_path_input),
+            RunnerOptionsField::IterationCount => Some(&mut self.iteration_count_input),
             _ => None,
         }
     }
@@ -2455,6 +2614,7 @@ mod tests {
                 http_code: Some(200),
                 duration_secs: 0.1,
                 reason: None,
+                iteration_index: 0,
             },
             CampaignItem {
                 path: PathBuf::from("b.bru"),
@@ -2463,6 +2623,7 @@ mod tests {
                 http_code: Some(500),
                 duration_secs: 0.2,
                 reason: Some("error".into()),
+                iteration_index: 0,
             },
             CampaignItem {
                 path: PathBuf::from("c.bru"),
@@ -2471,6 +2632,7 @@ mod tests {
                 http_code: None,
                 duration_secs: 0.0,
                 reason: None,
+                iteration_index: 0,
             },
         ];
 
@@ -2489,6 +2651,7 @@ mod tests {
                 http_code: Some(500),
                 reason: "error".into(),
             }],
+            total_iterations: 1,
         };
 
         // Filtre par défaut : Échecs
@@ -2537,6 +2700,7 @@ mod tests {
                 http_code: Some(502),
                 reason: "bad gateway".into(),
             }],
+            total_iterations: 1,
         };
 
         let filtered = summary.filtered_items();

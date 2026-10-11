@@ -78,7 +78,7 @@ d'édition non enregistrée demande confirmation.
 | `S` | panneau Variables secrètes |
 | `?` | aide des raccourcis (popup centré) |
 | `C` | panneau Campagne (bilan TNR de la dernière exécution récursive) |
-| `O` | options de campagne (tags, délai, bail, tests-only, export de rapports JUnit/HTML) |
+| `O` | options de campagne (tags, TLS, données, sandbox, verbose, rapports JUnit/HTML) |
 | `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
 | `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
 
@@ -247,13 +247,25 @@ sélectionnée a un résultat avec un corps non vide.
   - **Délai** inter-requêtes en millisecondes (`--delay`).
   - **Bail** (`--bail`) : arrêt dès le premier échec.
   - **Tests-only** (`--tests-only`) : exécution des requêtes comportant des tests uniquement.
+  - **Réseau et TLS** : connexions non sécurisées (`--insecure`), certificat CA personnalisé
+    (`--cacert`), ignorance du truststore système (`--ignore-truststore`, requiert `--cacert`),
+    configuration du certificat client (`--client-cert-config`), désactivation des proxys
+    (`--noproxy`) et désactivation des cookies automatiques (`--disable-cookies`). Les chemins
+    sont vérifiés à la saisie et transmis sous forme absolue à `bru`.
+  - **Données et itérations** : exécution pilotée par des jeux de données CSV (`--csv-file-path`)
+    ou JSON (`--json-file-path`) mutuellement exclusifs, nombre d'itérations (`--iteration-count`),
+    et exécution concurrente (`--parallel`, requiert un fichier de données). En présence de plusieurs
+    itérations, le bilan de campagne totalise chaque exécution avec son numéro d'itération (`#N`),
+    et le panneau Réponse affiche la dernière itération (`itération N/M`).
+  - **Divers** : mode de bac à sable JavaScript (`--sandbox`, choix entre `safe` par défaut
+    et `developer`), et sortie détaillée (`--verbose`) pour le débogage.
   - **Exports de rapports** JUnit XML (`--reporter-junit`) et HTML (`--reporter-html`)
     délégués à `bru` : écrits hors collection (`$XDG_STATE_HOME/bruno-tui/reports/` ou
     `~/.local/state/bruno-tui/reports/`, repli vers `./reports`), horodatés avec le nom
     du dossier cible. Le masquage des en-têtes sensibles (`--reporter-skip-all-headers`)
     est activé par défaut et peut être basculé.
-  - `Entrée` édite ou bascule un champ, `Ctrl+R` ou `Ctrl+Enter` lance directement
-    la campagne avec les options configurées, `Échap` enregistre et referme le popup.
+  - `Entrée` édite ou bascule un champ, `r` (hors saisie) lance directement la
+    campagne avec les options configurées, `Échap` enregistre et referme le popup.
 - **Recherche globale** (`Ctrl+K`) : popup centré de recherche en direct dans l'ensemble
   des requêtes de la collection chargée (nom affiché, méthode HTTP, chemin relatif et URL brute
   telle qu'écrite avec ses variables non résolues). `↑`/`↓` choisit dans la liste ordonnée

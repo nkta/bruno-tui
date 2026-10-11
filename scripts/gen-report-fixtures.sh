@@ -23,6 +23,8 @@ POST_COLLECTION="$ROOT/tests/fixtures/collections/runner-probe-post"
 POST_OUT="$ROOT/tests/fixtures/reports/post-with-body.json"
 YML_COLLECTION="$ROOT/tests/fixtures/collections/oc-probe"
 YML_OUT="$ROOT/tests/fixtures/reports/opencollection.json"
+CSV_COLLECTION="$ROOT/tests/fixtures/collections/csv-probe"
+CSV_OUT="$ROOT/tests/fixtures/reports/csv-iterations.json"
 PORT=18765
 
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$COLLECTION/www" \
@@ -72,3 +74,12 @@ CODE=$?
 set -e
 
 echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $ERRORED_OUT"
+
+cd "$CSV_COLLECTION"
+set +e
+bru run --csv-file-path data.csv --reporter-json /dev/fd/3 3>"$CSV_OUT" >/dev/null 2>&1
+CODE=$?
+set -e
+
+echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $CSV_OUT"
+

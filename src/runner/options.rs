@@ -13,6 +13,40 @@ pub enum RunnerOptionsError {
     TagContainsWhitespace(String),
     #[error("le délai '{0}' doit être un entier positif (en ms)")]
     InvalidDelay(String),
+    #[error("le fichier '{0}' n'existe pas")]
+    FileNotFound(String),
+    #[error("--ignore-truststore ne peut être utilisé qu'avec --cacert")]
+    IgnoreTruststoreWithoutCacert,
+    #[error("--csv-file-path et --json-file-path sont mutuellement exclusifs")]
+    MutuallyExclusiveDataFiles,
+    #[error("le nombre d'itérations '{0}' doit être un entier positif non nul")]
+    InvalidIterationCount(String),
+    #[error("--parallel ne peut être utilisé qu'avec --csv-file-path ou --json-file-path")]
+    ParallelWithoutDataFile,
+}
+
+/// Mode d'isolation JavaScript du runner `bru` (`--sandbox`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SandboxMode {
+    #[default]
+    Safe,
+    Developer,
+}
+
+impl SandboxMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Safe => "safe",
+            Self::Developer => "developer",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Safe => Self::Developer,
+            Self::Developer => Self::Safe,
+        }
+    }
 }
 
 /// Options effectives transmises à [`crate::runner::RunRequest`].
@@ -28,6 +62,30 @@ pub struct RunnerOptions {
     pub bail: bool,
     /// Exécute uniquement les requêtes ayant des tests ou assertions (`--tests-only`).
     pub tests_only: bool,
+    /// Autorise les connexions TLS non sécurisées (`--insecure`).
+    pub insecure: bool,
+    /// Chemin absolu du certificat CA (`--cacert <path>`).
+    pub cacert: Option<PathBuf>,
+    /// Ignore le truststore système pour utiliser uniquement le cacert (`--ignore-truststore`).
+    pub ignore_truststore: bool,
+    /// Chemin absolu de configuration du certificat client (`--client-cert-config <path>`).
+    pub client_cert_config: Option<PathBuf>,
+    /// Désactive tous les proxys (`--noproxy`).
+    pub noproxy: bool,
+    /// Désactive la sauvegarde et l'envoi automatique de cookies (`--disable-cookies`).
+    pub disable_cookies: bool,
+    /// Chemin absolu du fichier CSV de données (`--csv-file-path <path>`).
+    pub csv_file_path: Option<PathBuf>,
+    /// Chemin absolu du fichier JSON de données (`--json-file-path <path>`).
+    pub json_file_path: Option<PathBuf>,
+    /// Nombre d'itérations (`--iteration-count <n>`).
+    pub iteration_count: Option<u32>,
+    /// Exécution des itérations en parallèle (`--parallel`).
+    pub parallel: bool,
+    /// Mode d'isolation sandbox JavaScript (`--sandbox <safe|developer>`).
+    pub sandbox: SandboxMode,
+    /// Sortie verbeuse de débogage (`--verbose`).
+    pub verbose: bool,
     /// Chemin du fichier de rapport JUnit (`--reporter-junit <path>`).
     pub reporter_junit: Option<PathBuf>,
     /// Chemin du fichier de rapport HTML (`--reporter-html <path>`).
@@ -44,6 +102,18 @@ impl Default for RunnerOptions {
             delay_ms: None,
             bail: false,
             tests_only: false,
+            insecure: false,
+            cacert: None,
+            ignore_truststore: false,
+            client_cert_config: None,
+            noproxy: false,
+            disable_cookies: false,
+            csv_file_path: None,
+            json_file_path: None,
+            iteration_count: None,
+            parallel: false,
+            sandbox: SandboxMode::Safe,
+            verbose: false,
             reporter_junit: None,
             reporter_html: None,
             reporter_skip_all_headers: true,
@@ -59,6 +129,18 @@ impl RunnerOptions {
             || self.delay_ms.is_some()
             || self.bail
             || self.tests_only
+            || self.insecure
+            || self.cacert.is_some()
+            || self.ignore_truststore
+            || self.client_cert_config.is_some()
+            || self.noproxy
+            || self.disable_cookies
+            || self.csv_file_path.is_some()
+            || self.json_file_path.is_some()
+            || self.iteration_count.is_some()
+            || self.parallel
+            || self.sandbox != SandboxMode::Safe
+            || self.verbose
             || self.reporter_junit.is_some()
             || self.reporter_html.is_some()
     }
@@ -72,6 +154,18 @@ pub struct RunnerOptionsConfig {
     pub delay_ms: Option<u64>,
     pub bail: bool,
     pub tests_only: bool,
+    pub insecure: bool,
+    pub cacert: Option<PathBuf>,
+    pub ignore_truststore: bool,
+    pub client_cert_config: Option<PathBuf>,
+    pub noproxy: bool,
+    pub disable_cookies: bool,
+    pub csv_file_path: Option<PathBuf>,
+    pub json_file_path: Option<PathBuf>,
+    pub iteration_count: Option<u32>,
+    pub parallel: bool,
+    pub sandbox: SandboxMode,
+    pub verbose: bool,
     pub export_junit: bool,
     pub export_html: bool,
     pub skip_headers: bool,
@@ -85,6 +179,18 @@ impl Default for RunnerOptionsConfig {
             delay_ms: None,
             bail: false,
             tests_only: false,
+            insecure: false,
+            cacert: None,
+            ignore_truststore: false,
+            client_cert_config: None,
+            noproxy: false,
+            disable_cookies: false,
+            csv_file_path: None,
+            json_file_path: None,
+            iteration_count: None,
+            parallel: false,
+            sandbox: SandboxMode::Safe,
+            verbose: false,
             export_junit: false,
             export_html: false,
             skip_headers: true,
@@ -100,6 +206,18 @@ impl RunnerOptionsConfig {
             || self.delay_ms.is_some()
             || self.bail
             || self.tests_only
+            || self.insecure
+            || self.cacert.is_some()
+            || self.ignore_truststore
+            || self.client_cert_config.is_some()
+            || self.noproxy
+            || self.disable_cookies
+            || self.csv_file_path.is_some()
+            || self.json_file_path.is_some()
+            || self.iteration_count.is_some()
+            || self.parallel
+            || self.sandbox != SandboxMode::Safe
+            || self.verbose
             || self.export_junit
             || self.export_html
     }
@@ -121,6 +239,52 @@ impl RunnerOptionsConfig {
         }
         if self.tests_only {
             parts.push("tests-only".to_string());
+        }
+        if self.insecure {
+            parts.push("insecure".to_string());
+        }
+        if let Some(cacert) = &self.cacert {
+            let name = cacert
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("cacert");
+            parts.push(format!("cacert: {name}"));
+        }
+        if self.ignore_truststore {
+            parts.push("ignore-truststore".to_string());
+        }
+        if let Some(cert) = &self.client_cert_config {
+            let name = cert
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("client-cert");
+            parts.push(format!("client-cert: {name}"));
+        }
+        if self.noproxy {
+            parts.push("noproxy".to_string());
+        }
+        if self.disable_cookies {
+            parts.push("disable-cookies".to_string());
+        }
+        if let Some(csv) = &self.csv_file_path {
+            let name = csv.file_name().and_then(|n| n.to_str()).unwrap_or("csv");
+            parts.push(format!("csv: {name}"));
+        }
+        if let Some(json) = &self.json_file_path {
+            let name = json.file_name().and_then(|n| n.to_str()).unwrap_or("json");
+            parts.push(format!("json: {name}"));
+        }
+        if let Some(count) = self.iteration_count {
+            parts.push(format!("itérations: {count}"));
+        }
+        if self.parallel {
+            parts.push("parallel".to_string());
+        }
+        if self.sandbox != SandboxMode::Safe {
+            parts.push(format!("sandbox: {}", self.sandbox.as_str()));
+        }
+        if self.verbose {
+            parts.push("verbose".to_string());
         }
         if self.export_junit {
             parts.push("junit".to_string());
@@ -162,6 +326,18 @@ impl RunnerOptionsConfig {
             delay_ms: self.delay_ms,
             bail: self.bail,
             tests_only: self.tests_only,
+            insecure: self.insecure,
+            cacert: self.cacert.clone(),
+            ignore_truststore: self.ignore_truststore,
+            client_cert_config: self.client_cert_config.clone(),
+            noproxy: self.noproxy,
+            disable_cookies: self.disable_cookies,
+            csv_file_path: self.csv_file_path.clone(),
+            json_file_path: self.json_file_path.clone(),
+            iteration_count: self.iteration_count,
+            parallel: self.parallel,
+            sandbox: self.sandbox,
+            verbose: self.verbose,
             reporter_junit,
             reporter_html,
             reporter_skip_all_headers: self.skip_headers,
@@ -234,6 +410,41 @@ pub fn generate_report_path(dir: &Path, extension: &str) -> PathBuf {
     dir.join(filename)
 }
 
+/// Analyse un chemin de fichier, vérifie son existence sur le disque et retourne
+/// son chemin absolu. Si la chaîne est vide, retourne `Ok(None)`.
+pub fn parse_existing_file_path(input: &str) -> Result<Option<PathBuf>, RunnerOptionsError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let path = Path::new(trimmed);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    if !resolved.exists() {
+        return Err(RunnerOptionsError::FileNotFound(trimmed.to_string()));
+    }
+    Ok(Some(resolved))
+}
+
+/// Analyse une saisie de nombre d'itérations et valide qu'il s'agit d'un entier positif non nul.
+pub fn parse_iteration_count(input: &str) -> Result<Option<u32>, RunnerOptionsError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed.parse::<u32>() {
+        Ok(val) if val > 0 => Ok(Some(val)),
+        _ => Err(RunnerOptionsError::InvalidIterationCount(
+            trimmed.to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +498,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_iteration_count_valid_and_invalid() {
+        assert_eq!(parse_iteration_count("").unwrap(), None);
+        assert_eq!(parse_iteration_count("   ").unwrap(), None);
+        assert_eq!(parse_iteration_count("1").unwrap(), Some(1));
+        assert_eq!(parse_iteration_count(" 10 ").unwrap(), Some(10));
+
+        assert!(matches!(
+            parse_iteration_count("0"),
+            Err(RunnerOptionsError::InvalidIterationCount(_))
+        ));
+        assert!(matches!(
+            parse_iteration_count("-5"),
+            Err(RunnerOptionsError::InvalidIterationCount(_))
+        ));
+        assert!(matches!(
+            parse_iteration_count("abc"),
+            Err(RunnerOptionsError::InvalidIterationCount(_))
+        ));
+    }
+
+    #[test]
+    fn parse_existing_file_path_valid_and_invalid() {
+        assert_eq!(parse_existing_file_path("").unwrap(), None);
+        assert_eq!(parse_existing_file_path("   ").unwrap(), None);
+
+        // Fichier existant (Cargo.toml à la racine)
+        let cargo_toml = parse_existing_file_path("Cargo.toml").unwrap().unwrap();
+        assert!(cargo_toml.is_absolute());
+        assert!(cargo_toml.exists());
+
+        // Fichier inexistant
+        assert!(matches!(
+            parse_existing_file_path("non_existent_file_xyz.pem"),
+            Err(RunnerOptionsError::FileNotFound(f)) if f == "non_existent_file_xyz.pem"
+        ));
+    }
+
+    #[test]
     fn runner_options_config_summary() {
         let mut config = RunnerOptionsConfig::default();
         assert_eq!(config.summary(), "aucune");
@@ -294,14 +543,24 @@ mod tests {
 
         config.tags = vec!["smoke".into()];
         config.bail = true;
-        assert_eq!(config.summary(), "tags: smoke · bail");
+        config.insecure = true;
+        config.noproxy = true;
+        assert_eq!(config.summary(), "tags: smoke · bail · insecure · noproxy");
         assert!(config.has_active_options());
 
         config.delay_ms = Some(200);
         config.export_junit = true;
+        config.cacert = Some(PathBuf::from("/etc/ssl/ca.pem"));
+        config.ignore_truststore = true;
+        config.disable_cookies = true;
+        config.csv_file_path = Some(PathBuf::from("/path/to/data.csv"));
+        config.iteration_count = Some(3);
+        config.parallel = true;
+        config.sandbox = SandboxMode::Developer;
+        config.verbose = true;
         assert_eq!(
             config.summary(),
-            "tags: smoke · délai: 200ms · bail · junit"
+            "tags: smoke · délai: 200ms · bail · insecure · cacert: ca.pem · ignore-truststore · noproxy · disable-cookies · csv: data.csv · itérations: 3 · parallel · sandbox: developer · verbose · junit"
         );
     }
 
@@ -311,6 +570,13 @@ mod tests {
             std::env::temp_dir().join(format!("bruno-tui-test-reports-{}", std::process::id()));
         let config = RunnerOptionsConfig {
             tags: vec!["smoke".into()],
+            insecure: true,
+            noproxy: true,
+            csv_file_path: Some(PathBuf::from("Cargo.toml")),
+            iteration_count: Some(5),
+            parallel: true,
+            sandbox: SandboxMode::Developer,
+            verbose: true,
             export_junit: true,
             export_html: true,
             skip_headers: true,
@@ -319,6 +585,13 @@ mod tests {
 
         let (opts, paths) = config.build_runner_options(&temp);
         assert_eq!(paths.len(), 2);
+        assert!(opts.insecure);
+        assert!(opts.noproxy);
+        assert_eq!(opts.csv_file_path, Some(PathBuf::from("Cargo.toml")));
+        assert_eq!(opts.iteration_count, Some(5));
+        assert!(opts.parallel);
+        assert_eq!(opts.sandbox, SandboxMode::Developer);
+        assert!(opts.verbose);
         assert!(opts.reporter_junit.is_some());
         assert!(opts.reporter_html.is_some());
         assert!(opts.reporter_skip_all_headers);

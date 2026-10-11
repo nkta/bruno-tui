@@ -393,3 +393,23 @@ fn post_request_with_body_and_headers() {
         Some("http://127.0.0.1/index.html")
     );
 }
+
+const CSV_ITERATIONS: &str = include_str!("fixtures/reports/csv-iterations.json");
+
+fn csv_iterations() -> Report {
+    serde_json::from_str(CSV_ITERATIONS).expect("csv-iterations.json doit se désérialiser")
+}
+
+#[test]
+fn csv_iterations_report() {
+    let report = csv_iterations();
+    assert_eq!(report.iterations().len(), 2);
+    assert_eq!(report.iterations()[0].iteration_index, 0);
+    assert_eq!(report.iterations()[1].iteration_index, 1);
+    assert_eq!(report.iterations()[0].results.len(), 1);
+    assert_eq!(report.iterations()[1].results.len(), 1);
+    assert_eq!(report.iterations()[0].results[0].iteration_index, 0);
+    assert_eq!(report.iterations()[1].results[0].iteration_index, 1);
+    assert_eq!(report.iterations()[0].results[0].test.filename, "req.bru");
+    assert_eq!(report.iterations()[1].results[0].test.filename, "req.bru");
+}

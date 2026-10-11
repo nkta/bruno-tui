@@ -129,6 +129,50 @@ impl RunRequest {
         if self.options.tests_only {
             args.push("--tests-only".into());
         }
+        if self.options.insecure {
+            args.push("--insecure".into());
+        }
+        if let Some(cacert) = &self.options.cacert {
+            args.push("--cacert".into());
+            args.push(cacert.into());
+            if self.options.ignore_truststore {
+                args.push("--ignore-truststore".into());
+            }
+        }
+        if let Some(client_cert) = &self.options.client_cert_config {
+            args.push("--client-cert-config".into());
+            args.push(client_cert.into());
+        }
+        if self.options.noproxy {
+            args.push("--noproxy".into());
+        }
+        if self.options.disable_cookies {
+            args.push("--disable-cookies".into());
+        }
+        if let Some(csv) = &self.options.csv_file_path {
+            args.push("--csv-file-path".into());
+            args.push(csv.into());
+        }
+        if let Some(json) = &self.options.json_file_path {
+            args.push("--json-file-path".into());
+            args.push(json.into());
+        }
+        if let Some(count) = self.options.iteration_count {
+            args.push("--iteration-count".into());
+            args.push(count.to_string().into());
+        }
+        if self.options.parallel
+            && (self.options.csv_file_path.is_some() || self.options.json_file_path.is_some())
+        {
+            args.push("--parallel".into());
+        }
+        if self.options.sandbox != crate::runner::options::SandboxMode::Safe {
+            args.push("--sandbox".into());
+            args.push(self.options.sandbox.as_str().into());
+        }
+        if self.options.verbose {
+            args.push("--verbose".into());
+        }
         if let Some(junit_path) = &self.options.reporter_junit {
             args.push("--reporter-junit".into());
             args.push(junit_path.into());
@@ -256,6 +300,7 @@ mod tests {
                 reporter_junit: Some(PathBuf::from("/tmp/report.xml")),
                 reporter_html: Some(PathBuf::from("/tmp/report.html")),
                 reporter_skip_all_headers: true,
+                ..RunnerOptions::default()
             },
             ..RunRequest::collection("/c")
         };
@@ -303,6 +348,160 @@ mod tests {
                 "--reporter-json",
                 "/dev/fd/3"
             ]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_network_and_tls_options() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                insecure: true,
+                cacert: Some(PathBuf::from("/etc/ssl/my-ca.pem")),
+                ignore_truststore: true,
+                client_cert_config: Some(PathBuf::from("/etc/ssl/client.json")),
+                noproxy: true,
+                disable_cookies: true,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--insecure",
+                "--cacert",
+                "/etc/ssl/my-ca.pem",
+                "--ignore-truststore",
+                "--client-cert-config",
+                "/etc/ssl/client.json",
+                "--noproxy",
+                "--disable-cookies",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+    }
+
+    #[test]
+    fn bru_args_ignore_truststore_ignored_without_cacert() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                ignore_truststore: true,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            ["run", "-r", "--reporter-json", "/dev/fd/3"]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_data_execution_options() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                csv_file_path: Some(PathBuf::from("/data/users.csv")),
+                iteration_count: Some(5),
+                parallel: true,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--csv-file-path",
+                "/data/users.csv",
+                "--iteration-count",
+                "5",
+                "--parallel",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_json_file_path() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                json_file_path: Some(PathBuf::from("/data/users.json")),
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--json-file-path",
+                "/data/users.json",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+    }
+
+    #[test]
+    fn bru_args_parallel_ignored_without_data_file() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                parallel: true,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            ["run", "-r", "--reporter-json", "/dev/fd/3"]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_sandbox_developer_and_verbose() {
+        use crate::runner::options::SandboxMode;
+        let request = RunRequest {
+            options: RunnerOptions {
+                sandbox: SandboxMode::Developer,
+                verbose: true,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--sandbox",
+                "developer",
+                "--verbose",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_sandbox_safe_default_produces_no_flag() {
+        use crate::runner::options::SandboxMode;
+        let request = RunRequest {
+            options: RunnerOptions {
+                sandbox: SandboxMode::Safe,
+                verbose: false,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            ["run", "-r", "--reporter-json", "/dev/fd/3"]
         );
     }
 }
