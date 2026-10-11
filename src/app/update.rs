@@ -1105,7 +1105,9 @@ fn apply_runner_options_popup(model: &mut Model, message: Message) -> Command {
             match popup.current_field() {
                 RunnerOptionsField::Tags
                 | RunnerOptionsField::ExcludeTags
-                | RunnerOptionsField::Delay => {
+                | RunnerOptionsField::Delay
+                | RunnerOptionsField::Cacert
+                | RunnerOptionsField::ClientCertConfig => {
                     if popup.editing_text {
                         if let Err(err) = popup.to_config() {
                             popup.error = Some(err.to_string());
@@ -1120,6 +1122,10 @@ fn apply_runner_options_popup(model: &mut Model, message: Message) -> Command {
                 }
                 RunnerOptionsField::Bail
                 | RunnerOptionsField::TestsOnly
+                | RunnerOptionsField::Insecure
+                | RunnerOptionsField::IgnoreTruststore
+                | RunnerOptionsField::NoProxy
+                | RunnerOptionsField::DisableCookies
                 | RunnerOptionsField::ReporterJunit
                 | RunnerOptionsField::ReporterHtml
                 | RunnerOptionsField::SkipHeaders => {
@@ -9523,6 +9529,7 @@ mod tests {
             export_junit: false,
             export_html: false,
             skip_headers: true,
+            ..crate::runner::RunnerOptionsConfig::default()
         };
         model.campaign = Some(CampaignSummary {
             target: PathBuf::from("grp"),
@@ -11235,6 +11242,9 @@ mod mouse_tests {
         let popup = model.runner_options_popup.as_mut().unwrap();
         assert!(!popup.bail);
         assert!(!popup.tests_only);
+        assert!(!popup.insecure);
+        assert!(!popup.noproxy);
+        assert!(!popup.disable_cookies);
         assert!(!popup.reporter_junit);
         assert!(!popup.reporter_html);
         assert!(popup.skip_headers);
@@ -11250,22 +11260,43 @@ mod mouse_tests {
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().bail);
 
-        // TestsOnly
+        // TestsOnly (champ 4)
         update(&mut model, Message::Down);
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().tests_only);
 
-        // ReporterJunit
+        // Insecure (champ 5)
+        update(&mut model, Message::Down);
+        update(&mut model, Message::ToggleField);
+        assert!(model.runner_options_popup.as_ref().unwrap().insecure);
+
+        // Avancer jusqu'à NoProxy (champ 9) : Cacert (6), IgnoreTruststore (7), ClientCertConfig (8), NoProxy (9)
+        for _ in 0..4 {
+            update(&mut model, Message::Down);
+        }
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::NoProxy
+        );
+        update(&mut model, Message::ToggleField);
+        assert!(model.runner_options_popup.as_ref().unwrap().noproxy);
+
+        // DisableCookies (champ 10)
+        update(&mut model, Message::Down);
+        update(&mut model, Message::ToggleField);
+        assert!(model.runner_options_popup.as_ref().unwrap().disable_cookies);
+
+        // ReporterJunit (champ 11)
         update(&mut model, Message::Down);
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().reporter_junit);
 
-        // ReporterHtml
+        // ReporterHtml (champ 12)
         update(&mut model, Message::Down);
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().reporter_html);
 
-        // SkipHeaders (actif par défaut, on le bascule à false)
+        // SkipHeaders (champ 13, actif par défaut, on le bascule à false)
         update(&mut model, Message::Down);
         update(&mut model, Message::ToggleField);
         assert!(!model.runner_options_popup.as_ref().unwrap().skip_headers);
@@ -11275,6 +11306,9 @@ mod mouse_tests {
         assert!(model.runner_options_popup.is_none());
         assert!(model.runner_options.bail);
         assert!(model.runner_options.tests_only);
+        assert!(model.runner_options.insecure);
+        assert!(model.runner_options.noproxy);
+        assert!(model.runner_options.disable_cookies);
         assert!(model.runner_options.export_junit);
         assert!(model.runner_options.export_html);
         assert!(!model.runner_options.skip_headers);
@@ -11377,8 +11411,8 @@ mod mouse_tests {
         assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
         assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
 
-        // Naviguer jusqu'au bouton Enregistrer (champ 8) et presser Entrée
-        for _ in 0..6 {
+        // Naviguer jusqu'au bouton Enregistrer (champ 14, 12 fois Down depuis champ 2) et presser Entrée
+        for _ in 0..12 {
             update(&mut model, Message::Down);
         }
         assert_eq!(
@@ -11394,6 +11428,107 @@ mod mouse_tests {
     }
 
     #[test]
+    fn test_runner_options_popup_network_and_tls_validation() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleRunnerOptions);
+
+        // Aller à Cacert (champ 6) : 6x Down
+        for _ in 0..6 {
+            update(&mut model, Message::Down);
+        }
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::Cacert
+        );
+
+        // Saisir un fichier qui n'existe pas
+        update(&mut model, Message::Enter);
+        for c in "non_existent_cert.pem".chars() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char(c)),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(model.runner_options_popup.as_ref().unwrap().error.is_some());
+        assert!(
+            model
+                .runner_options_popup
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("n'existe pas")
+        );
+
+        // Remplacer par un fichier existant ("Cargo.toml")
+        for _ in 0.."non_existent_cert.pem".len() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Backspace),
+            );
+        }
+        for c in "Cargo.toml".chars() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char(c)),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
+
+        // Champ 7: IgnoreTruststore
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::IgnoreTruststore
+        );
+        update(&mut model, Message::ToggleField);
+        assert!(
+            model
+                .runner_options_popup
+                .as_ref()
+                .unwrap()
+                .ignore_truststore
+        );
+
+        // Maintenant, vider cacert pour vérifier l'erreur IgnoreTruststoreWithoutCacert
+        update(&mut model, Message::Up); // retour à Cacert
+        update(&mut model, Message::Enter);
+        for _ in 0.."Cargo.toml".len() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Backspace),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        // La validation doit échouer car ignore_truststore est actif sans cacert
+        assert!(model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(
+            model
+                .runner_options_popup
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("--ignore-truststore")
+        );
+    }
+
+    #[test]
     fn test_run_selected_from_campaign_panel_uses_runner_options() {
         let mut model = runner_probe_model();
         model.runner_options = crate::runner::RunnerOptionsConfig {
@@ -11405,6 +11540,7 @@ mod mouse_tests {
             export_junit: true,
             export_html: true,
             skip_headers: true,
+            ..crate::runner::RunnerOptionsConfig::default()
         };
 
         model.focus = Focus::Campaign;

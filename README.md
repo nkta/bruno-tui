@@ -247,6 +247,11 @@ sélectionnée a un résultat avec un corps non vide.
   - **Délai** inter-requêtes en millisecondes (`--delay`).
   - **Bail** (`--bail`) : arrêt dès le premier échec.
   - **Tests-only** (`--tests-only`) : exécution des requêtes comportant des tests uniquement.
+  - **Réseau et TLS** : connexions non sécurisées (`--insecure`), certificat CA personnalisé
+    (`--cacert`), ignorance du truststore système (`--ignore-truststore`, requiert `--cacert`),
+    configuration du certificat client (`--client-cert-config`), désactivation des proxys
+    (`--noproxy`) et désactivation des cookies automatiques (`--disable-cookies`). Les chemins
+    sont vérifiés à la saisie et transmis sous forme absolue à `bru`.
   - **Exports de rapports** JUnit XML (`--reporter-junit`) et HTML (`--reporter-html`)
     délégués à `bru` : écrits hors collection (`$XDG_STATE_HOME/bruno-tui/reports/` ou
     `~/.local/state/bruno-tui/reports/`, repli vers `./reports`), horodatés avec le nom

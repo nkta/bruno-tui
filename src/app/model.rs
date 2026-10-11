@@ -1176,6 +1176,12 @@ pub enum RunnerOptionsField {
     Delay,
     Bail,
     TestsOnly,
+    Insecure,
+    Cacert,
+    IgnoreTruststore,
+    ClientCertConfig,
+    NoProxy,
+    DisableCookies,
     ReporterJunit,
     ReporterHtml,
     SkipHeaders,
@@ -1184,7 +1190,7 @@ pub enum RunnerOptionsField {
 }
 
 impl RunnerOptionsField {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 16;
 
     pub fn from_index(index: usize) -> Self {
         match index {
@@ -1193,16 +1199,25 @@ impl RunnerOptionsField {
             2 => Self::Delay,
             3 => Self::Bail,
             4 => Self::TestsOnly,
-            5 => Self::ReporterJunit,
-            6 => Self::ReporterHtml,
-            7 => Self::SkipHeaders,
-            8 => Self::SaveButton,
+            5 => Self::Insecure,
+            6 => Self::Cacert,
+            7 => Self::IgnoreTruststore,
+            8 => Self::ClientCertConfig,
+            9 => Self::NoProxy,
+            10 => Self::DisableCookies,
+            11 => Self::ReporterJunit,
+            12 => Self::ReporterHtml,
+            13 => Self::SkipHeaders,
+            14 => Self::SaveButton,
             _ => Self::RunButton,
         }
     }
 
     pub fn is_text(&self) -> bool {
-        matches!(self, Self::Tags | Self::ExcludeTags | Self::Delay)
+        matches!(
+            self,
+            Self::Tags | Self::ExcludeTags | Self::Delay | Self::Cacert | Self::ClientCertConfig
+        )
     }
 
     pub fn is_toggle(&self) -> bool {
@@ -1210,6 +1225,10 @@ impl RunnerOptionsField {
             self,
             Self::Bail
                 | Self::TestsOnly
+                | Self::Insecure
+                | Self::IgnoreTruststore
+                | Self::NoProxy
+                | Self::DisableCookies
                 | Self::ReporterJunit
                 | Self::ReporterHtml
                 | Self::SkipHeaders
@@ -1225,6 +1244,12 @@ pub struct RunnerOptionsPopup {
     pub delay_input: TextInput,
     pub bail: bool,
     pub tests_only: bool,
+    pub insecure: bool,
+    pub cacert_input: TextInput,
+    pub ignore_truststore: bool,
+    pub client_cert_config_input: TextInput,
+    pub noproxy: bool,
+    pub disable_cookies: bool,
     pub reporter_junit: bool,
     pub reporter_html: bool,
     pub skip_headers: bool,
@@ -1245,6 +1270,26 @@ impl RunnerOptionsPopup {
             ),
             bail: config.bail,
             tests_only: config.tests_only,
+            insecure: config.insecure,
+            cacert_input: TextInput::new(
+                &config
+                    .cacert
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
+            ignore_truststore: config.ignore_truststore,
+            client_cert_config_input: TextInput::new(
+                &config
+                    .client_cert_config
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
+            noproxy: config.noproxy,
+            disable_cookies: config.disable_cookies,
             reporter_junit: config.export_junit,
             reporter_html: config.export_html,
             skip_headers: config.skip_headers,
@@ -1259,12 +1304,24 @@ impl RunnerOptionsPopup {
         let tags = crate::runner::parse_tags(self.tags_input.text())?;
         let exclude_tags = crate::runner::parse_tags(self.exclude_tags_input.text())?;
         let delay_ms = crate::runner::parse_delay(self.delay_input.text())?;
+        let cacert = crate::runner::parse_existing_file_path(self.cacert_input.text())?;
+        if self.ignore_truststore && cacert.is_none() {
+            return Err(RunnerOptionsError::IgnoreTruststoreWithoutCacert);
+        }
+        let client_cert_config =
+            crate::runner::parse_existing_file_path(self.client_cert_config_input.text())?;
         Ok(RunnerOptionsConfig {
             tags,
             exclude_tags,
             delay_ms,
             bail: self.bail,
             tests_only: self.tests_only,
+            insecure: self.insecure,
+            cacert,
+            ignore_truststore: self.ignore_truststore,
+            client_cert_config,
+            noproxy: self.noproxy,
+            disable_cookies: self.disable_cookies,
             export_junit: self.reporter_junit,
             export_html: self.reporter_html,
             skip_headers: self.skip_headers,
@@ -1280,6 +1337,12 @@ impl RunnerOptionsPopup {
         match self.current_field() {
             RunnerOptionsField::Bail => self.bail = !self.bail,
             RunnerOptionsField::TestsOnly => self.tests_only = !self.tests_only,
+            RunnerOptionsField::Insecure => self.insecure = !self.insecure,
+            RunnerOptionsField::IgnoreTruststore => {
+                self.ignore_truststore = !self.ignore_truststore
+            }
+            RunnerOptionsField::NoProxy => self.noproxy = !self.noproxy,
+            RunnerOptionsField::DisableCookies => self.disable_cookies = !self.disable_cookies,
             RunnerOptionsField::ReporterJunit => self.reporter_junit = !self.reporter_junit,
             RunnerOptionsField::ReporterHtml => self.reporter_html = !self.reporter_html,
             RunnerOptionsField::SkipHeaders => self.skip_headers = !self.skip_headers,
@@ -1293,6 +1356,8 @@ impl RunnerOptionsPopup {
             RunnerOptionsField::Tags => Some(&mut self.tags_input),
             RunnerOptionsField::ExcludeTags => Some(&mut self.exclude_tags_input),
             RunnerOptionsField::Delay => Some(&mut self.delay_input),
+            RunnerOptionsField::Cacert => Some(&mut self.cacert_input),
+            RunnerOptionsField::ClientCertConfig => Some(&mut self.client_cert_config_input),
             _ => None,
         }
     }
