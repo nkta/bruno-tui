@@ -253,7 +253,19 @@ fn hand_written_request_covers_every_displayed_tab() {
     assert_eq!(view.auth, Some(AuthMode::Bearer));
     assert!(view.has_pre_request_script);
     assert!(view.has_post_response_script);
+    assert_eq!(
+        view.script_pre_request(),
+        Some("bru.setVar(\"start\", Date.now());")
+    );
+    assert_eq!(
+        view.script_post_response(),
+        Some("bru.setVar(\"status\", res.getStatus());")
+    );
     assert!(view.has_tests);
+    assert_eq!(
+        view.tests(),
+        Some("test(\"status 200\", function() {\n  expect(res.getStatus()).to.equal(200);\n});")
+    );
     assert!(view.has_assert);
     assert_eq!(
         view.assertions(),
@@ -540,6 +552,7 @@ fn real_report_results_match_tree_nodes() {
             outcome: RunOutcome::Completed {
                 report,
                 exit_code: Some(0),
+                output: String::new(),
             },
         }),
     );

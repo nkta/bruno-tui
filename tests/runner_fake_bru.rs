@@ -75,7 +75,9 @@ async fn report_on_fd3_is_completed_with_exit_code() {
     let event = next_event(&mut rx).await;
     assert_eq!(event.id, handle.id());
     match event.outcome {
-        RunOutcome::Completed { report, exit_code } => {
+        RunOutcome::Completed {
+            report, exit_code, ..
+        } => {
             assert_eq!(exit_code, Some(1));
             assert_eq!(report.iterations()[0].results.len(), 5);
             assert_eq!(report.failures().count(), 3);

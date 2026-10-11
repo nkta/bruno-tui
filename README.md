@@ -109,9 +109,11 @@ atténués ; une barre d'onglets adaptative fait défiler les onglets sur les
 | `v` | sélection visuelle de lignes ; `y` copie dans le presse-papiers |
 | `Clic` | cliquer sur un onglet pour l'afficher |
 
-Les onglets Vars, Docs et Settings sont en lecture seule : pendant une
-session d'édition, ils ne sont pas des cibles éditables et la navigation
-entre champs reste inchangée.
+Les onglets Vars, Script, Tests, Docs et Settings sont en lecture seule :
+pendant une session d'édition, ils ne sont pas des cibles éditables et la
+navigation entre champs reste inchangée. Les onglets Script (scripts pré-requête
+et post-réponse) et Tests affichent le code brut avec numérotation de lignes,
+aussi bien pour les fichiers `.bru` que pour les collections OpenCollection YAML.
 
 ## Édition d'une requête
 
@@ -194,12 +196,16 @@ l'environnement (erreur de lecture).
 ## Panneau Réponse
 
 Affiche le résultat de la dernière exécution de la requête sélectionnée,
-en quatre onglets (Corps, En-têtes, Tests, Timeline). Le corps JSON (brut ou issu d'un
+en cinq onglets (Corps, En-têtes, Tests, Timeline, Console). Le corps JSON (brut ou issu d'un
 filtre `jq`) bénéficie d'une coloration syntaxique (clés, chaînes, nombres,
 booléens, null, ponctuation), tandis qu'un corps textuel ou HTML reste
 affiché sans coloration. L'onglet Timeline récapitule la requête envoyée
 (méthode, URL résolue, en-têtes, corps) et la réponse reçue (statut, durée,
-URL finale si redirigée).
+URL finale si redirigée). L'onglet Console restitue la sortie standard et
+d'erreur de `bru` (débarrassée des codes ANSI) ; lors d'une exécution
+récursive, la console globale de toute la campagne est affichée. SÉCURITÉ :
+la sortie console reste en mémoire vive uniquement — elle n'est jamais écrite
+sur le disque, jamais enregistrée dans l'historique persistant, ni logguée.
 
 | Touche | Effet |
 |---|---|

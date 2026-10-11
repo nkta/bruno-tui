@@ -14,6 +14,7 @@ pub enum RunOutcome {
     Completed {
         report: Report,
         exit_code: Option<i32>,
+        output: String,
     },
     Failed(RunError),
     Cancelled,

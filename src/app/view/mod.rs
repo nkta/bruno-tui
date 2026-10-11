@@ -1863,6 +1863,7 @@ mod tests {
             crate::app::model::ResponseTab::Headers,
             crate::app::model::ResponseTab::Tests,
             crate::app::model::ResponseTab::Timeline,
+            crate::app::model::ResponseTab::Console,
         ] {
             model.response_tab = tab;
             let screen = render(&model, 100, 30).join("\n");
@@ -1922,6 +1923,15 @@ mod tests {
         );
         assert!(!timeline_screen.contains("\"a\": ["), "{timeline_screen}");
         assert!(!timeline_screen.contains("body a"), "{timeline_screen}");
+
+        model.response_tab = crate::app::model::ResponseTab::Console;
+        let console_screen = render(&model, 100, 30).join("\n");
+        assert!(
+            console_screen.contains("aucune sortie console"),
+            "{console_screen}"
+        );
+        assert!(!console_screen.contains("\"a\": ["), "{console_screen}");
+        assert!(!console_screen.contains("content-type"), "{console_screen}");
     }
 
     #[test]

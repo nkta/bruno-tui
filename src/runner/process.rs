@@ -123,18 +123,62 @@ fn classify(exit_code: Option<i32>, report: Vec<u8>, output: String) -> RunOutco
         return RunOutcome::Failed(RunError::NoReport { exit_code, output });
     }
     match serde_json::from_slice::<Report>(&report) {
-        Ok(report) => RunOutcome::Completed { report, exit_code },
+        Ok(report) => RunOutcome::Completed {
+            report,
+            exit_code,
+            output,
+        },
         Err(error) => RunOutcome::Failed(RunError::invalid_report(&error)),
     }
 }
 
-/// Fusionne stdout et stderr en ne gardant que les derniers octets.
+/// Supprime les séquences d'échappement ANSI et les caractères de contrôle
+/// d'une chaîne, sauf le saut de ligne et la tabulation.
+pub fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if let Some(&next) = chars.peek() {
+                if next == '[' {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                } else if next == ']' {
+                    chars.next();
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                } else {
+                    chars.next();
+                }
+            }
+        } else if c == '\n' || c == '\t' || !c.is_control() {
+            out.push(c);
+        }
+        // Autres caractères de contrôle (`\r`, retour arrière, ...) : retirés,
+        // ils brouilleraient l'affichage du terminal.
+    }
+    out
+}
+
+/// Fusionne stdout et stderr en ne gardant que les derniers octets et en retirant les codes ANSI.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn output_tail(stdout: Vec<u8>, stderr: Vec<u8>) -> String {
     let mut combined = stdout;
     combined.extend_from_slice(&stderr);
     let start = combined.len().saturating_sub(OUTPUT_TAIL_BYTES);
-    String::from_utf8_lossy(&combined[start..]).into_owned()
+    let raw = String::from_utf8_lossy(&combined[start..]);
+    strip_ansi(&raw)
 }
 
 #[cfg(unix)]
@@ -311,5 +355,18 @@ mod tests {
         let tail = output_tail(stdout, b"fin".to_vec());
         assert_eq!(tail.len(), OUTPUT_TAIL_BYTES);
         assert!(tail.ends_with("fin"));
+    }
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        assert_eq!(strip_ansi("texte brut"), "texte brut");
+        assert_eq!(
+            strip_ansi("\x1b[31;1mRouge gras\x1b[0m \x1b[32mVert\x1b[m"),
+            "Rouge gras Vert"
+        );
+        assert_eq!(strip_ansi("\x1b[2J\x1b[?25hEcran"), "Ecran");
+        assert_eq!(strip_ansi("\x1b]0;Titre\x07Corps"), "Corps");
+        assert_eq!(strip_ansi("\x1b]0;Titre\x1b\\Corps"), "Corps");
+        assert_eq!(strip_ansi("a\r\nb\x08c\td"), "a\nbc\td");
     }
 }

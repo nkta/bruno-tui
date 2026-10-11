@@ -238,7 +238,19 @@ fn scripted_view() {
     let view = &request(&collection.tree, "scripted.bru").view;
     assert!(view.has_pre_request_script);
     assert!(view.has_post_response_script);
+    assert_eq!(
+        view.script_pre_request(),
+        Some("bru.setVar(\"started\", Date.now());")
+    );
+    assert_eq!(
+        view.script_post_response(),
+        Some("if (res.getStatus() !== 200) {\n  console.log(\"oops\");\n}")
+    );
     assert!(view.has_tests);
+    assert_eq!(
+        view.tests(),
+        Some("test(\"ok\", function () {\n  expect(res.getStatus()).to.equal(200);\n});")
+    );
     assert!(view.has_assert);
     assert_eq!(view.auth, Some(AuthMode::Bearer));
     assert_eq!(

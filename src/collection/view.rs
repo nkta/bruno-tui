@@ -136,6 +136,9 @@ pub struct BodyView {
 pub struct ExtraTabs {
     pub vars_pre_request: Vec<KeyValue>,
     pub vars_post_response: Vec<KeyValue>,
+    pub script_pre_request: Option<String>,
+    pub script_post_response: Option<String>,
+    pub tests: Option<String>,
     pub docs: Option<String>,
     pub settings: Vec<KeyValue>,
     pub assertions: Vec<KeyValue>,
@@ -172,6 +175,18 @@ impl RequestView {
 
     pub fn vars_post_response(&self) -> &[KeyValue] {
         &self.extra.vars_post_response
+    }
+
+    pub fn script_pre_request(&self) -> Option<&str> {
+        self.extra.script_pre_request.as_deref()
+    }
+
+    pub fn script_post_response(&self) -> Option<&str> {
+        self.extra.script_post_response.as_deref()
+    }
+
+    pub fn tests(&self) -> Option<&str> {
+        self.extra.tests.as_deref()
     }
 
     pub fn docs(&self) -> Option<&str> {
@@ -238,6 +253,9 @@ impl RequestView {
             extra: Box::new(ExtraTabs {
                 vars_pre_request: key_values(file, "vars:pre-request"),
                 vars_post_response: key_values(file, "vars:post-response"),
+                script_pre_request: file.text("script:pre-request"),
+                script_post_response: file.text("script:post-response"),
+                tests: file.text("tests"),
                 docs: file.text("docs"),
                 settings: key_values(file, "settings"),
                 assertions: key_values(file, "assert"),

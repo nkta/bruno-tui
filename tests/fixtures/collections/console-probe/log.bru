@@ -1,0 +1,15 @@
+meta {
+  name: log
+  type: http
+  seq: 1
+}
+
+get {
+  url: http://127.0.0.1:18765/data.json
+  body: none
+  auth: none
+}
+
+script:pre-request {
+  console.log("fixture-log");
+}
