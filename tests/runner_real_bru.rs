@@ -150,7 +150,12 @@ async fn real_bru_run_with_request_failed_before_sending() {
     let boom = &results[0];
     assert_eq!(boom.name, "boom");
     assert_eq!(boom.status, ResultStatus::Error);
-    assert_eq!(boom.request.url, None);
+    // `bru` 2.x ne rapporte aucune URL pour une requête jamais envoyée ;
+    // `bru` 4.2 rapporte l'URL résolue. Les deux formes sont acceptées.
+    assert!(matches!(
+        boom.request.url.as_deref(),
+        None | Some("http://127.0.0.1:18799/nope")
+    ));
     assert_eq!(boom.error.as_deref(), Some("pre-request failure (fixture)"));
     assert!(boom.is_failure());
 }
