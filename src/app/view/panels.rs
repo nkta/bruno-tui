@@ -1477,11 +1477,61 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         }
     }
 
+    // Options d'environnement de `bru` : fichier, environnement global, workspace.
+    let env_fields = [
+        (
+            RunnerOptionsField::EnvFile,
+            "Fichier d'env.     : ",
+            &popup.env_file_input,
+            "(aucun — exclusif avec les cases)",
+        ),
+        (
+            RunnerOptionsField::GlobalEnv,
+            "Env. global        : ",
+            &popup.global_env_input,
+            "(aucun — exige un workspace)",
+        ),
+        (
+            RunnerOptionsField::WorkspacePath,
+            "Workspace          : ",
+            &popup.workspace_path_input,
+            "(détection automatique)",
+        ),
+    ];
+    for (field, label, input, placeholder) in env_fields {
+        let current = popup.current_field() == field;
+        if current {
+            selected_line_idx = lines.len();
+        }
+        let value = if input.text().is_empty() {
+            placeholder
+        } else {
+            input.text()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if current { "▶ " } else { "  " }, theme::FOCUS),
+            Span::styled(label, theme::LABEL),
+            Span::styled(
+                format!("[ {value} ]"),
+                if current {
+                    theme::SELECTION
+                } else {
+                    Style::default()
+                },
+            ),
+            if current && popup.editing_text {
+                Span::styled("  (saisie…)", theme::LABEL)
+            } else {
+                Span::raw("")
+            },
+        ]));
+    }
+
     lines.push(Line::default());
 
-    // Boutons (Champs 20 et 21)
-    let c20 = popup.current_field() == RunnerOptionsField::from_static_index(20);
-    let c21 = popup.current_field() == RunnerOptionsField::from_static_index(21);
+    // Boutons
+    let c20 = popup.current_field() == RunnerOptionsField::SaveButton;
+    let c21 = popup.current_field() == RunnerOptionsField::RunButton;
     if c20 || c21 {
         selected_line_idx = lines.len();
     }

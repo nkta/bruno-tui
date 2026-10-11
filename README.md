@@ -289,6 +289,14 @@ sélectionnée a un résultat avec un corps non vide.
     le panneau Secrets propose, environnement par environnement, les `vars:secret`
     manquants (`r` passe à l'environnement suivant puis lance, `Échap` abandonne toute
     la série). Une requête seule (`r` sur une requête) reste sur l'environnement actif.
+    La même section porte les options d'environnement de `bru` :
+    - **Fichier d'environnement** (`--env-file`) : fichier `.bru` ou `.json`, vérifié à la
+      saisie et transmis en chemin absolu. Exclusif avec les cases cochées ; il remplace
+      l'environnement actif (`--env` n'est plus transmis à la campagne).
+    - **Environnement global** (`--global-env <nom>`) : exige que la collection soit dans
+      un workspace Bruno, détecté automatiquement ou indiqué par le champ suivant.
+    - **Workspace** (`--workspace-path`) : dossier contenant `workspace.yml`, vérifié à la
+      saisie et transmis en chemin absolu.
   - `Entrée` édite ou bascule un champ, `r` (hors saisie) lance directement la
     campagne avec les options configurées, `Échap` enregistre et referme le popup.
 - **Recherche globale** (`Ctrl+K`) : popup centré de recherche en direct dans l'ensemble

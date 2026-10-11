@@ -392,6 +392,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 key: "Ctrl+X",
                 effect: "annuler l'exécution en cours et la suite de la série",
             },
+            HelpEntry {
+                key: "O (Environnements)",
+                effect: "--env-file, --global-env et --workspace-path de bru",
+            },
         ],
     },
 ];

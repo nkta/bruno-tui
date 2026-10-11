@@ -1108,7 +1108,10 @@ fn apply_runner_options_popup(model: &mut Model, message: Message) -> Command {
                 | RunnerOptionsField::ClientCertConfig
                 | RunnerOptionsField::CsvFilePath
                 | RunnerOptionsField::JsonFilePath
-                | RunnerOptionsField::IterationCount => {
+                | RunnerOptionsField::IterationCount
+                | RunnerOptionsField::EnvFile
+                | RunnerOptionsField::GlobalEnv
+                | RunnerOptionsField::WorkspacePath => {
                     if popup.editing_text {
                         if let Err(err) = popup.to_config() {
                             popup.error = Some(err.to_string());
@@ -1440,6 +1443,12 @@ fn start_run_in(
         return Command::None;
     };
     model.run.last_failure = None;
+    // `--env-file` remplace l'environnement nommé pour une campagne.
+    let env = if recursive && model.runner_options.env_file.is_some() {
+        None
+    } else {
+        env
+    };
     let (options, reports) = if recursive {
         model
             .runner_options
@@ -1496,7 +1505,11 @@ fn start_run_failures(
             collection_root: root,
             targets: failure_paths,
             recursive: false,
-            env: model.current_environment.clone(),
+            // `--env-file` remplace l'environnement nommé.
+            env: model
+                .current_environment
+                .clone()
+                .filter(|_| model.runner_options.env_file.is_none()),
             env_vars: secret_env_vars(model),
             options,
         }),
@@ -11832,7 +11845,7 @@ mod mouse_tests {
         assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
         assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
 
-        // Naviguer jusqu'au bouton Enregistrer (champ fixe 20, 18 fois Down
+        // Naviguer jusqu'au bouton Enregistrer (champ fixe 23, 21 fois Down
         // depuis le champ 2, plus une case par environnement) et presser Entrée
         let envs = model
             .runner_options_popup
@@ -11840,7 +11853,7 @@ mod mouse_tests {
             .unwrap()
             .available_environments
             .len();
-        for _ in 0..18 + envs {
+        for _ in 0..21 + envs {
             update(&mut model, Message::Down);
         }
         assert_eq!(
@@ -12101,14 +12114,14 @@ mod mouse_tests {
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().parallel);
 
-        // Aller à SaveButton (champ fixe 20) : 6x Down, plus une case par environnement
+        // Aller à SaveButton (champ fixe 23) : 9x Down, plus une case par environnement
         let envs = model
             .runner_options_popup
             .as_ref()
             .unwrap()
             .available_environments
             .len();
-        for _ in 0..6 + envs {
+        for _ in 0..9 + envs {
             update(&mut model, Message::Down);
         }
         assert_eq!(
@@ -12838,5 +12851,94 @@ mod series_tests {
             .clone();
         assert!(header.contains('‹') && !header.contains('›'), "{header}");
         assert!(screen.iter().all(|l| l.chars().count() <= 80));
+    }
+
+    #[test]
+    fn env_file_is_exclusive_with_checked_environments() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleRunnerOptions);
+        let popup = model.runner_options_popup.as_mut().expect("popup");
+        popup.selected_environments = vec!["local".into()];
+        popup.env_file_input = TextInput::new(
+            "tests/fixtures/collections/multi-env-probe/environments/up.bru",
+            false,
+        );
+        assert_eq!(
+            popup.to_config(),
+            Err(crate::runner::RunnerOptionsError::EnvFileWithEnvironments)
+        );
+        popup.selected_environments.clear();
+        let config = popup.to_config().expect("config");
+        assert!(config.env_file.as_ref().is_some_and(|p| p.is_absolute()));
+    }
+
+    #[test]
+    fn environment_option_fields_are_reachable_and_editable() {
+        let mut model = loaded_model((80, 24));
+        update(&mut model, Message::ToggleRunnerOptions);
+        let popup = model.runner_options_popup.as_mut().expect("popup");
+        popup.cursor = RunnerOptionsField::ENVIRONMENTS_AT + popup.available_environments.len() + 1;
+        assert_eq!(popup.current_field(), RunnerOptionsField::GlobalEnv);
+        update(&mut model, Message::Enter);
+        for c in "prod".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        let screen = render(&model, 80, 24);
+        assert!(
+            screen
+                .iter()
+                .any(|l| l.contains("▶ Env. global") && l.contains("[ prod ]")),
+            "{screen:#?}"
+        );
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model
+                .runner_options_popup
+                .as_ref()
+                .expect("popup")
+                .current_field(),
+            RunnerOptionsField::WorkspacePath
+        );
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model
+                .runner_options_popup
+                .as_ref()
+                .expect("popup")
+                .current_field(),
+            RunnerOptionsField::SaveButton
+        );
+        update(&mut model, Message::Enter);
+        assert_eq!(model.runner_options.global_env.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn env_file_replaces_the_named_environment_for_campaigns_only() {
+        let mut model = series_model(&[]);
+        model.current_environment = Some("staging".into());
+        model.runner_options.env_file = Some(PathBuf::from("/abs/ci.bru"));
+        model.runner_options.global_env = Some("production".into());
+        let campaign = args(&started(update(&mut model, Message::RunSelected)));
+        assert!(!campaign.contains(&"--env".to_owned()), "{campaign:?}");
+        assert!(
+            campaign
+                .windows(2)
+                .any(|w| w == ["--env-file", "/abs/ci.bru"])
+        );
+        assert!(
+            campaign
+                .windows(2)
+                .any(|w| w == ["--global-env", "production"])
+        );
+
+        // Une requête seule garde l'environnement actif, sans options de campagne.
+        let mut model = series_model(&[]);
+        model.current_environment = Some("staging".into());
+        model.runner_options.env_file = Some(PathBuf::from("/abs/ci.bru"));
+        select(&mut model, "simple-get.bru");
+        let single = args(&started(update(&mut model, Message::RunSelected)));
+        assert!(single.windows(2).any(|w| w == ["--env", "staging"]));
+        assert!(!single.contains(&"--env-file".to_owned()));
     }
 }

@@ -107,9 +107,21 @@ impl RunRequest {
             args.push("--env".into());
             args.push(env.into());
         }
+        if let Some(env_file) = &self.options.env_file {
+            args.push("--env-file".into());
+            args.push(env_file.into());
+        }
         for (name, value) in &self.env_vars {
             args.push("--env-var".into());
             args.push(format!("{name}={}", value.expose()).into());
+        }
+        if let Some(global_env) = &self.options.global_env {
+            args.push("--global-env".into());
+            args.push(global_env.into());
+        }
+        if let Some(workspace) = &self.options.workspace_path {
+            args.push("--workspace-path".into());
+            args.push(workspace.into());
         }
         if !self.options.tags.is_empty() {
             args.push("--tags".into());
@@ -502,6 +514,37 @@ mod tests {
         assert_eq!(
             args(&request),
             ["run", "-r", "--reporter-json", "/dev/fd/3"]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_environment_options() {
+        let request = RunRequest {
+            env_vars: vec![("token".into(), SecretString::new("s"))],
+            options: RunnerOptions {
+                env_file: Some("/abs/envs/ci.bru".into()),
+                global_env: Some("production".into()),
+                workspace_path: Some("/abs/ws".into()),
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--env-file",
+                "/abs/envs/ci.bru",
+                "--env-var",
+                "token=s",
+                "--global-env",
+                "production",
+                "--workspace-path",
+                "/abs/ws",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
         );
     }
 }

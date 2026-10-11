@@ -23,6 +23,14 @@ pub enum RunnerOptionsError {
     InvalidIterationCount(String),
     #[error("--parallel ne peut être utilisé qu'avec --csv-file-path ou --json-file-path")]
     ParallelWithoutDataFile,
+    #[error("--env-file est exclusif avec la sélection d'environnements nommés")]
+    EnvFileWithEnvironments,
+    #[error("le fichier d'environnement '{0}' doit être un .bru ou un .json")]
+    InvalidEnvFileExtension(String),
+    #[error("le dossier '{0}' n'existe pas")]
+    DirectoryNotFound(String),
+    #[error("le dossier '{0}' n'est pas un workspace Bruno (workspace.yml absent)")]
+    NotAWorkspace(String),
 }
 
 /// Mode d'isolation JavaScript du runner `bru` (`--sandbox`).
@@ -92,6 +100,13 @@ pub struct RunnerOptions {
     pub reporter_html: Option<PathBuf>,
     /// Masque les en-têtes sensibles dans les rapports (`--reporter-skip-all-headers`).
     pub reporter_skip_all_headers: bool,
+    /// Chemin absolu d'un fichier d'environnement (`--env-file <path>`),
+    /// exclusif avec `--env`.
+    pub env_file: Option<PathBuf>,
+    /// Environnement global du workspace (`--global-env <nom>`).
+    pub global_env: Option<String>,
+    /// Chemin absolu du workspace (`--workspace-path <dossier>`).
+    pub workspace_path: Option<PathBuf>,
 }
 
 impl Default for RunnerOptions {
@@ -117,6 +132,9 @@ impl Default for RunnerOptions {
             reporter_junit: None,
             reporter_html: None,
             reporter_skip_all_headers: true,
+            env_file: None,
+            global_env: None,
+            workspace_path: None,
         }
     }
 }
@@ -143,6 +161,9 @@ impl RunnerOptions {
             || self.verbose
             || self.reporter_junit.is_some()
             || self.reporter_html.is_some()
+            || self.env_file.is_some()
+            || self.global_env.is_some()
+            || self.workspace_path.is_some()
     }
 }
 
@@ -170,6 +191,9 @@ pub struct RunnerOptionsConfig {
     pub export_junit: bool,
     pub export_html: bool,
     pub skip_headers: bool,
+    pub env_file: Option<PathBuf>,
+    pub global_env: Option<String>,
+    pub workspace_path: Option<PathBuf>,
 }
 
 impl Default for RunnerOptionsConfig {
@@ -196,6 +220,9 @@ impl Default for RunnerOptionsConfig {
             export_junit: false,
             export_html: false,
             skip_headers: true,
+            env_file: None,
+            global_env: None,
+            workspace_path: None,
         }
     }
 }
@@ -223,6 +250,9 @@ impl RunnerOptionsConfig {
             || self.verbose
             || self.export_junit
             || self.export_html
+            || self.env_file.is_some()
+            || self.global_env.is_some()
+            || self.workspace_path.is_some()
     }
 
     /// Résumé textuel court des options actives pour l'affichage en ligne d'état ou en-tête.
@@ -230,6 +260,23 @@ impl RunnerOptionsConfig {
         let mut parts = Vec::new();
         if !self.environments.is_empty() {
             parts.push(format!("envs: {}", self.environments.join(",")));
+        }
+        if let Some(env_file) = &self.env_file {
+            let name = env_file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("env-file");
+            parts.push(format!("env-file: {name}"));
+        }
+        if let Some(global_env) = &self.global_env {
+            parts.push(format!("global-env: {global_env}"));
+        }
+        if let Some(workspace) = &self.workspace_path {
+            let name = workspace
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("workspace");
+            parts.push(format!("workspace: {name}"));
         }
         if !self.tags.is_empty() {
             parts.push(format!("tags: {}", self.tags.join(",")));
@@ -347,6 +394,9 @@ impl RunnerOptionsConfig {
             reporter_junit,
             reporter_html,
             reporter_skip_all_headers: self.skip_headers,
+            env_file: self.env_file.clone(),
+            global_env: self.global_env.clone(),
+            workspace_path: self.workspace_path.clone(),
         };
 
         (options, reports_paths)
@@ -423,18 +473,63 @@ pub fn parse_existing_file_path(input: &str) -> Result<Option<PathBuf>, RunnerOp
     if trimmed.is_empty() {
         return Ok(None);
     }
-    let path = Path::new(trimmed);
-    let resolved = if path.is_absolute() {
+    let resolved = absolute(Path::new(trimmed));
+    if !resolved.exists() {
+        return Err(RunnerOptionsError::FileNotFound(trimmed.to_string()));
+    }
+    Ok(Some(resolved))
+}
+
+/// Résout une saisie de chemin en chemin absolu (relatif au répertoire courant).
+fn absolute(path: &Path) -> PathBuf {
+    if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
+    }
+}
+
+/// Analyse un fichier d'environnement pour `--env-file` : existant, `.bru`
+/// ou `.json` (formats acceptés par `bru`), rendu absolu.
+pub fn parse_env_file_path(input: &str) -> Result<Option<PathBuf>, RunnerOptionsError> {
+    let Some(path) = parse_existing_file_path(input)? else {
+        return Ok(None);
     };
-    if !resolved.exists() {
-        return Err(RunnerOptionsError::FileNotFound(trimmed.to_string()));
+    let accepted = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("bru") || ext.eq_ignore_ascii_case("json"));
+    if !path.is_file() || !accepted {
+        return Err(RunnerOptionsError::InvalidEnvFileExtension(
+            input.trim().to_string(),
+        ));
+    }
+    Ok(Some(path))
+}
+
+/// Analyse un dossier de workspace pour `--workspace-path` : existant et
+/// contenant `workspace.yml` (exigé par `bru`), rendu absolu.
+pub fn parse_workspace_path(input: &str) -> Result<Option<PathBuf>, RunnerOptionsError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let resolved = absolute(Path::new(trimmed));
+    if !resolved.is_dir() {
+        return Err(RunnerOptionsError::DirectoryNotFound(trimmed.to_string()));
+    }
+    if !resolved.join("workspace.yml").is_file() {
+        return Err(RunnerOptionsError::NotAWorkspace(trimmed.to_string()));
     }
     Ok(Some(resolved))
+}
+
+/// Nom d'environnement global : saisie rognée, `None` si vide.
+pub fn parse_global_env(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Analyse une saisie de nombre d'itérations et valide qu'il s'agit d'un entier positif non nul.
@@ -539,6 +634,86 @@ mod tests {
             parse_existing_file_path("non_existent_file_xyz.pem"),
             Err(RunnerOptionsError::FileNotFound(f)) if f == "non_existent_file_xyz.pem"
         ));
+    }
+
+    #[test]
+    fn parse_env_file_path_accepts_bru_and_json_only() {
+        assert_eq!(parse_env_file_path("  ").unwrap(), None);
+        let bru =
+            parse_env_file_path("tests/fixtures/collections/multi-env-probe/environments/up.bru")
+                .unwrap()
+                .unwrap();
+        assert!(bru.is_absolute());
+        let json = parse_env_file_path("tests/fixtures/reports/mixed.json")
+            .unwrap()
+            .unwrap();
+        assert!(json.is_absolute());
+        assert!(matches!(
+            parse_env_file_path("Cargo.toml"),
+            Err(RunnerOptionsError::InvalidEnvFileExtension(f)) if f == "Cargo.toml"
+        ));
+        // Un dossier n'est pas un fichier d'environnement.
+        assert!(matches!(
+            parse_env_file_path("tests/fixtures/collections/multi-env-probe/environments"),
+            Err(RunnerOptionsError::InvalidEnvFileExtension(_))
+        ));
+        assert!(matches!(
+            parse_env_file_path("absent.bru"),
+            Err(RunnerOptionsError::FileNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn parse_workspace_path_requires_a_workspace_yml() {
+        assert_eq!(parse_workspace_path("").unwrap(), None);
+        assert!(matches!(
+            parse_workspace_path("dossier-absent-xyz"),
+            Err(RunnerOptionsError::DirectoryNotFound(d)) if d == "dossier-absent-xyz"
+        ));
+        assert!(matches!(
+            parse_workspace_path("Cargo.toml"),
+            Err(RunnerOptionsError::DirectoryNotFound(_))
+        ));
+        assert!(matches!(
+            parse_workspace_path("tests"),
+            Err(RunnerOptionsError::NotAWorkspace(d)) if d == "tests"
+        ));
+        let dir = std::env::temp_dir().join(format!("bruno-tui-workspace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("workspace.yml"), "").unwrap();
+        let parsed = parse_workspace_path(dir.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed, dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parse_global_env_trims_and_drops_empty() {
+        assert_eq!(parse_global_env("   "), None);
+        assert_eq!(parse_global_env(" production "), Some("production".into()));
+        assert_eq!(parse_global_env("Prod EU"), Some("Prod EU".into()));
+    }
+
+    #[test]
+    fn environment_options_are_summarised_and_forwarded() {
+        let config = RunnerOptionsConfig {
+            env_file: Some(PathBuf::from("/abs/envs/ci.bru")),
+            global_env: Some("production".into()),
+            workspace_path: Some(PathBuf::from("/abs/ws")),
+            ..RunnerOptionsConfig::default()
+        };
+        assert!(config.has_active_options());
+        assert_eq!(
+            config.summary(),
+            "env-file: ci.bru · global-env: production · workspace: ws"
+        );
+        let (options, reports) = config.build_runner_options(Path::new("/inutilisé"));
+        assert!(reports.is_empty());
+        assert_eq!(options.env_file, config.env_file);
+        assert_eq!(options.global_env, config.global_env);
+        assert_eq!(options.workspace_path, config.workspace_path);
+        assert!(options.has_active_options());
     }
 
     #[test]

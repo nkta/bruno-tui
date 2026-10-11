@@ -1497,12 +1497,16 @@ pub enum RunnerOptionsField {
     ReporterJunit,
     ReporterHtml,
     SkipHeaders,
+    /// Fichier d'environnement (`--env-file`), après les cases d'environnement.
+    EnvFile,
+    GlobalEnv,
+    WorkspacePath,
     SaveButton,
     RunButton,
 }
 
 impl RunnerOptionsField {
-    pub const STATIC_COUNT: usize = 22;
+    pub const STATIC_COUNT: usize = 25;
     /// Indice fixe avant lequel s'insèrent les cases d'environnement.
     pub const ENVIRONMENTS_AT: usize = 20;
 
@@ -1529,7 +1533,10 @@ impl RunnerOptionsField {
             17 => Self::ReporterJunit,
             18 => Self::ReporterHtml,
             19 => Self::SkipHeaders,
-            20 => Self::SaveButton,
+            20 => Self::EnvFile,
+            21 => Self::GlobalEnv,
+            22 => Self::WorkspacePath,
+            23 => Self::SaveButton,
             _ => Self::RunButton,
         }
     }
@@ -1545,6 +1552,9 @@ impl RunnerOptionsField {
                 | Self::CsvFilePath
                 | Self::JsonFilePath
                 | Self::IterationCount
+                | Self::EnvFile
+                | Self::GlobalEnv
+                | Self::WorkspacePath
         )
     }
 
@@ -1575,6 +1585,9 @@ pub struct RunnerOptionsPopup {
     pub available_environments: Vec<String>,
     /// Environnements cochés pour la campagne.
     pub selected_environments: Vec<String>,
+    pub env_file_input: TextInput,
+    pub global_env_input: TextInput,
+    pub workspace_path_input: TextInput,
     pub tags_input: TextInput,
     pub exclude_tags_input: TextInput,
     pub delay_input: TextInput,
@@ -1615,6 +1628,26 @@ impl RunnerOptionsPopup {
         Self {
             available_environments,
             selected_environments: config.environments.clone(),
+            env_file_input: TextInput::new(
+                &config
+                    .env_file
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
+            global_env_input: TextInput::new(
+                config.global_env.as_deref().unwrap_or_default(),
+                false,
+            ),
+            workspace_path_input: TextInput::new(
+                &config
+                    .workspace_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
             tags_input: TextInput::new(&config.tags.join(", "), false),
             exclude_tags_input: TextInput::new(&config.exclude_tags.join(", "), false),
             delay_input: TextInput::new(
@@ -1722,14 +1755,23 @@ impl RunnerOptionsPopup {
             return Err(RunnerOptionsError::ParallelWithoutDataFile);
         }
         // Ordre de la collection, quel que soit l'ordre des coches.
-        let environments = self
+        let environments: Vec<String> = self
             .available_environments
             .iter()
             .filter(|name| self.selected_environments.contains(name))
             .cloned()
             .collect();
+        let env_file = crate::runner::parse_env_file_path(self.env_file_input.text())?;
+        if env_file.is_some() && !environments.is_empty() {
+            return Err(RunnerOptionsError::EnvFileWithEnvironments);
+        }
+        let global_env = crate::runner::parse_global_env(self.global_env_input.text());
+        let workspace_path = crate::runner::parse_workspace_path(self.workspace_path_input.text())?;
         Ok(RunnerOptionsConfig {
             environments,
+            env_file,
+            global_env,
+            workspace_path,
             tags,
             exclude_tags,
             delay_ms,
@@ -1802,6 +1844,9 @@ impl RunnerOptionsPopup {
             RunnerOptionsField::CsvFilePath => Some(&mut self.csv_file_path_input),
             RunnerOptionsField::JsonFilePath => Some(&mut self.json_file_path_input),
             RunnerOptionsField::IterationCount => Some(&mut self.iteration_count_input),
+            RunnerOptionsField::EnvFile => Some(&mut self.env_file_input),
+            RunnerOptionsField::GlobalEnv => Some(&mut self.global_env_input),
+            RunnerOptionsField::WorkspacePath => Some(&mut self.workspace_path_input),
             _ => None,
         }
     }
