@@ -110,6 +110,9 @@ pub fn method_style(method: &str) -> Style {
         "PUT" => Color::Rgb(230, 160, 80),
         "PATCH" => Color::Rgb(120, 170, 240),
         "DELETE" => Color::Rgb(240, 105, 90),
+        // Types non HTTP (gRPC, WebSocket), affichés à la place de la méthode.
+        "GRPC" => Color::Rgb(90, 200, 190),
+        "WS" => Color::Rgb(220, 200, 90),
         _ => Color::Rgb(170, 170, 175),
     };
     Style::new().fg(color)

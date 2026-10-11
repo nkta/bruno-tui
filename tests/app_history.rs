@@ -57,6 +57,7 @@ fn spawn_run(
     events: mpsc::Receiver<AppEvent>,
     bru_program: PathBuf,
     size: (u16, u16),
+    history: bool,
 ) -> tokio::task::JoinHandle<RunResult> {
     tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
@@ -73,6 +74,7 @@ fn spawn_run(
             bruno_tui::app::mouse::MouseSetup::terminal(false),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             false,
+            history,
         )
         .await;
         let Ok(exit) = result;
@@ -110,9 +112,31 @@ async fn spawn_app(
     tokio::task::JoinHandle<RunResult>,
     std_mpsc::Sender<()>,
 ) {
+    spawn_app_with_history(collection, root, bru_program, size, false).await
+}
+
+async fn spawn_app_with_history(
+    collection: Collection,
+    root: PathBuf,
+    bru_program: PathBuf,
+    size: (u16, u16),
+    history: bool,
+) -> (
+    mpsc::Sender<AppEvent>,
+    tokio::task::JoinHandle<RunResult>,
+    std_mpsc::Sender<()>,
+) {
     let (loader, open) = GateLoader::new();
     let (sender, events) = mpsc::channel(EVENT_BUFFER);
-    let handle = spawn_run(loader, root, sender.clone(), events, bru_program, size);
+    let handle = spawn_run(
+        loader,
+        root,
+        sender.clone(),
+        events,
+        bru_program,
+        size,
+        history,
+    );
     sender
         .send(AppEvent::CollectionLoaded(Ok(collection)))
         .await
@@ -242,5 +266,72 @@ async fn diagnostics_panel_cross_navigates_to_tree() {
     assert!(
         screen.contains("badmeta"),
         "badmeta doit être présent dans l'arbre : {screen}"
+    );
+}
+
+#[tokio::test]
+async fn persisted_history_is_loaded_into_panel() {
+    let temp_state =
+        std::env::temp_dir().join(format!("bruno-tui-test-history-xdg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_state);
+    let app_state_dir = temp_state.join("bruno-tui");
+    std::fs::create_dir_all(&app_state_dir).expect("création state dir");
+
+    let root = runner_probe();
+    let col_key = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.clone())
+        .to_string_lossy()
+        .into_owned();
+
+    let json = serde_json::json!({
+        col_key: [{
+            "started_at_epoch_ms": 1700000000000u64,
+            "target": "persisted-probe.bru",
+            "recursive": false,
+            "outcome": {
+                "verdict": "completed",
+                "total": 1,
+                "failed": 0,
+                "duration_secs": 0.5
+            }
+        }]
+    });
+    std::fs::write(app_state_dir.join("history.json"), json.to_string()).expect("écriture history");
+
+    unsafe {
+        std::env::set_var("XDG_STATE_HOME", &temp_state);
+    }
+
+    let collection = BruLoader.load(&root).expect("collection chargée");
+    let (sender, handle, open) =
+        spawn_app_with_history(collection, root, fake_bru(), (120, 30), true).await;
+
+    // Laisse le temps au chargement asynchrone de l'historique de se produire
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Bascule sur le panneau d'historique avec 'H'
+    sender.send(key(KeyCode::Char('H'))).await.expect("envoi");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Quitte l'application avec 'q'
+    sender.send(key(KeyCode::Char('q'))).await.expect("envoi");
+
+    let (terminal, exit) = timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("run retourne")
+        .expect("tâche");
+    let _ = open.send(());
+    assert!(matches!(exit, Exit::Normal));
+
+    unsafe {
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+    let _ = std::fs::remove_dir_all(&temp_state);
+
+    let screen = screen(&terminal).join("\n");
+    assert!(
+        screen.contains("persisted-probe.bru"),
+        "l'entrée persistée doit être visible dans le panneau d'historique : {screen}"
     );
 }

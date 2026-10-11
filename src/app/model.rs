@@ -159,6 +159,29 @@ impl RequestTab {
     }
 }
 
+/// Onglets disponibles pour un dossier (`folder.bru` / `folder.yml`) ou
+/// pour la collection (`collection.bru` / `opencollection.yml`).
+pub const FOLDER_TABS: [RequestTab; 6] = [
+    RequestTab::Headers,
+    RequestTab::Auth,
+    RequestTab::Vars,
+    RequestTab::Script,
+    RequestTab::Tests,
+    RequestTab::Docs,
+];
+
+/// Fait tourner l'onglet vers la droite parmi `FOLDER_TABS`.
+pub fn next_folder_tab(tab: RequestTab) -> RequestTab {
+    let index = FOLDER_TABS.iter().position(|t| *t == tab).unwrap_or(0);
+    FOLDER_TABS[(index + 1) % FOLDER_TABS.len()]
+}
+
+/// Fait tourner l'onglet vers la gauche parmi `FOLDER_TABS`.
+pub fn previous_folder_tab(tab: RequestTab) -> RequestTab {
+    let index = FOLDER_TABS.iter().position(|t| *t == tab).unwrap_or(0);
+    FOLDER_TABS[(index + FOLDER_TABS.len() - 1) % FOLDER_TABS.len()]
+}
+
 /// État du popup d'aide des raccourcis clavier (`help-popup`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HelpPopup {
@@ -1126,7 +1149,7 @@ pub fn field_display_name(field: &EditableField, view: &RequestView) -> String {
 }
 
 /// Confirmation en attente avant une action destructive ou sensible (D6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingConfirm {
     /// Fermer la session en cours (Échap) malgré des modifications.
     DiscardEdit,
@@ -1134,6 +1157,24 @@ pub enum PendingConfirm {
     QuitWithUnsavedEdit,
     /// Copier la commande curl avec les secrets en clair (en-têtes d'auth).
     CopyUnmaskedCurl,
+    /// Écraser un fichier existant lors de l'export du corps de réponse.
+    OverwriteExport { path: PathBuf, bytes: Vec<u8> },
+}
+
+/// État de saisie du chemin pour l'export du corps de réponse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportInputState {
+    pub input: super::text_input::TextInput,
+    pub bytes: Vec<u8>,
+}
+
+impl ExportInputState {
+    pub fn new(default_path: &str, bytes: Vec<u8>) -> Self {
+        Self {
+            input: super::text_input::TextInput::new(default_path, false),
+            bytes,
+        }
+    }
 }
 
 /// Résultat d'une sauvegarde réussie (D7).
@@ -1296,6 +1337,13 @@ pub struct Model {
     pub campaign_view: CampaignView,
     /// Colonne (environnement) sélectionnée dans le tableau comparatif.
     pub comparison_column: usize,
+    /// Indique si la collection racine est sélectionnée pour affichage dans
+    /// le panneau Détail (`collection.bru` / `opencollection.yml`).
+    pub selected_collection: bool,
+    /// Saisie du chemin pour l'export du corps de réponse.
+    pub export_input: Option<ExportInputState>,
+    /// Persistance de l'historique active (désactivée par `--no-history`).
+    pub history_enabled: bool,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -1416,6 +1464,16 @@ pub enum StatusMessage {
     /// Édition ou enregistrement refusé : la collection est au format
     /// OpenCollection (YAML), que le writer ne sait pas écrire.
     ReadOnlyCollection,
+    /// `r` sur une requête gRPC ou WebSocket (libellé du type) : `bru run`
+    /// 4.2.1 ne sait pas l'exécuter, rien n'est lancé.
+    NotExecutable(&'static str),
+    /// Édition refusée sur une requête gRPC ou WebSocket (libellé du
+    /// type) : le writer ne connaît que les requêtes HTTP.
+    ReadOnlyRequestType(&'static str),
+    /// Corps de réponse exporté dans un fichier.
+    ResponseExported(PathBuf),
+    /// Échec de l'export du corps de réponse.
+    ExportError(String),
     /// Cellule du tableau comparatif sans résultat pour cet environnement.
     NoEnvironmentResult(String),
 }
@@ -1922,24 +1980,66 @@ impl Model {
             comparison: None,
             campaign_view: CampaignView::List,
             comparison_column: 0,
+            selected_collection: false,
+            export_input: None,
+            history_enabled: false,
         }
     }
 
-    /// Onglet affiché du détail de la requête sélectionnée : pendant une
-    /// session d'édition sur cette requête, celui du champ sous le curseur
-    /// (la méthode et l'URL gardent l'onglet choisi) ; sinon l'onglet
-    /// choisi.
+    /// Vrai si la collection racine est sélectionnée pour affichage dans le
+    /// panneau Détail.
+    pub fn is_collection_selected(&self) -> bool {
+        self.selected_collection
+    }
+
+    /// Vrai si un dossier est sélectionné dans l'arbre.
+    pub fn is_folder_selected(&self) -> bool {
+        !self.selected_collection && matches!(self.selected_node(), Some(TreeNode::Folder(_)))
+    }
+
+    /// Vrai si un dossier ou la collection est sélectionné.
+    pub fn is_folder_or_collection_selected(&self) -> bool {
+        self.selected_collection || matches!(self.selected_node(), Some(TreeNode::Folder(_)))
+    }
+
+    /// Métadonnées (`FileMeta`) du dossier ou de la collection sélectionné,
+    /// si applicable.
+    pub fn folder_meta(
+        &self,
+    ) -> Option<&Result<crate::collection::FileMeta, crate::collection::ParseError>> {
+        if self.selected_collection {
+            self.loaded().and_then(|c| c.settings.as_ref())
+        } else {
+            match self.selected_node() {
+                Some(TreeNode::Folder(f)) => f.meta.as_ref(),
+                _ => None,
+            }
+        }
+    }
+
+    /// Onglet affiché du détail : pour une requête en session d'édition,
+    /// celui du champ sous le curseur ; pour un dossier ou la collection,
+    /// l'onglet choisi restreint à [`FOLDER_TABS`] (défaut [`RequestTab::Headers`]) ;
+    /// sinon l'onglet choisi.
     pub fn shown_request_tab(&self) -> RequestTab {
-        let session_tab = match self.selected_node() {
-            Some(TreeNode::Request(request)) => self
-                .editing
-                .as_ref()
-                .filter(|session| session.path == request.path)
-                .and_then(EditSession::current_field)
-                .and_then(RequestTab::of_field),
-            _ => None,
-        };
-        session_tab.unwrap_or(self.request_tab)
+        if self.is_folder_or_collection_selected() {
+            if FOLDER_TABS.contains(&self.request_tab) {
+                self.request_tab
+            } else {
+                RequestTab::Headers
+            }
+        } else {
+            let session_tab = match self.selected_node() {
+                Some(TreeNode::Request(request)) => self
+                    .editing
+                    .as_ref()
+                    .filter(|session| session.path == request.path)
+                    .and_then(EditSession::current_field)
+                    .and_then(RequestTab::of_field),
+                _ => None,
+            };
+            session_tab.unwrap_or(self.request_tab)
+        }
     }
 
     /// Panneau actuellement zoomé en plein écran s'il y en a un
@@ -2012,6 +2112,9 @@ impl Model {
         }
         if self.tree_filter.as_ref().is_some_and(|f| f.editing) {
             return Some(TextCapture::TreeFilter);
+        }
+        if self.export_input.is_some() {
+            return Some(TextCapture::ExportPath);
         }
         None
     }

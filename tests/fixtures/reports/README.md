@@ -127,3 +127,39 @@ verdicts divergent (tableau comparatif du panneau Campagne).
 | `skip` | `skipped` | `skipped` | sautée par `bru.runner.skipRequest()` |
 
 Aucun secret.
+
+## `grpc-ws.json`
+
+- Version : `bru` 4.2.1 (Node 22.19.0, Linux)
+- Date de capture : 2026-10-11
+- Collection : `tests/fixtures/collections/grpc-ws-probe/`
+- Commande : `bru run -r --reporter-json /dev/fd/3 3>grpc-ws.json` avec serveur de test sur 127.0.0.1:18765
+- Code de sortie : 1
+
+Cas couverts :
+
+| Requête | `status` | `response.status` | `error` | Particularité |
+|---|---|---|---|---|
+| `say-hello.bru` | `error` | `"error"` | `"Unsupported protocol grpc:"` | requête gRPC non supportée par le CLI bru 4.2.1 |
+| `echo.bru` | `error` | `"error"` | `"Unsupported protocol ws:"` | requête WebSocket non supportée par le CLI bru 4.2.1 |
+| `ping.bru` | `pass` | `200` | `null` | requête HTTP exécutée avec succès dans la même campagne |
+
+Aucune requête gRPC ni WebSocket n'est exécutée : `bru` 4.2.1 les envoie
+comme des requêtes HTTP et l'URL `grpc://` ou `ws://` échoue aussitôt. Leurs
+blocs `tests` ne sont pas lancés (`totalTests: 0`). La campagne continue.
+Pour la requête WebSocket, `request.method` vaut `""`.
+
+## `oc-grpc-ws.json`
+
+- Version : `bru` 4.2.1 (Node 22.19.0, Linux)
+- Date de capture : 2026-10-12
+- Collection : `tests/fixtures/collections/oc-grpc-ws-probe/` (YAML)
+- Commande : `bru run -r --reporter-json /dev/fd/3 3>oc-grpc-ws.json` avec serveur de test sur 127.0.0.1:18765
+- Code de sortie : 1
+
+Mêmes constats que `grpc-ws.json`, avec deux différences :
+
+| Requête | Particularité |
+|---|---|
+| `say hello.yml` | seules les métadonnées actives sont dans `request.headers` ; jeton bearer masqué par `bru` (`Bearer ********`) |
+| `echo.yml` | clé `request.method` absente (et non vide) |

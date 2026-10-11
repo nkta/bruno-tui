@@ -12,13 +12,15 @@ use super::detail::{
     SectionBox, detail_section_boxes, detail_text, is_box_border, line_width,
     response_gutter_width, response_text,
 };
-use super::detail::{URL_BAR_METHOD_SUFFIX, request_tab_at, url_bar_values};
+use super::detail::{URL_BAR_METHOD_SUFFIX, folder_tab_at, request_tab_at, url_bar_values};
 use super::{detail_wraps, inner, layout_for, response_text_area};
 use crate::app::model::{DragPanel, EditableField, Model, RequestTab};
 
 /// Cible d'un événement souris.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
+    /// En-tête du panneau Collection (sélection de la collection racine).
+    TreeHeader,
     /// Arbre : indice dans `tree.rows`, `None` sur la bordure ou sous la
     /// dernière ligne.
     Tree { row: Option<usize> },
@@ -30,7 +32,7 @@ pub enum Hit {
     RunButton,
     /// Barre d'URL : champ Méthode ou URL sous le pointeur.
     UrlBar { field: EditableField },
-    /// Onglet de la bordure haute du détail d'une requête.
+    /// Onglet de la bordure haute du détail d'une requête ou d'un dossier.
     RequestTab(RequestTab),
 }
 
@@ -38,13 +40,13 @@ pub enum Hit {
 pub const RUN_BUTTON: &str = " ▶ Lancer (r) ";
 
 /// Zone du bouton « Lancer », calée à droite sur la ligne intérieure de
-/// la barre d'URL `url_bar` : présent seulement sur une requête, hors
-/// session d'édition, et si la barre est assez large. Partagée par le
-/// rendu et le clic.
+/// la barre d'URL `url_bar` : présent seulement sur une requête que
+/// `bru run` exécute (ni gRPC ni WebSocket), hors session d'édition, et si
+/// la barre est assez large. Partagée par le rendu et le clic.
 pub fn run_button_area(model: &Model, url_bar: Rect) -> Option<Rect> {
     let is_request = matches!(
         model.selected_node(),
-        Some(crate::collection::TreeNode::Request(_))
+        Some(crate::collection::TreeNode::Request(request)) if request.view.is_http()
     );
     let width = u16::try_from(Line::raw(RUN_BUTTON).width()).ok()?;
     if !is_request || model.editing.is_some() || url_bar.width < width + 4 || url_bar.height < 3 {
@@ -95,6 +97,12 @@ pub fn hit_test(model: &Model, column: u16, row: u16) -> Option<Hit> {
     let areas = layout_for(model.size, model.zoomed_panel())?;
     let position = Position::new(column, row);
     if areas.tree.contains(position) {
+        if position.y == areas.tree.y
+            && position.x > areas.tree.x
+            && position.x < areas.tree.right().saturating_sub(1)
+        {
+            return Some(Hit::TreeHeader);
+        }
         let area = inner(areas.tree);
         let index = area
             .contains(position)
@@ -108,20 +116,30 @@ pub fn hit_test(model: &Model, column: u16, row: u16) -> Option<Hit> {
     if let Some(field) = url_bar_field(model, areas.url_bar, position) {
         return Some(Hit::UrlBar { field });
     }
-    if position.y == areas.detail.y
-        && areas.detail.contains(position)
-        && matches!(
+    if position.y == areas.detail.y && areas.detail.contains(position) {
+        if matches!(
             model.selected_node(),
             Some(crate::collection::TreeNode::Request(_))
-        )
-        && let Some(tab) = request_tab_at(
-            model.shown_request_tab(),
-            areas.detail.width.saturating_sub(2),
-            position.x - areas.detail.x,
-        )
-    {
-        return Some(Hit::RequestTab(tab));
+        ) && !model.selected_collection
+            && let Some(tab) = request_tab_at(
+                model.shown_request_tab(),
+                areas.detail.width.saturating_sub(2),
+                position.x - areas.detail.x,
+            )
+        {
+            return Some(Hit::RequestTab(tab));
+        }
+        if model.folder_meta().is_some_and(Result::is_ok)
+            && let Some(tab) = folder_tab_at(
+                model.shown_request_tab(),
+                areas.detail.width.saturating_sub(2),
+                position.x - areas.detail.x,
+            )
+        {
+            return Some(Hit::RequestTab(tab));
+        }
     }
+
     if areas.detail.contains(position) {
         return Some(Hit::Detail {
             line: content_line(model, DragPanel::Detail, areas.detail, position),

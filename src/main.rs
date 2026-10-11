@@ -20,13 +20,14 @@ use tokio::sync::mpsc;
 const USAGE_ERROR: u8 = 2;
 
 fn main() -> ExitCode {
-    let (path, secrets, mouse, watch) = match cli::parse(std::env::args_os().skip(1)) {
+    let (path, secrets, mouse, watch, history) = match cli::parse(std::env::args_os().skip(1)) {
         Ok(Command::Run {
             path,
             secrets,
             mouse,
             watch,
-        }) => (path, secrets, mouse, watch),
+            history,
+        }) => (path, secrets, mouse, watch, history),
         Ok(Command::Help) => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -46,6 +47,9 @@ fn main() -> ExitCode {
         eprintln!("bruno-tui : la sortie standard n'est pas un terminal interactif");
         return ExitCode::FAILURE;
     }
+
+    // Avant tout autre thread : voir `clock::init_local_offset`.
+    bruno_tui::app::clock::init_local_offset();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -100,6 +104,7 @@ fn main() -> ExitCode {
             mouse_setup,
             suspended,
             watch,
+            history,
         )),
         Err(error) => Ok(Exit::TerminalError(error)),
     };

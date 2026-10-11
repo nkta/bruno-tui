@@ -82,6 +82,7 @@ fn spawn_run(
             bruno_tui::app::mouse::MouseSetup::terminal(false),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             watch,
+            false,
         )
         .await;
         let Ok(exit) = result;

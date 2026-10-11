@@ -88,7 +88,11 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "r",
-                effect: "lancer la requête (ou récursivement un dossier)",
+                effect: "lancer la requête (ou récursivement un dossier / la collection) ; refusé pour gRPC/WebSocket",
+            },
+            HelpEntry {
+                key: "c",
+                effect: "sélectionner la collection racine (affiche collection.bru dans le Détail)",
             },
             HelpEntry {
                 key: "O",
@@ -125,11 +129,11 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "←/h, →/l",
-                effect: "onglet précédent/suivant de la requête (hors édition)",
+                effect: "onglet précédent/suivant (requête, dossier ou collection)",
             },
             HelpEntry {
                 key: "Entrée / e",
-                effect: "ouvrir une session d'édition (refusée pour une collection YAML)",
+                effect: "ouvrir une session d'édition (refusée en YAML et pour gRPC/WebSocket)",
             },
             HelpEntry {
                 key: "/",
@@ -248,6 +252,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 key: "Ctrl+E",
                 effect: "ouvrir le corps brut dans l'éditeur externe",
+            },
+            HelpEntry {
+                key: "x",
+                effect: "exporter le corps brut dans un fichier",
             },
             HelpEntry {
                 key: "Échap",

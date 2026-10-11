@@ -13,11 +13,11 @@ use super::model::{
     CampaignComparison, CampaignFailure, CampaignFilter, CampaignItem, CampaignItemStatus,
     CampaignSummary, CampaignView, ClipboardSource, CollectionState, DetailSelection, Drag,
     DragPanel, EditSession, EditState, EditableField, EnvRun, EnvRunOutcome, EnvSeries,
-    EnvironmentEditSession, EnvironmentEditState, Exit, Focus, HistoryEntry, HistoryOutcome,
-    InputTarget, Model, RequestTab, ResponseTab, RunnerOptionsField, RunnerOptionsPopup,
-    SecretError, SecretInput, StatusMessage, all_rows, environment_name_at, field_enabled,
-    field_value, field_value_committed, secret_env_vars, secret_env_vars_for_env, secret_lookups,
-    secret_rows, secret_rows_for_env, secrets_panel_environment, section_entries,
+    EnvironmentEditSession, EnvironmentEditState, Exit, ExportInputState, Focus, HistoryEntry,
+    HistoryOutcome, InputTarget, Model, RequestTab, ResponseTab, RunnerOptionsField,
+    RunnerOptionsPopup, SecretError, SecretInput, StatusMessage, all_rows, environment_name_at,
+    field_enabled, field_value, field_value_committed, secret_env_vars, secret_env_vars_for_env,
+    secret_lookups, secret_rows, secret_rows_for_env, secrets_panel_environment, section_entries,
     selected_response_body, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
@@ -98,6 +98,24 @@ pub enum Command {
     /// dans `spawn_blocking` via `CollectionLoader::load` et renvoie le
     /// résultat à `update` via `Message::CollectionLoaded`.
     ReloadCollection,
+    /// Exporter le corps brut de la réponse dans un fichier ; la boucle
+    /// l'exécute dans `spawn_blocking` via `std::fs::write` et renvoie
+    /// le résultat à `update` via `Message::ResponseBodyExported`.
+    ExportResponseBody {
+        path: std::path::PathBuf,
+        bytes: Vec<u8>,
+    },
+    /// Regroupe plusieurs commandes à exécuter séquentiellement par la boucle.
+    Batch(Vec<Command>),
+    /// Charger l'historique persistant depuis le disque.
+    LoadHistory {
+        root: std::path::PathBuf,
+    },
+    /// Sauvegarder l'historique persistant sur le disque.
+    SaveHistory {
+        root: std::path::PathBuf,
+        history: Vec<super::model::HistoryEntry>,
+    },
 }
 
 /// Applique un message au modèle.
@@ -131,10 +149,10 @@ fn apply(model: &mut Model, message: Message) -> Command {
     if is_user_action(&message) {
         model.last_status = None;
     }
-    if let Some(confirm) = model.confirm {
+    if model.confirm.is_some() {
         return match message {
             Message::ConfirmYes | Message::Yank | Message::Right | Message::Enter => {
-                model.confirm = None;
+                let confirm = model.confirm.take().unwrap();
                 match confirm {
                     super::model::PendingConfirm::DiscardEdit => {
                         model.editing = None;
@@ -145,6 +163,9 @@ fn apply(model: &mut Model, message: Message) -> Command {
                         Command::None
                     }
                     super::model::PendingConfirm::CopyUnmaskedCurl => copy_curl(model, false),
+                    super::model::PendingConfirm::OverwriteExport { path, bytes } => {
+                        Command::ExportResponseBody { path, bytes }
+                    }
                 }
             }
             Message::ConfirmNo | Message::NextMatch | Message::FocusTree => {
@@ -157,6 +178,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 Command::None
             }
             Message::TerminalClosed(error) => {
+                model.confirm = None;
                 model.exit = Some(Exit::TerminalError(error));
                 Command::None
             }
@@ -270,19 +292,25 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::CollectionLoaded(result) => {
-            let command = match &result {
-                Ok(collection) => {
-                    let lookups = secret_lookups(&model.secrets.mappings, collection);
-                    if lookups.is_empty() {
-                        Command::None
-                    } else {
-                        Command::ResolveSecrets {
-                            root: collection.root.clone(),
-                            lookups,
-                        }
-                    }
+            let mut commands = Vec::new();
+            if let Ok(collection) = &result {
+                let lookups = secret_lookups(&model.secrets.mappings, collection);
+                if !lookups.is_empty() {
+                    commands.push(Command::ResolveSecrets {
+                        root: collection.root.clone(),
+                        lookups,
+                    });
                 }
-                Err(_) => Command::None,
+                if model.history_enabled {
+                    commands.push(Command::LoadHistory {
+                        root: collection.root.clone(),
+                    });
+                }
+            }
+            let command = match commands.len() {
+                0 => Command::None,
+                1 => commands.pop().unwrap(),
+                _ => Command::Batch(commands),
             };
             let is_reloading = matches!(model.collection, CollectionState::Loaded(_));
             // Échec d'un rechargement automatique (fichier momentanément
@@ -410,6 +438,11 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::Rename => match model.focus {
+            Focus::Tree => {
+                model.selected_collection = !model.selected_collection;
+                model.detail_scroll = 0;
+                Command::None
+            }
             Focus::Detail => {
                 start_rename(model);
                 Command::None
@@ -417,6 +450,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Focus::Response => copy_curl(model, true),
             _ => Command::None,
         },
+
         Message::CopyCurlFull => {
             if model.focus == Focus::Response {
                 copy_curl_full(model)
@@ -827,6 +861,113 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 Command::None
             }
         },
+        Message::ExportResponseBody => {
+            if model.focus == Focus::Response {
+                start_export_response_body(model);
+            }
+            Command::None
+        }
+        Message::ExportPathInput(c) => {
+            if let Some(state) = &mut model.export_input {
+                state.input.insert(c);
+            }
+            Command::None
+        }
+        Message::ExportPathBackspace => {
+            if let Some(state) = &mut model.export_input {
+                state.input.backspace();
+            }
+            Command::None
+        }
+        Message::ExportPathDelete => {
+            if let Some(state) = &mut model.export_input {
+                state.input.delete();
+            }
+            Command::None
+        }
+        Message::ExportPathLeft => {
+            if let Some(state) = &mut model.export_input {
+                state.input.left();
+            }
+            Command::None
+        }
+        Message::ExportPathRight => {
+            if let Some(state) = &mut model.export_input {
+                state.input.right();
+            }
+            Command::None
+        }
+        Message::ExportPathHome => {
+            if let Some(state) = &mut model.export_input {
+                state.input.home();
+            }
+            Command::None
+        }
+        Message::ExportPathEnd => {
+            if let Some(state) = &mut model.export_input {
+                state.input.end();
+            }
+            Command::None
+        }
+        Message::CancelExportPath => {
+            model.export_input = None;
+            Command::None
+        }
+        Message::ConfirmExportPath => {
+            if let Some(state) = model.export_input.take() {
+                let trimmed = state.input.text().trim();
+                if trimmed.is_empty() {
+                    Command::None
+                } else {
+                    let path = std::path::PathBuf::from(trimmed);
+                    if path.exists() {
+                        model.confirm = Some(super::model::PendingConfirm::OverwriteExport {
+                            path,
+                            bytes: state.bytes,
+                        });
+                        Command::None
+                    } else {
+                        Command::ExportResponseBody {
+                            path,
+                            bytes: state.bytes,
+                        }
+                    }
+                }
+            } else {
+                Command::None
+            }
+        }
+        Message::ResponseBodyExported { path, result } => {
+            match result {
+                Ok(()) => {
+                    model.last_status = Some(StatusMessage::ResponseExported(path));
+                }
+                Err(reason) => {
+                    model.last_status = Some(StatusMessage::ExportError(reason));
+                }
+            }
+            Command::None
+        }
+        Message::HistoryLoaded {
+            root,
+            entries,
+            notice,
+        } => {
+            let is_matching_col = model.loaded().is_some_and(|col| col.root == root);
+            if is_matching_col {
+                model.history = std::collections::VecDeque::from(entries);
+                model.history_selected = 0;
+                if let Some(msg) = notice
+                    && let Some(col) = model.loaded_mut()
+                {
+                    col.notices.push(crate::collection::LoadNotice {
+                        path: std::path::PathBuf::from("history.json"),
+                        message: msg,
+                    });
+                }
+            }
+            Command::None
+        }
         Message::Mouse(input) => {
             // Le bouton « Lancer » déclenche une exécution, seule action
             // souris qui produit une commande.
@@ -871,10 +1012,30 @@ fn apply(model: &mut Model, message: Message) -> Command {
                         Message::Down => move_method_picker(model, 1),
                         _ => {}
                     },
-                    // Hors session : ←/→ changent d'onglet de requête.
+                    // Hors session : ←/→ changent d'onglet de requête ou dossier/collection.
                     None => match navigation {
-                        Message::Left => select_request_tab(model, model.request_tab.previous()),
-                        Message::Right => select_request_tab(model, model.request_tab.next()),
+                        Message::Left => {
+                            if model.is_folder_or_collection_selected() {
+                                select_request_tab(
+                                    model,
+                                    crate::app::model::previous_folder_tab(
+                                        model.shown_request_tab(),
+                                    ),
+                                );
+                            } else {
+                                select_request_tab(model, model.request_tab.previous());
+                            }
+                        }
+                        Message::Right => {
+                            if model.is_folder_or_collection_selected() {
+                                select_request_tab(
+                                    model,
+                                    crate::app::model::next_folder_tab(model.shown_request_tab()),
+                                );
+                            } else {
+                                select_request_tab(model, model.request_tab.next());
+                            }
+                        }
                         other => scroll_detail(model, other),
                     },
                     _ => scroll_detail(model, navigation),
@@ -906,11 +1067,26 @@ fn run_selected(model: &mut Model) -> Command {
             .history
             .get(model.history_selected)
             .map(|entry| (entry.target.clone(), entry.recursive)),
-        Focus::Tree | Focus::Detail | Focus::Response => match model.selected_node() {
-            Some(TreeNode::Request(request)) => Some((request.path.clone(), false)),
-            Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
-            Some(TreeNode::Error(_)) | None => None,
-        },
+        Focus::Tree | Focus::Detail | Focus::Response => {
+            if model.selected_collection {
+                Some((std::path::PathBuf::new(), true))
+            } else {
+                match model.selected_node() {
+                    // `bru run` 4.2.1 n'exécute ni gRPC ni WebSocket : rien
+                    // n'est lancé (voir `tests/fixtures/reports/grpc-ws.json`).
+                    Some(TreeNode::Request(request))
+                        if let Some(kind) = request.view.non_http_label() =>
+                    {
+                        model.last_status = Some(StatusMessage::NotExecutable(kind));
+                        return Command::None;
+                    }
+                    Some(TreeNode::Request(request)) => Some((request.path.clone(), false)),
+                    Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
+                    Some(TreeNode::Error(_)) | None => None,
+                }
+            }
+        }
+
         Focus::Campaign => {
             let target = model
                 .campaign
@@ -1364,6 +1540,11 @@ fn apply_global_search(model: &mut Model, message: Message) -> Command {
 /// `bru run` par environnement ; sinon une exécution unique sur
 /// l'environnement courant.
 fn begin_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> Command {
+    // Ni seule ni en série : `bru run` 4.2.1 n'exécute pas gRPC/WebSocket.
+    if let Some(kind) = non_executable_kind(model, &target) {
+        model.last_status = Some(StatusMessage::NotExecutable(kind));
+        return Command::None;
+    }
     let environments = if recursive {
         campaign_environments(model)
     } else {
@@ -1381,6 +1562,15 @@ fn begin_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> 
         return Command::None;
     }
     start_series(model, target, environments)
+}
+
+/// Libellé du type si `path` désigne une requête gRPC ou WebSocket.
+fn non_executable_kind(model: &Model, path: &std::path::Path) -> Option<&'static str> {
+    let collection = model.loaded()?;
+    match find_node_by_path(&collection.tree, path)? {
+        TreeNode::Request(request) => request.view.non_http_label(),
+        _ => None,
+    }
 }
 
 /// Environnements cochés dans les options de campagne et encore déclarés
@@ -1537,11 +1727,23 @@ fn run_failed_requests(model: &mut Model) -> Command {
     if failure_paths.is_empty() && !campaign.failures.is_empty() {
         failure_paths = campaign.failures.iter().map(|f| f.path.clone()).collect();
     }
+    let target = campaign.target.clone();
+    // Les échecs gRPC/WebSocket ne sont pas relancés : `bru run` ne les exécute pas.
+    let mut skipped_kind = None;
+    failure_paths.retain(|path| match non_executable_kind(model, path) {
+        Some(kind) => {
+            skipped_kind = Some(kind);
+            false
+        }
+        None => true,
+    });
     if failure_paths.is_empty() {
-        model.last_status = Some(StatusMessage::NoFailedRequests);
+        model.last_status = Some(match skipped_kind {
+            Some(kind) => StatusMessage::NotExecutable(kind),
+            None => StatusMessage::NoFailedRequests,
+        });
         return Command::None;
     }
-    let target = campaign.target.clone();
     if should_propose_secrets(model, model.current_environment.as_deref()) {
         propose_secrets(model, target, true, None, Vec::new());
         return Command::None;
@@ -1794,6 +1996,8 @@ fn is_background_result(message: &Message) -> bool {
             | Message::MouseCaptureChanged { .. }
             | Message::SecretsResolved { .. }
             | Message::WatchReload(_)
+            | Message::ResponseBodyExported { .. }
+            | Message::HistoryLoaded { .. }
     )
 }
 
@@ -2023,9 +2227,23 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) -> Command {
             });
         }
     }
-    match series_run {
-        Some(run) => advance_series(model, run),
-        None => Command::None,
+    // Série : l'exécution suivante prime. L'historique complet est
+    // enregistré par la dernière issue de la série.
+    if let Some(run) = series_run {
+        let next = advance_series(model, run);
+        if !matches!(next, Command::None) {
+            return next;
+        }
+    }
+    if model.history_enabled
+        && let Some(col) = model.loaded()
+    {
+        Command::SaveHistory {
+            root: col.root.clone(),
+            history: model.history.iter().cloned().collect(),
+        }
+    } else {
+        Command::None
     }
 }
 
@@ -2202,6 +2420,12 @@ fn navigate_tree(model: &mut Model, message: Message) {
     }
     let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
     let before = model.tree.selected;
+    if matches!(
+        message,
+        Message::Up | Message::Down | Message::Home | Message::End
+    ) {
+        model.selected_collection = false;
+    }
     match message {
         Message::Up => model.tree.selected = before.saturating_sub(1),
         Message::Down => model.tree.selected = (before + 1).min(len - 1),
@@ -2221,6 +2445,7 @@ fn select_row(model: &mut Model, index: usize) {
     if index >= model.tree.rows.len() {
         return;
     }
+    model.selected_collection = false;
     let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
     let before = model.tree.selected;
     model.tree.selected = index;
@@ -2281,6 +2506,10 @@ fn start_edit(model: &mut Model) {
     let Some(TreeNode::Request(request)) = model.selected_node() else {
         return;
     };
+    if let Some(kind) = request.view.non_http_label() {
+        model.last_status = Some(StatusMessage::ReadOnlyRequestType(kind));
+        return;
+    }
     if read_only_collection(model) {
         model.last_status = Some(StatusMessage::ReadOnlyCollection);
         return;
@@ -4266,12 +4495,19 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
     }
     model.mouse.drag = None;
     match hit {
+        Hit::TreeHeader => {
+            model.focus = Focus::Tree;
+            model.selected_collection = true;
+            model.detail_scroll = 0;
+        }
         Hit::Tree { row } => {
             model.focus = Focus::Tree;
             if let Some(index) = row {
+                model.selected_collection = false;
                 click_tree_row(model, index);
             }
         }
+
         Hit::Detail { line } => {
             model.focus = Focus::Detail;
             model.mouse.drag = line.map(|anchor| Drag {
@@ -4521,7 +4757,7 @@ fn mouse_wheel(model: &mut Model, input: MouseInput, up: bool) {
                 scroll_response(model, step());
             }
         }
-        Hit::RunButton | Hit::UrlBar { .. } | Hit::RequestTab(_) => {}
+        Hit::RunButton | Hit::UrlBar { .. } | Hit::RequestTab(_) | Hit::TreeHeader => {}
     }
 }
 
@@ -4688,6 +4924,44 @@ where
 /// Résout le programme éditeur à lancer depuis l'environnement réel du processus.
 pub fn resolve_editor() -> String {
     resolve_editor_with(|key| std::env::var(key).ok())
+}
+
+/// Prépare l'exportation du corps de réponse et ouvre la saisie du chemin.
+fn start_export_response_body(model: &mut Model) {
+    let Some(TreeNode::Request(request)) = model.selected_node() else {
+        model.last_status = Some(StatusMessage::NoResponseBody);
+        return;
+    };
+    let Some(outcome) = model.run.outcomes.get(&request.path) else {
+        model.last_status = Some(StatusMessage::NoResponseBody);
+        return;
+    };
+    let Some(bytes) = crate::app::export::raw_response_bytes(&outcome.result.response.data) else {
+        model.last_status = Some(StatusMessage::NoResponseBody);
+        return;
+    };
+    let ext = crate::app::export::detect_response_extension(
+        outcome.result.response.headers.as_ref(),
+        &outcome.result.response.data,
+    );
+    let req_name = request.view.name.as_deref().unwrap_or_else(|| {
+        request
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("requete")
+    });
+    let collection_root = model.loaded().map(|c| c.root.as_path());
+    let default_path = crate::app::export::default_export_path(
+        collection_root,
+        req_name,
+        ext,
+        std::time::SystemTime::now(),
+    );
+    model.export_input = Some(ExportInputState::new(
+        &default_path.to_string_lossy(),
+        bytes,
+    ));
 }
 
 #[cfg(test)]
@@ -5985,6 +6259,32 @@ mod tests {
         assert_eq!(model.run.outcomes.len(), 2);
         assert!(model.run.outcomes.contains_key(Path::new("grp/x.bru")));
         assert!(model.run.outcomes.contains_key(Path::new("grp/y.bru")));
+    }
+
+    #[test]
+    fn run_finished_emits_save_history_when_enabled() {
+        let mut model = loaded_model((100, 30));
+        model.history_enabled = true;
+        model.run.active = Some(ActiveRun {
+            id: runner::RunId(7),
+            target: "grp".into(),
+            recursive: true,
+            is_campaign: true,
+            handle: None,
+        });
+        let report = sample_report(&["grp/x.bru"]);
+        let command = update(
+            &mut model,
+            Message::RunFinished(runner::RunEvent {
+                id: runner::RunId(7),
+                outcome: runner::RunOutcome::Completed {
+                    report,
+                    exit_code: Some(0),
+                    output: String::new(),
+                },
+            }),
+        );
+        assert!(matches!(command, Command::SaveHistory { .. }));
     }
 
     #[test]
@@ -10243,6 +10543,163 @@ mod tests {
             assert!(!model.pending_reload);
         }
     }
+
+    #[test]
+    fn test_export_response_body_trigger_and_navigation() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+
+        // 1. En focus Tree, Message::ExportResponseBody ne fait rien
+        model.focus = Focus::Tree;
+        let cmd = update(&mut model, Message::ExportResponseBody);
+        assert!(matches!(cmd, Command::None));
+        assert!(model.export_input.is_none());
+
+        // 2. En focus Response sans résultat d'exécution -> StatusMessage::NoResponseBody
+        model.focus = Focus::Response;
+        let cmd = update(&mut model, Message::ExportResponseBody);
+        assert!(matches!(cmd, Command::None));
+        assert_eq!(model.last_status, Some(StatusMessage::NoResponseBody));
+        assert!(model.export_input.is_none());
+
+        // 3. Avec résultat d'exécution et corps JSON
+        let mut result = sample_request_result("post-json.bru");
+        result.response.data = serde_json::json!({"status": "ok"});
+        model.run.outcomes.insert(
+            PathBuf::from("post-json.bru"),
+            super::super::model::RequestOutcome::new(result, Some(1)),
+        );
+
+        let cmd = update(&mut model, Message::ExportResponseBody);
+        assert!(matches!(cmd, Command::None));
+        assert!(model.export_input.is_some());
+        let initial_text = model.export_input.as_ref().unwrap().input.text().to_owned();
+        assert!(initial_text.ends_with(".json"));
+
+        // 4. Saisie interactive
+        update(&mut model, Message::ExportPathInput('x'));
+        assert_eq!(
+            model.export_input.as_ref().unwrap().input.text(),
+            format!("{initial_text}x")
+        );
+        update(&mut model, Message::ExportPathBackspace);
+        assert_eq!(
+            model.export_input.as_ref().unwrap().input.text(),
+            initial_text
+        );
+
+        // 5. Annulation
+        update(&mut model, Message::CancelExportPath);
+        assert!(model.export_input.is_none());
+    }
+
+    #[test]
+    fn test_export_response_body_confirm_flow() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "post-json.bru");
+        model.focus = Focus::Response;
+
+        let mut result = sample_request_result("post-json.bru");
+        result.response.data = serde_json::json!({"message": "bonjour"});
+        model.run.outcomes.insert(
+            PathBuf::from("post-json.bru"),
+            super::super::model::RequestOutcome::new(result, Some(1)),
+        );
+
+        // Démarre l'export
+        update(&mut model, Message::ExportResponseBody);
+        assert!(model.export_input.is_some());
+
+        // Chemin non existant
+        let temp_dir = std::env::temp_dir();
+        let non_existing_path = temp_dir.join("bruno_test_export_inexistant_12345.json");
+        if non_existing_path.exists() {
+            let _ = std::fs::remove_file(&non_existing_path);
+        }
+
+        // On remplace le texte par le chemin non existant
+        model.export_input.as_mut().unwrap().input =
+            TextInput::new(non_existing_path.to_str().unwrap(), false);
+
+        let cmd = update(&mut model, Message::ConfirmExportPath);
+        assert!(model.export_input.is_none());
+        match cmd {
+            Command::ExportResponseBody { path, bytes } => {
+                assert_eq!(path, non_existing_path);
+                assert!(String::from_utf8(bytes).unwrap().contains("bonjour"));
+            }
+            other => panic!("Command::ExportResponseBody attendu, obtenu {other:?}"),
+        }
+
+        // Cas avec fichier existant : confirmation d'écrasement
+        let existing_path = temp_dir.join("bruno_test_export_existant_12345.json");
+        std::fs::write(&existing_path, b"deja present").unwrap();
+
+        update(&mut model, Message::ExportResponseBody);
+        model.export_input.as_mut().unwrap().input =
+            TextInput::new(existing_path.to_str().unwrap(), false);
+
+        let cmd = update(&mut model, Message::ConfirmExportPath);
+        assert!(matches!(cmd, Command::None));
+        assert!(model.export_input.is_none());
+        assert!(matches!(
+            model.confirm,
+            Some(PendingConfirm::OverwriteExport { .. })
+        ));
+
+        // Refus (ConfirmNo)
+        let cmd = update(&mut model, Message::ConfirmNo);
+        assert!(matches!(cmd, Command::None));
+        assert!(model.confirm.is_none());
+
+        // Réessai et acceptation (ConfirmYes)
+        update(&mut model, Message::ExportResponseBody);
+        model.export_input.as_mut().unwrap().input =
+            TextInput::new(existing_path.to_str().unwrap(), false);
+        update(&mut model, Message::ConfirmExportPath);
+        let cmd = update(&mut model, Message::ConfirmYes);
+        assert!(model.confirm.is_none());
+        match cmd {
+            Command::ExportResponseBody { path, .. } => {
+                assert_eq!(path, existing_path);
+            }
+            other => panic!("Command::ExportResponseBody attendu, obtenu {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(&existing_path);
+    }
+
+    #[test]
+    fn test_export_response_body_async_result() {
+        let mut model = loaded_model((100, 30));
+        let path = PathBuf::from("/tmp/test_export.json");
+
+        // Résultat OK
+        update(
+            &mut model,
+            Message::ResponseBodyExported {
+                path: path.clone(),
+                result: Ok(()),
+            },
+        );
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::ResponseExported(path.clone()))
+        );
+
+        // Résultat Erreur
+        update(
+            &mut model,
+            Message::ResponseBodyExported {
+                path,
+                result: Err("permission non accordée".into()),
+            },
+        );
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::ExportError("permission non accordée".into()))
+        );
+    }
 }
 
 #[cfg(test)]
@@ -12304,6 +12761,59 @@ mod mouse_tests {
         );
         assert!(model.global_search.is_none());
     }
+
+    #[test]
+    fn test_collection_loaded_requests_history_when_enabled() {
+        use crate::collection::CollectionLoader;
+        let fixture = crate::app::test_support::fixture();
+        let mut model = Model::new(fixture.clone(), (100, 30));
+        model.history_enabled = true;
+        let loaded = crate::collection::BruLoader.load(&fixture);
+        let cmd = update(&mut model, Message::CollectionLoaded(loaded));
+        match cmd {
+            Command::Batch(cmds) => {
+                assert!(
+                    cmds.iter()
+                        .any(|c| matches!(c, Command::LoadHistory { .. }))
+                );
+            }
+            Command::LoadHistory { root } => {
+                assert_eq!(root, fixture);
+            }
+            other => panic!("LoadHistory ou Batch attendu, obtenu {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_history_loaded_populates_model_and_records_notice() {
+        use std::path::PathBuf;
+        let mut model = loaded_model((100, 30));
+        let root = model.loaded().unwrap().root.clone();
+        let entries = vec![crate::app::model::HistoryEntry {
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            target: PathBuf::from("req.bru"),
+            recursive: false,
+            outcome: crate::app::model::HistoryOutcome::Cancelled,
+        }];
+        update(
+            &mut model,
+            Message::HistoryLoaded {
+                root,
+                entries,
+                notice: Some("corrompu".to_owned()),
+            },
+        );
+        assert_eq!(model.history.len(), 1);
+        assert_eq!(model.history[0].target, PathBuf::from("req.bru"));
+        assert!(
+            model
+                .loaded()
+                .unwrap()
+                .notices
+                .iter()
+                .any(|n| n.message.contains("corrompu"))
+        );
+    }
 }
 
 /// Campagnes multi-environnements : une exécution par environnement coché,
@@ -12940,5 +13450,97 @@ mod series_tests {
         let single = args(&started(update(&mut model, Message::RunSelected)));
         assert!(single.windows(2).any(|w| w == ["--env", "staging"]));
         assert!(!single.contains(&"--env-file".to_owned()));
+    }
+
+    /// `grpc-ws-probe` chargée, avec deux environnements ajoutés en mémoire
+    /// (la fixture n'en déclare pas) et cochés pour la campagne.
+    fn grpc_ws_series_model() -> Model {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/collections/grpc-ws-probe");
+        let mut model = Model::new(root.clone(), (100, 30));
+        update(
+            &mut model,
+            Message::CollectionLoaded(crate::collection::CollectionLoader::load(
+                &crate::collection::BruLoader,
+                &root,
+            )),
+        );
+        if let CollectionState::Loaded(collection) = &mut model.collection {
+            for name in ["dev", "staging"] {
+                collection
+                    .environments
+                    .push(Ok(crate::collection::Environment {
+                        name: name.into(),
+                        path: PathBuf::from(format!("environments/{name}.bru")),
+                        variables: Vec::new(),
+                        secret_names: Vec::new(),
+                        extends: None,
+                        color: None,
+                        ast: None,
+                    }));
+            }
+        }
+        model.runner_options.environments = vec!["dev".into(), "staging".into()];
+        model
+    }
+
+    /// Une requête gRPC ou WebSocket, non lancée seule, ne l'est pas non
+    /// plus en série, même rejouée depuis l'historique en mode campagne.
+    #[test]
+    fn grpc_and_websocket_requests_never_start_a_series() {
+        for (path, kind) in [("say-hello.bru", "gRPC"), ("echo.bru", "WebSocket")] {
+            let mut model = grpc_ws_series_model();
+            model.focus = Focus::History;
+            model.history.push_back(crate::app::model::HistoryEntry {
+                started_at: std::time::SystemTime::now(),
+                target: PathBuf::from(path),
+                recursive: true,
+                outcome: crate::app::model::HistoryOutcome::Cancelled,
+            });
+            model.history_selected = 0;
+            assert!(matches!(
+                update(&mut model, Message::RunSelected),
+                Command::None
+            ));
+            assert!(model.series.is_none(), "{path}");
+            assert_eq!(model.last_status, Some(StatusMessage::NotExecutable(kind)));
+
+            // Sélectionnée dans l'arbre : même refus, aucune série.
+            let mut model = grpc_ws_series_model();
+            select(&mut model, path);
+            assert!(matches!(
+                update(&mut model, Message::RunSelected),
+                Command::None
+            ));
+            assert!(model.series.is_none(), "{path}");
+        }
+
+        // La collection entière reste une campagne normale, en série.
+        let mut model = grpc_ws_series_model();
+        model.focus = Focus::Campaign;
+        let request = started(update(&mut model, Message::RunSelected));
+        assert_eq!(request.env.as_deref(), Some("dev"));
+        assert!(model.series.is_some());
+    }
+
+    #[test]
+    fn failed_relaunch_skips_grpc_and_websocket_requests() {
+        let mut model = grpc_ws_series_model();
+        model.runner_options.environments.clear();
+        model.focus = Focus::Campaign;
+        started(update(&mut model, Message::RunSelected));
+        mark_active(&mut model, 1);
+        let report = report(include_str!("../../tests/fixtures/reports/grpc-ws.json"));
+        finish(&mut model, 1, completed(report));
+        model.focus = Focus::Campaign;
+        // Seuls les échecs gRPC/WS : rien n'est relancé.
+        assert!(matches!(
+            update(&mut model, Message::RunFailedRequests),
+            Command::None
+        ));
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NotExecutable(_))
+        ));
     }
 }

@@ -21,6 +21,7 @@ Options :
 | `--secret NOM[=CLÉ]` | variable secrète transmise à `bru` (répétable). Cherchée dans le `.env` de la collection puis le shell, sous `CLÉ` ou `NOM`/`NOM_EN_MAJUSCULES` ; une saisie dans le panneau Secrets prime. Jamais de valeur en clair sur la ligne de commande. |
 | `--no-mouse` | n'active pas la capture souris (la sélection native du terminal reste disponible) |
 | `--no-watch` | désactive la surveillance et le rechargement automatique de la collection |
+| `--no-history` | désactive la persistance de l'historique des exécutions dans le fichier d'état |
 | `-h`, `--help` | aide |
 | `-V`, `--version` | version |
 
@@ -46,9 +47,10 @@ Pour une collection YAML :
 - l'édition est désactivée : `Entrée`/`e` dans le détail, `e` dans le
   panneau Environnement et `Ctrl+S` affichent « Collection OpenCollection
   (YAML) en lecture seule » ;
-- seules les requêtes `http` et `graphql` sont affichées ; les autres
-  types (`grpc`, `websocket`, ...) et les fichiers invalides apparaissent
-  en erreur dans l'arbre ;
+- les requêtes `http`, `graphql`, `grpc` et `websocket` sont affichées
+  (voir [Requêtes gRPC et WebSocket](#requêtes-grpc-et-websocket)) ; les
+  autres types (`script`, `app`, ...) et les fichiers invalides
+  apparaissent en erreur dans l'arbre ;
 - les clés que le TUI ne sait pas afficher sont ignorées et listées comme
   avis dans le panneau Diagnostics (`D`), sans jamais citer de valeur ;
 - le nom d'un environnement est son nom de fichier sans extension, celui
@@ -69,7 +71,8 @@ d'édition non enregistrée demande confirmation.
 | `→`/`l`, `←`/`h` | déplier/replier un dossier (Collection) |
 | `Début`/`g`, `Fin`/`G` | début, fin de la liste |
 | `PageUp`/`PageDown` | page précédente/suivante |
-| `r` | lancer la requête (ou récursivement un dossier) ; `Ctrl+X` annule |
+| `r` | lancer la requête (ou récursivement un dossier / la collection) ; `Ctrl+X` annule ; refusé pour gRPC/WebSocket |
+| `c` | sélectionner la collection racine (affiche `collection.bru` dans le panneau Détail) ; clic en-tête Collection |
 | `f` | filtrer l'arbre de la collection (en direct ; Entrée valide, Échap annule ou efface) |
 | `Ctrl+K` | recherche globale par nom, méthode, chemin et URL (popup centré en direct ; ↑↓ choisir, Entrée valide, Échap ferme) |
 | `M` | activer/désactiver la capture souris |
@@ -92,6 +95,34 @@ désactiver cette surveillance). Si une session d'édition comporte des
 modifications non enregistrées, le rechargement est différé après sa fermeture
 et un avertissement signale la modification sur disque.
 
+## Requêtes gRPC et WebSocket
+
+Les requêtes gRPC (`type: grpc`) et WebSocket (`type: ws` en `.bru`,
+`websocket` en YAML) de Bruno 4 sont affichées **en lecture seule** :
+
+- l'arbre et la barre d'URL montrent `GRPC` ou `WS` à la place de la
+  méthode HTTP ;
+- le Détail réutilise les onglets existants :
+  - **Params** : boîte « Appel gRPC » (méthode RPC, type, fichier proto) ;
+  - **En-têtes** : « Métadonnées » pour gRPC (bloc `metadata`) ;
+  - **Corps** : « Messages », chaque message précédé de `▸ nom (type,
+    sélectionné)` ;
+  - **Script** : les quatre scripts `grpc:*` pour gRPC
+    (`before-call-start`, `before-message-send`, `after-message-receive`,
+    `after-call-end`) ;
+  - **Auth**, **Tests**, **Docs**, **Vars**, **Settings** : comme en HTTP ;
+- l'édition est refusée (`Entrée`, `e`, clic) : « Requête gRPC en lecture
+  seule : l'édition ne gère que les requêtes HTTP » ;
+- `r` sur une telle requête n'appelle pas `bru` et affiche « Requête gRPC :
+  type non exécutable par bru run ».
+
+`bru run` 4.2.1 ne sait pas les exécuter : il les envoie comme des requêtes
+HTTP et échoue aussitôt (`Unsupported protocol grpc:` ou `ws:`), sans
+lancer leurs tests. Une campagne récursive (dossier, `C`, popup `O`) reste
+déléguée à `bru run` : ces requêtes y apparaissent en erreur avec ce
+message, et les autres requêtes s'exécutent normalement (fixtures
+`tests/fixtures/reports/grpc-ws.json` et `oc-grpc-ws.json`).
+
 ## Panneau Détail
 
 Affiche la requête sélectionnée selon dix onglets, comme Bruno bureau :
@@ -104,8 +135,8 @@ atténués ; une barre d'onglets adaptative fait défiler les onglets sur les
 |---|---|
 | `↑`/`k`, `↓`/`j` | défiler dans le détail |
 | `Début`/`g`, `Fin`/`G` | début, fin du détail |
-| `←`/`h`, `→`/`l` | onglet précédent/suivant de la requête (hors édition) |
-| `Entrée` / `e` | ouvrir une session d'édition |
+| `←`/`h`, `→`/`l` | onglet précédent/suivant (requête, dossier ou collection) |
+| `Entrée` / `e` | ouvrir une session d'édition (requêtes HTTP uniquement ; refusée pour gRPC/WebSocket) |
 | `/` | chercher dans l'onglet affiché ; `n`/`N` : occurrence suivante/précédente |
 | `v` | sélection visuelle de lignes ; `y` copie dans le presse-papiers |
 | `Clic` | cliquer sur un onglet pour l'afficher |
@@ -115,6 +146,25 @@ pendant une session d'édition, ils ne sont pas des cibles éditables et la
 navigation entre champs reste inchangée. Les onglets Script (scripts pré-requête
 et post-réponse) et Tests affichent le code brut avec numérotation de lignes,
 aussi bien pour les fichiers `.bru` que pour les collections OpenCollection YAML.
+
+### Contenu des dossiers et de la collection racine
+
+- **Dossiers (`folder.bru` / `folder.yml`)** : quand un dossier est sélectionné dans l'arbre,
+  le panneau Détail affiche ses métadonnées dans six onglets dédiés (**En-têtes**, **Auth**,
+  **Vars**, **Script**, **Tests**, **Docs**).
+- **Collection racine (`collection.bru` / `opencollection.yml`)** : la touche `c` dans l'arbre
+  (ou un clic sur la bordure d'en-tête du panneau Collection) sélectionne la racine de la
+  collection pour afficher ses déclarations dans ces mêmes onglets. Appuyer sur `r` lorsque la
+  collection est sélectionnée lance toute la collection de manière récursive.
+- **Aucune résolution d'héritage** : le TUI n'affiche jamais d'authentification effective ni
+  d'en-têtes fusionnés. Chaque niveau montre strictement ce qu'il déclare lui-même (signalé par
+  la mention « sans héritage » dans l'en-tête du panneau).
+- **Masquage d'authentification** : les valeurs littérales sensibles (mots de passe, tokens,
+  secrets, clés d'API) sont masquées (`********`) dans l'onglet Auth, tandis que les références
+  de variables (`{{variable}}`) restent visibles en clair.
+- **Lecture seule** : les dossiers et la collection sont strictement en lecture seule ; aucune
+  session d'édition ne peut y être ouverte.
+
 
 ## Édition d'une requête
 
@@ -219,6 +269,7 @@ sur le disque, jamais enregistrée dans l'historique persistant, ni logguée.
 | `c` | copier en commande `curl` (en-têtes d'auth masqués) |
 | `u` | copier en commande `curl` complète (confirmation si des secrets sont présents) |
 | `Ctrl+E` | ouvrir le corps brut de la réponse (non filtré) dans `$VISUAL`, `$EDITOR`, ou `nano` — consultation seule, rien n'est relu |
+| `x` | exporter le corps brut dans un fichier (chemin proposé hors collection, confirmation si existant) |
 
 `Ctrl+E` fonctionne quel que soit le focus courant, tant qu'une requête
 sélectionnée a un résultat avec un corps non vide.
@@ -227,7 +278,10 @@ sélectionnée a un résultat avec un corps non vide.
 
 - **Diagnostics** (`D`) : erreurs de chargement de la collection ; `→`
   saute au nœud concerné dans l'arbre.
-- **Historique** (`H`) : exécutions passées ; `r` relance l'entrée
+- **Historique** (`H`) : journal persistant des exécutions (sauvegardé dans
+  `$XDG_STATE_HOME/bruno-tui/history.json` ou `~/.local/state/bruno-tui/history.json`,
+  borné à 200 entrées par collection, limité strictement aux métadonnées sans secrets
+  ni corps de réponse ; désactivable via `--no-history`) ; `r` relance l'entrée
   sélectionnée.
 - **Secrets** (`S`) : variables `vars:secret` de l'environnement actif et
   celles demandées par `--secret` ; `a` ajoute un nom, `Entrée` saisit sa

@@ -17,14 +17,15 @@ use super::theme;
 use super::tree::file_name;
 use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
-    EditSession, EditState, EditableField, InputTarget, Model, RequestOutcome, RequestTab,
-    ResponseTab, add_row_label, field_enabled, field_value,
+    EditSession, EditState, EditableField, FOLDER_TABS, InputTarget, Model, RequestOutcome,
+    RequestTab, ResponseTab, add_row_label, field_enabled, field_value,
 };
 use crate::app::update::{response_selection_range, selection_range};
 use crate::collection::{
-    AuthMode, BodyContent, BodyKind, ErrorNode, FileMeta, FolderNode, KeyValue, RequestNode,
-    TreeNode,
+    AuthMode, BodyContent, BodyKind, Collection, ErrorNode, FileMeta, FolderNode, KeyValue,
+    RequestNode, TreeNode,
 };
+
 use crate::runner::report::{AssertionResult, ResultStatus, TestResult};
 use crate::writer::EntrySection;
 
@@ -51,30 +52,49 @@ fn lines_to_strings(text: &Text<'static>) -> Vec<String> {
         .collect()
 }
 
-/// Texte du détail du nœud sélectionné ; vide sans sélection. Ne contient
-/// plus le résultat d'exécution d'une requête, affiché séparément par
+/// Texte du détail du nœud sélectionné (ou de la collection racine) ; vide sans sélection.
+/// Ne contient plus le résultat d'exécution d'une requête, affiché séparément par
 /// [`response_text`] (`split-request-response-panels`).
 pub fn detail_text(model: &Model) -> Text<'static> {
+    if model.selected_collection {
+        if let Some(collection) = model.loaded() {
+            return collection_text_and_boxes(collection, model.shown_request_tab()).0;
+        }
+        return Text::default();
+    }
     match model.selected_node() {
         Some(TreeNode::Request(request)) => {
             let session = model.editing.as_ref().filter(|s| s.path == request.path);
             request_text_and_fields(request, session, model.shown_request_tab()).0
         }
-        Some(TreeNode::Folder(folder)) => folder_text(folder),
+        Some(TreeNode::Folder(folder)) => {
+            folder_text_and_boxes(folder, model.shown_request_tab()).0
+        }
         Some(TreeNode::Error(error)) => error_text(error),
         None => Text::default(),
     }
 }
 
-/// Boîtes de section du détail de la requête sélectionnée ; vide hors
-/// sélection d'une requête, comme pour un dossier ou un nœud en erreur
+/// Boîtes de section du détail de la requête, du dossier ou de la collection
+/// sélectionné ; vide hors sélection ou pour un nœud en erreur
 /// (`add-boxed-detail-sections`).
 pub fn detail_section_boxes(model: &Model) -> Vec<SectionBox> {
-    let Some(TreeNode::Request(request)) = model.selected_node() else {
+    if model.selected_collection {
+        if let Some(collection) = model.loaded() {
+            return collection_text_and_boxes(collection, model.shown_request_tab()).1;
+        }
         return Vec::new();
-    };
-    let session = model.editing.as_ref().filter(|s| s.path == request.path);
-    request_text_and_fields(request, session, model.shown_request_tab()).2
+    }
+    match model.selected_node() {
+        Some(TreeNode::Request(request)) => {
+            let session = model.editing.as_ref().filter(|s| s.path == request.path);
+            request_text_and_fields(request, session, model.shown_request_tab()).2
+        }
+        Some(TreeNode::Folder(folder)) => {
+            folder_text_and_boxes(folder, model.shown_request_tab()).1
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Texte de la réponse du nœud sélectionné : le résultat de la dernière
@@ -176,7 +196,7 @@ fn yes_no(value: bool) -> &'static str {
 /// italique en plus pour rester distinct du style de la clé qui précède
 /// (les deux seraient sinon indiscernables, `theme::LABEL` n'étant que
 /// [`Modifier::DIM`]).
-const DISABLED_ENTRY_VALUE: Style =
+pub(crate) const DISABLED_ENTRY_VALUE: Style =
     Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC));
 
 fn entries(lines: &mut Vec<Line<'static>>, values: &[KeyValue]) {
@@ -213,19 +233,7 @@ fn render_code_block(lines: &mut Vec<Line<'static>>, code: Option<&str>) {
 
 /// Mode d'auth tel qu'écrit dans le fichier.
 pub fn auth_label(mode: &AuthMode) -> &str {
-    match mode {
-        AuthMode::NoAuth => "none",
-        AuthMode::Inherit => "inherit",
-        AuthMode::Basic => "basic",
-        AuthMode::Bearer => "bearer",
-        AuthMode::Digest => "digest",
-        AuthMode::Ntlm => "ntlm",
-        AuthMode::OAuth2 => "oauth2",
-        AuthMode::AwsV4 => "awsv4",
-        AuthMode::Wsse => "wsse",
-        AuthMode::ApiKey => "apikey",
-        AuthMode::Other(other) => other,
-    }
+    mode.as_str()
 }
 
 /// Type de corps tel qu'écrit dans le fichier.
@@ -661,14 +669,20 @@ pub fn url_bar_values(model: &Model) -> Option<(String, String)> {
 
 /// Ligne de la barre d'URL : méthode colorée, flèche, puis l'URL avec
 /// ses variables `{{…}}` en vert comme dans Bruno bureau (simple repérage
-/// visuel, aucune variable n'est résolue).
-pub fn url_bar_line(method: &str, url: &str) -> Line<'static> {
+/// visuel, aucune variable n'est résolue). Sans `method_picker` (gRPC,
+/// WebSocket), la flèche est remplacée par un blanc de même largeur.
+pub fn url_bar_line(method: &str, url: &str, method_picker: bool) -> Line<'static> {
+    let suffix = if method_picker {
+        URL_BAR_METHOD_SUFFIX.to_owned()
+    } else {
+        " ".repeat(Line::raw(URL_BAR_METHOD_SUFFIX).width())
+    };
     let mut spans = vec![
         Span::styled(
             method.to_owned(),
             theme::method_style(method).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(URL_BAR_METHOD_SUFFIX, theme::LABEL),
+        Span::styled(suffix, theme::LABEL),
     ];
     let mut rest = url;
     while let Some(start) = rest.find("{{") {
@@ -796,9 +810,38 @@ pub fn request_text_and_fields(
         lines.push(Line::default());
     }
 
+    // gRPC et WebSocket : affichage seul, ni exécution ni édition ; le
+    // type est déjà dans le titre du panneau.
+    if !view.is_http() {
+        lines.push(Line::styled(
+            "Lecture seule, non exécutable".to_owned(),
+            theme::LABEL,
+        ));
+        lines.push(Line::default());
+    }
+
     // Contenu de l'onglet affiché seulement (`RequestTab`).
     match tab {
         RequestTab::Params => {
+            if let Some(grpc) = view.grpc() {
+                boxed_section(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    "Appel gRPC".to_owned(),
+                    |lines, _| {
+                        let shown = |value: &Option<String>| {
+                            value
+                                .clone()
+                                .filter(|v| !v.is_empty())
+                                .unwrap_or_else(|| "non déclaré".to_owned())
+                        };
+                        lines.push(field("  Méthode RPC", shown(&grpc.method)));
+                        lines.push(field("  Type", shown(&grpc.method_type)));
+                        lines.push(field("  Fichier proto", shown(&grpc.proto_path)));
+                    },
+                );
+            }
             boxed_section(
                 &mut lines,
                 &mut field_lines,
@@ -831,9 +874,11 @@ pub fn request_text_and_fields(
             );
         }
         RequestTab::Body => {
+            // gRPC et WebSocket : le corps est une liste de messages.
+            let title = if view.is_http() { "Corps" } else { "Messages" };
             let corps_title = match &view.body {
-                Some(body) => format!("Corps ({})", body_label(&body.kind)),
-                None => "Corps".to_owned(),
+                Some(body) => format!("{title} ({})", body_label(&body.kind)),
+                None => title.to_owned(),
             };
             boxed_section(
                 &mut lines,
@@ -881,7 +926,12 @@ pub fn request_text_and_fields(
                 &mut lines,
                 &mut field_lines,
                 &mut boxes,
-                "En-têtes".to_owned(),
+                // gRPC : le bloc `metadata` tient lieu d'en-têtes.
+                if view.is_grpc() {
+                    "Métadonnées".to_owned()
+                } else {
+                    "En-têtes".to_owned()
+                },
                 |lines, field_lines| {
                     editable_entries(
                         lines,
@@ -893,13 +943,34 @@ pub fn request_text_and_fields(
                 },
             );
         }
-        RequestTab::Auth => lines.push(field(
-            "Auth",
-            view.auth
+        RequestTab::Auth => {
+            lines.push(field(
+                "Auth",
+                view.auth
+                    .as_ref()
+                    .map_or("non déclarée", auth_label)
+                    .to_owned(),
+            ));
+            if view
+                .auth
                 .as_ref()
-                .map_or("non déclarée", auth_label)
-                .to_owned(),
-        )),
+                .is_some_and(|m| !matches!(m, AuthMode::NoAuth | AuthMode::Inherit))
+                || !view.auth_params().is_empty()
+            {
+                boxed_section(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    view.auth
+                        .as_ref()
+                        .map(|m| format!("Paramètres ({})", auth_label(m)))
+                        .unwrap_or_else(|| "Paramètres".to_owned()),
+                    |lines, _| {
+                        super::auth::render_auth_entries(lines, view.auth_params());
+                    },
+                );
+            }
+        }
         RequestTab::Vars => {
             boxed_section(
                 &mut lines,
@@ -919,6 +990,19 @@ pub fn request_text_and_fields(
                     entries(lines, view.vars_post_response());
                 },
             );
+        }
+        RequestTab::Script if let Some(grpc) = view.grpc() => {
+            for (hook, code) in grpc.scripts() {
+                boxed_section(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    format!("Script {hook}"),
+                    |lines, _| {
+                        render_code_block(lines, code);
+                    },
+                );
+            }
         }
         RequestTab::Script => {
             boxed_section(
@@ -992,13 +1076,16 @@ pub fn request_text_and_fields(
 /// alors grisé dans la barre d'onglets.
 pub fn request_tab_is_empty(view: &crate::collection::RequestView, tab: RequestTab) -> bool {
     match tab {
-        RequestTab::Params => view.query_params.is_empty() && view.path_params.is_empty(),
+        RequestTab::Params => {
+            view.grpc().is_none() && view.query_params.is_empty() && view.path_params.is_empty()
+        }
         RequestTab::Body => view.body.is_none(),
         RequestTab::Headers => view.headers.is_empty(),
-        RequestTab::Auth => view.auth.is_none(),
+        RequestTab::Auth => view.auth.is_none() && view.auth_params().is_empty(),
         RequestTab::Vars => {
             view.vars_pre_request().is_empty() && view.vars_post_response().is_empty()
         }
+        RequestTab::Script if let Some(grpc) = view.grpc() => !grpc.has_scripts(),
         RequestTab::Script => {
             view.script_pre_request()
                 .is_none_or(|s| s.trim().is_empty())
@@ -1010,6 +1097,28 @@ pub fn request_tab_is_empty(view: &crate::collection::RequestView, tab: RequestT
         RequestTab::Tests => view.tests().is_none_or(|t| t.trim().is_empty()),
         RequestTab::Docs => view.docs().is_none_or(|d| d.trim().is_empty()),
         RequestTab::Settings => view.settings().is_empty(),
+    }
+}
+
+/// Vrai si l'onglet `tab` n'a rien de déclaré dans ce fichier de méta
+/// (`folder.bru` ou `collection.bru`) : il est alors grisé dans la barre.
+pub fn folder_tab_is_empty(meta: &FileMeta, tab: RequestTab) -> bool {
+    match tab {
+        RequestTab::Headers => meta.headers().is_empty(),
+        RequestTab::Auth => meta.auth().is_none(),
+        RequestTab::Vars => {
+            meta.vars_pre_request().is_empty() && meta.vars_post_response().is_empty()
+        }
+        RequestTab::Script => {
+            meta.script_pre_request()
+                .is_none_or(|s| s.trim().is_empty())
+                && meta
+                    .script_post_response()
+                    .is_none_or(|s| s.trim().is_empty())
+        }
+        RequestTab::Tests => meta.tests().is_none_or(|t| t.trim().is_empty()),
+        RequestTab::Docs => meta.docs().is_none_or(|d| d.trim().is_empty()),
+        _ => true,
     }
 }
 
@@ -1025,7 +1134,7 @@ struct TabLayout {
     hidden_after: bool,
 }
 
-fn request_tab_layout(shown: RequestTab, width: u16) -> TabLayout {
+fn tab_layout_for(all: &[RequestTab], shown: RequestTab, width: u16) -> TabLayout {
     let width = usize::from(width);
     let label_width = |tab: RequestTab| Line::raw(tab.label()).width();
     let total = |tabs: &[RequestTab], gap: usize| {
@@ -1033,8 +1142,7 @@ fn request_tab_layout(shown: RequestTab, width: u16) -> TabLayout {
             + gap * tabs.len().saturating_sub(1)
             + 2
     };
-    let all = RequestTab::ALL;
-    let gap = if total(&all, 2) <= width { 2 } else { 1 };
+    let gap = if total(all, 2) <= width { 2 } else { 1 };
     // Fenêtre [first, last] : la plus longue qui contient l'onglet
     // affiché et tient avec ses marques.
     let shown_index = all.iter().position(|tab| *tab == shown).unwrap_or(0);
@@ -1042,7 +1150,7 @@ fn request_tab_layout(shown: RequestTab, width: u16) -> TabLayout {
         let marks = usize::from(first > 0) * 2 + usize::from(last + 1 < all.len()) * 2;
         total(&all[first..=last], gap) + marks <= width
     };
-    let (mut first, mut last) = (0, all.len() - 1);
+    let (mut first, mut last) = (0, all.len().saturating_sub(1));
     while !fits(first, last) && first < last {
         // Retire en priorité du côté le plus éloigné de l'onglet affiché.
         if last - shown_index >= shown_index - first && last > shown_index {
@@ -1071,6 +1179,14 @@ fn request_tab_layout(shown: RequestTab, width: u16) -> TabLayout {
     }
 }
 
+fn request_tab_layout(shown: RequestTab, width: u16) -> TabLayout {
+    tab_layout_for(&RequestTab::ALL, shown, width)
+}
+
+fn folder_tab_layout(shown: RequestTab, width: u16) -> TabLayout {
+    tab_layout_for(&FOLDER_TABS, shown, width)
+}
+
 /// Barre d'onglets du détail, posée sur sa bordure haute large de `width`
 /// colonnes (coins exclus) : l'onglet affiché clair et souligné, les
 /// autres en gris, les vides atténués.
@@ -1080,7 +1196,7 @@ pub fn request_tab_bar(
     width: u16,
 ) -> Line<'static> {
     let layout = request_tab_layout(shown, width);
-    let mut spans = vec![Span::raw(" ")];
+    let mut spans = vec![Span::styled(" ", theme::PANEL_TITLE)];
     if layout.hidden_before {
         spans.push(Span::styled("‹ ", theme::PANEL_TITLE));
     }
@@ -1100,7 +1216,34 @@ pub fn request_tab_bar(
     if layout.hidden_after {
         spans.push(Span::styled(" ›", theme::PANEL_TITLE));
     }
-    spans.push(Span::raw(" "));
+    spans.push(Span::styled(" ", theme::PANEL_TITLE));
+    Line::from(spans)
+}
+
+/// Barre d'onglets pour un dossier (`folder.bru`) ou la collection (`collection.bru`).
+pub fn folder_tab_bar(meta: &FileMeta, shown: RequestTab, width: u16) -> Line<'static> {
+    let layout = folder_tab_layout(shown, width);
+    let mut spans = vec![Span::styled(" ", theme::PANEL_TITLE)];
+    if layout.hidden_before {
+        spans.push(Span::styled("‹ ", theme::PANEL_TITLE));
+    }
+    for (index, (tab, _)) in layout.tabs.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" ".repeat(layout.gap)));
+        }
+        let style = if *tab == shown {
+            theme::ACTIVE_TAB
+        } else if folder_tab_is_empty(meta, *tab) {
+            theme::BORDER
+        } else {
+            theme::PANEL_TITLE
+        };
+        spans.push(Span::styled(tab.label(), style));
+    }
+    if layout.hidden_after {
+        spans.push(Span::styled(" ›", theme::PANEL_TITLE));
+    }
+    spans.push(Span::styled(" ", theme::PANEL_TITLE));
     Line::from(spans)
 }
 
@@ -1110,6 +1253,16 @@ pub fn request_tab_bar(
 pub fn request_tab_at(shown: RequestTab, width: u16, offset: u16) -> Option<RequestTab> {
     let offset = usize::from(offset);
     request_tab_layout(shown, width)
+        .tabs
+        .into_iter()
+        .find(|(tab, x)| (*x..*x + Line::raw(tab.label()).width()).contains(&offset))
+        .map(|(tab, _)| tab)
+}
+
+/// Onglet sous la colonne `offset` de la bordure haute d'un dossier/collection.
+pub fn folder_tab_at(shown: RequestTab, width: u16, offset: u16) -> Option<RequestTab> {
+    let offset = usize::from(offset);
+    folder_tab_layout(shown, width)
         .tabs
         .into_iter()
         .find(|(tab, x)| (*x..*x + Line::raw(tab.label()).width()).contains(&offset))
@@ -1617,45 +1770,205 @@ pub fn tab_bar(active: ResponseTab) -> Line<'static> {
     Line::from(spans)
 }
 
-fn meta_lines(lines: &mut Vec<Line<'static>>, meta: &FileMeta) {
-    lines.push(field("  Auth", yes_no(meta.has_auth)));
-    lines.push(field("  En-têtes", yes_no(meta.has_headers)));
-    lines.push(field(
-        "  Script pré-requête",
-        yes_no(meta.has_pre_request_script),
-    ));
-    lines.push(field(
-        "  Script post-réponse",
-        yes_no(meta.has_post_response_script),
-    ));
-    lines.push(field("  Tests", yes_no(meta.has_tests)));
+fn meta_tab_content(
+    meta: &FileMeta,
+    tab: RequestTab,
+    scope: &str,
+) -> (Vec<Line<'static>>, Vec<SectionBox>) {
+    let mut lines = vec![field("Portée", scope), Line::default()];
+    let mut field_lines = Vec::new();
+    let mut boxes = Vec::new();
+
+    match tab {
+        RequestTab::Headers => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "En-têtes".to_owned(),
+                |lines, _| {
+                    entries(lines, meta.headers());
+                },
+            );
+        }
+        RequestTab::Auth => {
+            let masked = crate::collection::auth::mask_auth_params(meta.auth_params());
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Authentification".to_owned(),
+                |lines, _| {
+                    lines.push(field(
+                        "Mode",
+                        meta.auth().map_or("non déclarée", auth_label),
+                    ));
+                    if !masked.is_empty() {
+                        lines.push(Line::default());
+                        lines.push(section("Paramètres"));
+                        entries(lines, &masked);
+                    }
+                },
+            );
+        }
+        RequestTab::Vars => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Variables pré-requête".to_owned(),
+                |lines, _| {
+                    entries(lines, meta.vars_pre_request());
+                },
+            );
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Variables post-réponse".to_owned(),
+                |lines, _| {
+                    entries(lines, meta.vars_post_response());
+                },
+            );
+        }
+        RequestTab::Script => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Script pré-requête".to_owned(),
+                |lines, _| {
+                    render_code_block(lines, meta.script_pre_request());
+                },
+            );
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Script post-réponse".to_owned(),
+                |lines, _| {
+                    render_code_block(lines, meta.script_post_response());
+                },
+            );
+        }
+        RequestTab::Tests => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Tests".to_owned(),
+                |lines, _| {
+                    render_code_block(lines, meta.tests());
+                },
+            );
+        }
+        RequestTab::Docs => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Documentation".to_owned(),
+                |lines, _| match meta.docs() {
+                    Some(docs) if !docs.trim().is_empty() => {
+                        for l in docs.lines() {
+                            lines.push(Line::raw(format!("  {l}")));
+                        }
+                    }
+                    _ => lines.push(Line::raw("  aucune")),
+                },
+            );
+        }
+        _ => {}
+    }
+
+    (lines, boxes)
 }
 
-fn folder_text(folder: &FolderNode) -> Text<'static> {
-    let mut lines = vec![
-        title(folder.name.clone()),
-        field("Chemin", folder.path.display().to_string()),
-        field(
-            "Seq",
-            folder
-                .seq
-                .map_or_else(|| "aucun".to_owned(), |seq| seq.to_string()),
-        ),
-        field("Enfants", folder.children.len().to_string()),
-        Line::default(),
-    ];
+fn folder_text_and_boxes(folder: &FolderNode, tab: RequestTab) -> (Text<'static>, Vec<SectionBox>) {
     match &folder.meta {
-        None => lines.push(field("folder.bru", "absent")),
         Some(Ok(meta)) => {
-            lines.push(field("folder.bru", "présent"));
-            meta_lines(&mut lines, meta);
+            let mut lines = vec![title(folder.name.clone()), Line::default()];
+            let offset = lines.len();
+            let (tab_lines, mut boxes) =
+                meta_tab_content(meta, tab, "déclaré dans ce dossier (sans héritage)");
+            for b in &mut boxes {
+                b.first_line += offset;
+            }
+            lines.extend(tab_lines);
+            (Text::from(lines), boxes)
         }
         Some(Err(error)) => {
-            lines.push(field("folder.bru", "en erreur"));
-            lines.push(Line::raw(format!("  {error}")));
+            let lines = vec![
+                title(folder.name.clone()),
+                field("Chemin", folder.path.display().to_string()),
+                field(
+                    "Seq",
+                    folder
+                        .seq
+                        .map_or_else(|| "aucun".to_owned(), |seq| seq.to_string()),
+                ),
+                field("Enfants", folder.children.len().to_string()),
+                Line::default(),
+                field("folder.bru", "en erreur"),
+                Line::raw(format!("  {error}")),
+            ];
+            (Text::from(lines), Vec::new())
+        }
+        None => {
+            let lines = vec![
+                title(folder.name.clone()),
+                field("Chemin", folder.path.display().to_string()),
+                field(
+                    "Seq",
+                    folder
+                        .seq
+                        .map_or_else(|| "aucun".to_owned(), |seq| seq.to_string()),
+                ),
+                field("Enfants", folder.children.len().to_string()),
+                Line::default(),
+                field("folder.bru", "absent"),
+            ];
+            (Text::from(lines), Vec::new())
         }
     }
-    Text::from(lines)
+}
+
+fn collection_text_and_boxes(
+    collection: &Collection,
+    tab: RequestTab,
+) -> (Text<'static>, Vec<SectionBox>) {
+    match &collection.settings {
+        Some(Ok(meta)) => {
+            let mut lines = vec![title(collection.name.clone()), Line::default()];
+            let offset = lines.len();
+            let (tab_lines, mut boxes) =
+                meta_tab_content(meta, tab, "déclaré au niveau collection (sans héritage)");
+            for b in &mut boxes {
+                b.first_line += offset;
+            }
+            lines.extend(tab_lines);
+            (Text::from(lines), boxes)
+        }
+        Some(Err(error)) => {
+            let lines = vec![
+                title(collection.name.clone()),
+                field("Racine", collection.root.display().to_string()),
+                Line::default(),
+                field("Paramètres de collection", "en erreur"),
+                Line::raw(format!("  {error}")),
+            ];
+            (Text::from(lines), Vec::new())
+        }
+        None => {
+            let lines = vec![
+                title(collection.name.clone()),
+                field("Racine", collection.root.display().to_string()),
+                Line::default(),
+                field("Paramètres de collection", "absents"),
+            ];
+            (Text::from(lines), Vec::new())
+        }
+    }
 }
 
 /// Fond distinct des lignes d'une sélection visuelle active.
@@ -2201,7 +2514,7 @@ mod tests {
             (method.as_str(), url.as_str()),
             ("POST", "https://{{host}}/items")
         );
-        let line = url_bar_line(&method, &url);
+        let line = url_bar_line(&method, &url, true);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "POST ▾  https://{{host}}/items");
         let variable = line
@@ -2365,6 +2678,61 @@ mod tests {
     }
 
     #[test]
+    fn auth_tab_rendering_with_params_and_masking() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "scripted.bru");
+        model.request_tab = RequestTab::Auth;
+
+        // scripted.bru a `auth: bearer` et `token: {{tok}}`
+        let plain_text = plain(&detail_text(&model));
+        let boxes = detail_section_boxes(&model);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].title, "Paramètres (bearer)");
+        assert!(plain_text.contains("Auth : bearer"));
+        assert!(plain_text.contains("token: {{tok}}"));
+
+        // Requête avec secret littéral et valeur variable
+        let bru_src = r#"meta {
+  name: auth-test
+  type: http
+  seq: 1
+}
+
+post {
+  url: https://example.com/login
+  body: none
+  auth: basic
+}
+
+auth:basic {
+  username: admin
+  password: supersecretpassword
+  token: {{my_token}}
+  ~cle_api: 12345
+}
+"#;
+        let file = crate::collection::BruFile::parse(bru_src.to_owned()).expect("parse");
+        let view = crate::collection::RequestView::from_ast(&file).expect("view");
+        let (text, _, boxes) = request_text_and_fields(
+            &crate::collection::RequestNode {
+                path: std::path::PathBuf::from("auth-test.bru"),
+                view,
+                ast: Some(file),
+            },
+            None,
+            RequestTab::Auth,
+        );
+        let plain_custom = plain(&text);
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].title, "Paramètres (basic)");
+        assert!(plain_custom.contains("Auth : basic"));
+        assert!(plain_custom.contains("username: admin"));
+        assert!(plain_custom.contains("password: ********"));
+        assert!(plain_custom.contains("token: {{my_token}}"));
+        assert!(plain_custom.contains("cle_api: ******** (désactivé)"));
+    }
+
+    #[test]
     fn error_node() {
         let text = detail_of("broken.bru");
         assert!(text.starts_with("broken.bru\n"), "{text}");
@@ -2384,25 +2752,41 @@ mod tests {
     #[test]
     fn folder_with_meta_and_without() {
         let text = detail_of("grp");
+        assert!(text.contains("Groupe"), "{text}");
         assert!(
-            text.contains("Seq : 3") && text.contains("Enfants : 4"),
+            text.contains("Portée : déclaré dans ce dossier (sans héritage)"),
             "{text}"
         );
-        assert!(
-            text.contains("folder.bru : présent") && text.contains("Auth : oui"),
-            "{text}"
-        );
-        assert!(detail_of("misc").contains("folder.bru : absent"));
-    }
+        assert!(text.contains("En-têtes"), "{text}");
 
-    /// Un dossier ou un nœud en erreur n'a pas de section à encadrer : son
-    /// détail ne contient aucun cadre (`visual-theme`,
-    /// `add-boxed-detail-sections`).
-    #[test]
-    fn folder_and_error_node_have_no_section_box() {
+        // Onglet Auth de grp
         let mut model = loaded_model((100, 30));
         select(&mut model, "grp");
-        assert!(detail_section_boxes(&model).is_empty(), "dossier");
+        model.request_tab = RequestTab::Auth;
+        let auth_text = plain_lines(&model).join("\n");
+        assert!(auth_text.contains("Mode : bearer"), "{auth_text}");
+        assert!(auth_text.contains("token: {{tok}}"), "{auth_text}");
+
+        // Dossier sans folder.bru
+        let misc_text = detail_of("misc");
+        assert!(misc_text.contains("folder.bru : absent"), "{misc_text}");
+        assert!(misc_text.contains("Enfants : 1"), "{misc_text}");
+    }
+
+    /// Un dossier sans meta (`folder.bru` absent) ou un nœud en erreur n'a pas
+    /// de section à encadrer ; un dossier avec meta a des boîtes de section dans ses onglets.
+    #[test]
+    fn folder_without_meta_and_error_node_have_no_section_box() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "misc");
+        assert!(detail_section_boxes(&model).is_empty(), "dossier sans meta");
+
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "grp");
+        assert!(
+            !detail_section_boxes(&model).is_empty(),
+            "dossier avec meta"
+        );
 
         let mut model = loaded_model((100, 30));
         select(&mut model, "broken.bru");

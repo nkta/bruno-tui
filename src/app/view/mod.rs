@@ -4,6 +4,7 @@
 //! d'état. `layout` est partagé avec `update`, qui en déduit la hauteur des
 //! panneaux pour garder la sélection visible et borner le défilement.
 
+pub mod auth;
 pub mod detail;
 pub mod global_search;
 pub mod help;
@@ -284,7 +285,11 @@ pub fn view(model: &Model, frame: &mut Frame) {
                         TITLE_DETAIL
                     };
                     let mut detail_block = panel(title, model.focus == Focus::Detail);
-                    if let Some(TreeNode::Request(request)) = model.selected_node() {
+
+                    let folder_meta_ok = model.folder_meta().and_then(|r| r.as_ref().ok());
+                    if let Some(TreeNode::Request(request)) = model.selected_node()
+                        && !model.selected_collection
+                    {
                         // Onglets de requête sur la bordure haute, comme
                         // les onglets de Bruno bureau : ils remplacent le
                         // titre « Détail ».
@@ -303,24 +308,40 @@ pub fn view(model: &Model, frame: &mut Frame) {
                             theme::BORDER
                         };
                         detail_block = theme::bordered().title(tabs).border_style(border);
+                    } else if let Some(meta) = folder_meta_ok {
+                        let mut tabs = detail::folder_tab_bar(
+                            meta,
+                            model.shown_request_tab(),
+                            areas.detail.width.saturating_sub(2),
+                        );
+                        if model.zoomed_panel() == Some(Focus::Detail) {
+                            tabs.spans
+                                .push(Span::styled("[plein écran — z] ", theme::PANEL_TITLE));
+                        }
+                        let border = if model.focus == Focus::Detail {
+                            theme::FOCUS
+                        } else {
+                            theme::BORDER
+                        };
+                        detail_block = theme::bordered().title(tabs).border_style(border);
                     }
-                    match model.selected_node() {
-                        Some(TreeNode::Request(_)) => {
-                            render_boxed_detail(model, frame, areas.detail, detail_block);
+                    if (matches!(model.selected_node(), Some(TreeNode::Request(_)))
+                        && !model.selected_collection)
+                        || folder_meta_ok.is_some()
+                    {
+                        render_boxed_detail(model, frame, areas.detail, detail_block);
+                    } else {
+                        // Pendant une saisie, pas de retour à la ligne : une
+                        // ligne logique = une ligne affichée, pour que le
+                        // curseur de texte et le décalage horizontal tombent
+                        // exactement (`improve-direct-editing`, D7).
+                        let mut detail = Paragraph::new(detail::render_text(model))
+                            .scroll((model.detail_scroll, 0))
+                            .block(detail_block);
+                        if detail_wraps(model) {
+                            detail = detail.wrap(Wrap { trim: false });
                         }
-                        _ => {
-                            // Pendant une saisie, pas de retour à la ligne : une
-                            // ligne logique = une ligne affichée, pour que le
-                            // curseur de texte et le décalage horizontal tombent
-                            // exactement (`improve-direct-editing`, D7).
-                            let mut detail = Paragraph::new(detail::render_text(model))
-                                .scroll((model.detail_scroll, 0))
-                                .block(detail_block);
-                            if detail_wraps(model) {
-                                detail = detail.wrap(Wrap { trim: false });
-                            }
-                            frame.render_widget(detail, areas.detail);
-                        }
+                        frame.render_widget(detail, areas.detail);
                     }
                     render_insert_cursor(model, frame, areas.detail);
                 }
@@ -461,6 +482,9 @@ fn breadcrumb_line(model: &Model) -> Line<'static> {
         separator(),
         Span::raw(collection.name.clone()),
     ];
+    if model.selected_collection {
+        return Line::from(spans);
+    }
     let Some(node) = model.selected_node() else {
         return Line::from(spans);
     };
@@ -736,6 +760,16 @@ fn search_input_line(model: &Model) -> Option<String> {
     search.editing.then(|| format!("/{}", search.draft))
 }
 
+/// Ligne de saisie du chemin d'export du corps de réponse, tant qu'elle est ouverte :
+/// remplace la barre d'état, à la place des rappels de touches habituels.
+fn export_input_line(model: &Model) -> Option<String> {
+    let export = model.export_input.as_ref()?;
+    Some(format!(
+        "Exporter le corps dans : {} (Entrée valider, Échap annuler)",
+        export.input.text()
+    ))
+}
+
 fn status_message_text(message: &StatusMessage) -> String {
     match message {
         StatusMessage::Copied => "Copié dans le presse-papiers".to_owned(),
@@ -780,6 +814,18 @@ fn status_message_text(message: &StatusMessage) -> String {
         }
         StatusMessage::NoEnvironmentResult(env) => {
             format!("Aucun résultat pour l'environnement {env}")
+        }
+        StatusMessage::NotExecutable(kind) => {
+            format!("Requête {kind} : type non exécutable par bru run")
+        }
+        StatusMessage::ReadOnlyRequestType(kind) => {
+            format!("Requête {kind} en lecture seule : l'édition ne gère que les requêtes HTTP")
+        }
+        StatusMessage::ResponseExported(path) => {
+            format!("Corps de réponse exporté dans {}", path.display())
+        }
+        StatusMessage::ExportError(reason) => {
+            format!("Échec de l'exportation : {reason}")
         }
     }
 }
@@ -866,7 +912,7 @@ fn environment_session_help_line(session: &crate::app::model::EnvironmentEditSes
 }
 
 fn status_line(model: &Model) -> String {
-    if let Some(confirm) = model.confirm {
+    if let Some(confirm) = &model.confirm {
         return match confirm {
             PendingConfirm::DiscardEdit => "Abandonner les modifications ? (y/n)".to_owned(),
             PendingConfirm::QuitWithUnsavedEdit => {
@@ -874,6 +920,9 @@ fn status_line(model: &Model) -> String {
             }
             PendingConfirm::CopyUnmaskedCurl => {
                 "Copier la commande curl avec les secrets en clair ? (y/n)".to_owned()
+            }
+            PendingConfirm::OverwriteExport { path, .. } => {
+                format!("Écraser {} existant ? (y/n)", path.display())
             }
         };
     }
@@ -898,6 +947,9 @@ fn status_line(model: &Model) -> String {
         return line;
     }
     if let Some(line) = search_input_line(model) {
+        return line;
+    }
+    if let Some(line) = export_input_line(model) {
         return line;
     }
     if let Some(message) = active_run_message(model) {
@@ -927,7 +979,7 @@ fn status_line(model: &Model) -> String {
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Response) => {
-            "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter  z plein écran"
+            "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  x exporter  ? aide  Échap arbre  q quitter  z plein écran"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Diagnostics) => {
@@ -988,7 +1040,13 @@ fn titled_panel(title: String, focused: bool) -> Block<'static> {
 
 fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
     let base = if model.zoomed_panel() == Some(Focus::Tree) {
-        TITLE_TREE_ZOOMED
+        if model.selected_collection {
+            " Collection [sélectionnée — c] [plein écran — z] "
+        } else {
+            TITLE_TREE_ZOOMED
+        }
+    } else if model.selected_collection {
+        " Collection [sélectionnée — c] "
     } else {
         TITLE_TREE
     };
@@ -1022,10 +1080,14 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
             )))
         })
         .collect();
-    let selected = state
-        .selected
-        .checked_sub(start)
-        .filter(|index| *index < end - start);
+    let selected = if model.selected_collection {
+        None
+    } else {
+        state
+            .selected
+            .checked_sub(start)
+            .filter(|index| *index < end - start)
+    };
     let mut list_state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(
         List::new(items)
@@ -1057,7 +1119,13 @@ fn render_url_bar(model: &Model, frame: &mut Frame, area: Rect) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
     let line = match detail::url_bar_values(model) {
-        Some((method, url)) => detail::url_bar_line(&method, &url),
+        Some((method, url)) => {
+            let method_picker = !matches!(
+                model.selected_node(),
+                Some(TreeNode::Request(request)) if !request.view.is_http()
+            );
+            detail::url_bar_line(&method, &url, method_picker)
+        }
         None => Line::from(Span::styled(
             "sélectionner une requête dans l'arbre",
             theme::EMPTY_MESSAGE,
@@ -2160,7 +2228,7 @@ mod tests {
         let status = &lines[28];
         assert!(
             status.contains(
-                "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter"
+                "↑↓ défiler  Début/Fin  ←→ onglet  / chercher  n/N suivant  v sélection  y copier  x exporter  ? aide  Échap arbre  q quitter"
             ),
             "{status}"
         );
@@ -2995,5 +3063,57 @@ mod tests {
         assert!(screen.contains("Recherche globale"), "{screen}");
         assert!(screen.contains(">"), "{screen}");
         assert!(screen.contains("GET"), "{screen}");
+    }
+
+    #[test]
+    fn export_status_line_and_rendering() {
+        use crate::app::model::ExportInputState;
+
+        let mut model = loaded_model((100, 30));
+
+        // 1. Rappel de touche x en focus Response
+        model.focus = Focus::Response;
+        let line = status_line(&model);
+        assert!(line.contains("x exporter"), "{line}");
+
+        // 2. Saisie d'exportation active
+        model.export_input = Some(ExportInputState::new("./mon-export.json", vec![]));
+        let line = status_line(&model);
+        assert!(
+            line.contains(
+                "Exporter le corps dans : ./mon-export.json (Entrée valider, Échap annuler)"
+            ),
+            "{line}"
+        );
+
+        // 3. Confirmation d'écrasement
+        model.export_input = None;
+        model.confirm = Some(PendingConfirm::OverwriteExport {
+            path: PathBuf::from("./existant.json"),
+            bytes: vec![],
+        });
+        let line = status_line(&model);
+        assert!(
+            line.contains("Écraser ./existant.json existant ? (y/n)"),
+            "{line}"
+        );
+
+        // 4. Messages de statut d'export
+        model.confirm = None;
+        model.last_status = Some(StatusMessage::ResponseExported(PathBuf::from(
+            "./existant.json",
+        )));
+        let line = status_line(&model);
+        assert!(
+            line.contains("Corps de réponse exporté dans ./existant.json"),
+            "{line}"
+        );
+
+        model.last_status = Some(StatusMessage::ExportError("disque plein".into()));
+        let line = status_line(&model);
+        assert!(
+            line.contains("Échec de l'exportation : disque plein"),
+            "{line}"
+        );
     }
 }
