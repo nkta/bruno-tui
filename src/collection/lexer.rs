@@ -42,11 +42,22 @@ pub(crate) struct RawBlock {
     pub line: usize,
 }
 
+/// Déclaration de premier niveau dans un fichier d'environnement (ex. `extends: base`, `color: #ff0000`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawDeclaration {
+    pub name: String,
+    pub value: String,
+    pub span: Range<usize>,
+    pub line: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawNode {
     /// Suite de lignes vides (ou d'espaces) entre deux blocs.
     Blank(Range<usize>),
     Block(RawBlock),
+    /// Déclaration de premier niveau autorisée dans un environnement.
+    Declaration(RawDeclaration),
 }
 
 /// Une ligne du source avec sa position.
@@ -88,8 +99,18 @@ pub(crate) fn lines(source: &str) -> impl Iterator<Item = Line<'_>> {
     })
 }
 
-/// Découpe `source` en nœuds bruts contigus couvrant tout le source.
+/// Découpe `source` en nœuds bruts contigus couvrant tout le source (mode requête / méta).
 pub(crate) fn lex(source: &str) -> Result<Vec<RawNode>, ParseError> {
+    lex_kind(source, false)
+}
+
+/// Découpe `source` d'un fichier d'environnement en acceptant les déclarations
+/// de premier niveau autorisées (`extends:`, `color:`).
+pub(crate) fn lex_environment(source: &str) -> Result<Vec<RawNode>, ParseError> {
+    lex_kind(source, true)
+}
+
+fn lex_kind(source: &str, is_environment: bool) -> Result<Vec<RawNode>, ParseError> {
     let mut nodes = Vec::new();
     let mut open: Option<RawBlock> = None;
     let mut blank_start: Option<usize> = None;
@@ -118,6 +139,29 @@ pub(crate) fn lex(source: &str) -> Result<Vec<RawNode>, ParseError> {
         if let Some(start) = blank_start.take() {
             nodes.push(RawNode::Blank(start..line.start));
         }
+
+        if is_environment {
+            let trimmed_start = trimmed.trim_start();
+            if let Some(value) = trimmed_start.strip_prefix("extends:") {
+                nodes.push(RawNode::Declaration(RawDeclaration {
+                    name: "extends".to_owned(),
+                    value: value.trim().to_owned(),
+                    span: line.start..line.end,
+                    line: line.number,
+                }));
+                continue;
+            }
+            if let Some(value) = trimmed_start.strip_prefix("color:") {
+                nodes.push(RawNode::Declaration(RawDeclaration {
+                    name: "color".to_owned(),
+                    value: value.trim().to_owned(),
+                    span: line.start..line.end,
+                    line: line.number,
+                }));
+                continue;
+            }
+        }
+
         let delimiter = match trimmed.chars().last() {
             Some('{') => Delimiter::Brace,
             Some('[') => Delimiter::Bracket,
@@ -158,6 +202,7 @@ mod tests {
             .map(|n| match n {
                 RawNode::Blank(r) => r.clone(),
                 RawNode::Block(b) => b.span.clone(),
+                RawNode::Declaration(d) => d.span.clone(),
             })
             .collect()
     }
@@ -174,7 +219,9 @@ mod tests {
     fn block(nodes: &[RawNode], index: usize) -> &RawBlock {
         match &nodes[index] {
             RawNode::Block(b) => b,
-            RawNode::Blank(_) => panic!("nœud {index} : attendu un bloc"),
+            RawNode::Blank(_) | RawNode::Declaration(_) => {
+                panic!("nœud {index} : attendu un bloc")
+            }
         }
     }
 
@@ -271,5 +318,47 @@ mod tests {
     fn empty_source() {
         let nodes = lex("").expect("valide");
         assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn environment_declarations_extends_and_color() {
+        let source = "extends: base\n\nvars {\n  port: 8080\n}\n\ncolor: #ff0000\n";
+        let nodes = lex_environment(source).expect("valide");
+        assert_eq!(nodes.len(), 5);
+        match &nodes[0] {
+            RawNode::Declaration(d) => {
+                assert_eq!(d.name, "extends");
+                assert_eq!(d.value, "base");
+                assert_eq!(d.line, 1);
+            }
+            _ => panic!("attendu déclaration extends"),
+        }
+        assert!(matches!(nodes[1], RawNode::Blank(_)));
+        assert_eq!(block(&nodes, 2).name, "vars");
+        assert!(matches!(nodes[3], RawNode::Blank(_)));
+        match &nodes[4] {
+            RawNode::Declaration(d) => {
+                assert_eq!(d.name, "color");
+                assert_eq!(d.value, "#ff0000");
+                assert_eq!(d.line, 7);
+            }
+            _ => panic!("attendu déclaration color"),
+        }
+        assert_covers(source, &nodes);
+    }
+
+    #[test]
+    fn request_lex_refuses_extends_and_color_declarations() {
+        let err1 = lex("extends: base\n").expect_err("refusé en requête");
+        assert!(matches!(err1, ParseError::TextOutsideBlock { line: 1 }));
+
+        let err2 = lex("color: #ff0000\n").expect_err("refusé en requête");
+        assert!(matches!(err2, ParseError::TextOutsideBlock { line: 1 }));
+    }
+
+    #[test]
+    fn environment_lex_refuses_unknown_top_level_text() {
+        let err = lex_environment("unknown_key: val\n").expect_err("invalide");
+        assert!(matches!(err, ParseError::TextOutsideBlock { line: 1 }));
     }
 }

@@ -14,12 +14,12 @@ pub mod loader;
 pub mod tree;
 pub mod view;
 
-pub use ast::{Block, BlockBody, BruFile, Entry, Node, NodeKind};
+pub use ast::{Block, BlockBody, BruFile, Declaration, Entry, Node, NodeKind};
 pub use config::BrunoConfig;
 pub use error::{LoadError, ParseError};
 pub use loader::{BruLoader, CollectionLoader};
 pub use tree::{Collection, ErrorNode, FolderNode, RequestNode, TreeNode};
 pub use view::{
-    AuthMode, BodyContent, BodyKind, BodyView, Environment, ExtraTabs, FileMeta, KeyValue,
-    RequestView,
+    AuthMode, BodyContent, BodyKind, BodyView, Environment, EnvironmentExtends, ExtraTabs,
+    FileMeta, KeyValue, RequestView,
 };

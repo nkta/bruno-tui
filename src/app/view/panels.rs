@@ -524,21 +524,68 @@ pub(crate) fn secret_source_label(source: &SecretSource) -> (String, Style) {
     }
 }
 
+/// Parse une couleur hexadécimale (`#rgb` ou `#rrggbb`).
+/// Retourne `None` si la chaîne n'est pas une couleur hexadécimale valide.
+pub(crate) fn parse_hex_color(s: &str) -> Option<Color> {
+    let s = s.trim();
+    let hex = s.strip_prefix('#')?;
+    // Garde ASCII : évite une coupure au milieu d'un caractère multioctet
+    // et refuse le signe `+` qu'accepte `from_str_radix`.
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    match hex.len() {
+        3 => {
+            let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
+            let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
+            let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
+            Some(Color::Rgb((r << 4) | r, (g << 4) | g, (b << 4) | b))
+        }
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some(Color::Rgb(r, g, b))
+        }
+        _ => None,
+    }
+}
+
 /// Une ligne du panneau de sélection : `entry` est `None` pour « Aucun ».
-fn environment_item_line(
+pub(crate) fn environment_item_line(
     entry: Option<&Result<crate::collection::Environment, crate::collection::ErrorNode>>,
     is_current: bool,
 ) -> Line<'static> {
     let marker = if is_current { "● " } else { "  " };
-    let label = match entry {
-        None => Span::styled("Aucun", Style::new().add_modifier(Modifier::BOLD)),
-        Some(Ok(env)) => Span::raw(env.name.clone()),
-        Some(Err(err)) => Span::styled(
-            format!("{} (invalide)", err.path.display()),
-            theme::LOAD_ERROR,
-        ),
-    };
-    Line::from(vec![Span::raw(marker), label])
+    let mut spans = vec![Span::raw(marker)];
+    match entry {
+        None => {
+            spans.push(Span::styled(
+                "Aucun",
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+        }
+        Some(Ok(env)) => {
+            // Pastille carrée : le rond est déjà le marqueur de l'environnement actif.
+            if let Some(color) = env.color.as_deref().and_then(parse_hex_color) {
+                spans.push(Span::styled("■ ", Style::new().fg(color)));
+            }
+            spans.push(Span::raw(env.name.clone()));
+            if let Some(extends) = &env.extends {
+                spans.push(Span::styled(
+                    format!(" ← {}", extends.display_name()),
+                    theme::LABEL,
+                ));
+            }
+        }
+        Some(Err(err)) => {
+            spans.push(Span::styled(
+                format!("{} (invalide)", err.path.display()),
+                theme::LOAD_ERROR,
+            ));
+        }
+    }
+    Line::from(spans)
 }
 
 fn history_row_line(entry: &HistoryEntry) -> Line<'static> {
@@ -811,4 +858,110 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     }
 
     frame.render_widget(Paragraph::new(lines), inner_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collection::{Environment, EnvironmentExtends};
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_hex_color_valid_formats() {
+        assert_eq!(parse_hex_color("#f00"), Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(parse_hex_color("#é1"), None);
+        assert_eq!(parse_hex_color("#+f+f+f"), None);
+        assert_eq!(parse_hex_color("#0f0"), Some(Color::Rgb(0, 255, 0)));
+        assert_eq!(parse_hex_color("#00f"), Some(Color::Rgb(0, 0, 255)));
+        assert_eq!(parse_hex_color("#123"), Some(Color::Rgb(0x11, 0x22, 0x33)));
+        assert_eq!(parse_hex_color("#ff0000"), Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(parse_hex_color("#00ff00"), Some(Color::Rgb(0, 255, 0)));
+        assert_eq!(parse_hex_color("#ffaa00"), Some(Color::Rgb(255, 170, 0)));
+        assert_eq!(parse_hex_color("#FFAA00"), Some(Color::Rgb(255, 170, 0)));
+        assert_eq!(parse_hex_color("  #00ff00  "), Some(Color::Rgb(0, 255, 0)));
+    }
+
+    #[test]
+    fn parse_hex_color_invalid_formats_return_none() {
+        assert_eq!(parse_hex_color(""), None);
+        assert_eq!(parse_hex_color("#"), None);
+        assert_eq!(parse_hex_color("#1"), None);
+        assert_eq!(parse_hex_color("#12"), None);
+        assert_eq!(parse_hex_color("#1234"), None);
+        assert_eq!(parse_hex_color("#12345"), None);
+        assert_eq!(parse_hex_color("#1234567"), None);
+        assert_eq!(parse_hex_color("red"), None);
+        assert_eq!(parse_hex_color("#xyz"), None);
+        assert_eq!(parse_hex_color("#12345z"), None);
+    }
+
+    #[test]
+    fn environment_item_line_none_entry() {
+        let line = environment_item_line(None, true);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "● Aucun");
+
+        let line = environment_item_line(None, false);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "  Aucun");
+    }
+
+    #[test]
+    fn environment_item_line_with_extends_and_valid_color() {
+        let env = Environment {
+            name: "staging".into(),
+            path: PathBuf::from("environments/staging.bru"),
+            variables: Vec::new(),
+            secret_names: Vec::new(),
+            extends: Some(EnvironmentExtends::Single("base".into())),
+            color: Some("#ff0000".into()),
+            ast: None,
+        };
+        let ok_entry = Ok(env);
+
+        let line_current = environment_item_line(Some(&ok_entry), true);
+        assert_eq!(line_current.spans.len(), 4);
+        assert_eq!(line_current.spans[0].content, "● ");
+        assert_eq!(line_current.spans[1].content, "■ ");
+        assert_eq!(
+            line_current.spans[1].style,
+            Style::new().fg(Color::Rgb(255, 0, 0))
+        );
+        assert_eq!(line_current.spans[2].content, "staging");
+        assert_eq!(line_current.spans[3].content, " ← base");
+
+        let line_inactive = environment_item_line(Some(&ok_entry), false);
+        assert_eq!(line_inactive.spans[0].content, "  ");
+        assert_eq!(line_inactive.spans[1].content, "■ ");
+        assert_eq!(
+            line_inactive.spans[1].style,
+            Style::new().fg(Color::Rgb(255, 0, 0))
+        );
+        assert_eq!(line_inactive.spans[2].content, "staging");
+        assert_eq!(line_inactive.spans[3].content, " ← base");
+    }
+
+    #[test]
+    fn environment_item_line_with_list_extends_and_invalid_color() {
+        let env = Environment {
+            name: "multi".into(),
+            path: PathBuf::from("environments/multi.bru"),
+            variables: Vec::new(),
+            secret_names: Vec::new(),
+            extends: Some(EnvironmentExtends::List(vec![
+                "base".into(),
+                "parent2".into(),
+            ])),
+            color: Some("not-a-color".into()),
+            ast: None,
+        };
+        let ok_entry = Ok(env);
+
+        let line = environment_item_line(Some(&ok_entry), false);
+        // La couleur invalide est ignorée sans erreur : aucune pastille
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[0].content, "  ");
+        assert_eq!(line.spans[1].content, "multi");
+        assert_eq!(line.spans[2].content, " ← base, parent2");
+    }
 }

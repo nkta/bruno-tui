@@ -142,6 +142,15 @@ en-tête de requête. Seules les valeurs sont éditées ici : les variables
 secrètes (`vars:secret`) n'apparaissent jamais dans ce popup, elles
 restent gérées par le panneau Secrets (`S`).
 
+Environnements Bruno 4 (`extends`, `color`) : la liste affiche le ou les
+parents à côté du nom (`staging ← base`) et une pastille `■` de la couleur
+déclarée, si c'est une couleur hexadécimale (`#rgb` ou `#rrggbb`). Le TUI
+ne résout jamais l'héritage : le popup ne montre que les variables du
+fichier lui-même, et c'est `bru` qui fusionne les parents à l'exécution.
+Enregistrer depuis le popup conserve `extends` et `color` tels quels.
+Attention : `bru` 4.1.0 refuse encore `extends` (erreur de lecture de
+l'environnement) ; une version plus récente du CLI est nécessaire.
+
 ## Panneau Réponse
 
 Affiche le résultat de la dernière exécution de la requête sélectionnée,
