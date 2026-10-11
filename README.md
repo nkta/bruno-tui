@@ -46,6 +46,7 @@ d'édition non enregistrée demande confirmation.
 | `S` | panneau Variables secrètes |
 | `?` | aide des raccourcis (popup centré) |
 | `C` | panneau Campagne (bilan TNR de la dernière exécution récursive) |
+| `O` | options de campagne (tags, délai, bail, tests-only, export de rapports JUnit/HTML) |
 | `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
 | `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
 
@@ -150,9 +151,24 @@ sélectionnée a un résultat avec un corps non vide.
   valeur, `d` l'oublie. Une valeur secrète n'est jamais écrite sur disque
   ni affichée en clair.
 - **Campagne** (`C`) : bilan de la dernière exécution récursive (campagne de
-  TNR) ; en-tête avec cible, taux de succès et durée, puis liste des requêtes
-  en échec avec code HTTP et raison d'échec ; `Entrée` ou `→` sélectionne
-  la requête dans l'arbre et donne le focus au Détail.
+  TNR) ; en-tête avec cible, options actives, taux de succès et durée, puis
+  liste des requêtes en échec avec code HTTP et raison d'échec ; `Entrée` ou `→`
+  sélectionne la requête dans l'arbre et donne le focus au Détail ; `r` relance
+  la campagne avec les options courantes.
+- **Options du runner** (`O`) : popup de configuration des options d'exécution
+  récursive mémorisées en session :
+  - **Tags inclus** (`--tags`) et **tags exclus** (`--exclude-tags`) sous forme
+    de liste séparée par des virgules (espaces interdits).
+  - **Délai** inter-requêtes en millisecondes (`--delay`).
+  - **Bail** (`--bail`) : arrêt dès le premier échec.
+  - **Tests-only** (`--tests-only`) : exécution des requêtes comportant des tests uniquement.
+  - **Exports de rapports** JUnit XML (`--reporter-junit`) et HTML (`--reporter-html`)
+    délégués à `bru` : écrits hors collection (`$XDG_STATE_HOME/bruno-tui/reports/` ou
+    `~/.local/state/bruno-tui/reports/`, repli vers `./reports`), horodatés avec le nom
+    du dossier cible. Le masquage des en-têtes sensibles (`--reporter-skip-all-headers`)
+    est activé par défaut et peut être basculé.
+  - `Entrée` édite ou bascule un champ, `Ctrl+R` ou `Ctrl+Enter` lance directement
+    la campagne avec les options configurées, `Échap` enregistre et referme le popup.
 
 Aucun de ces panneaux ne prend le clic pour l'instant — seul le
 clavier y navigue.
