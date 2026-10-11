@@ -132,6 +132,7 @@ pub enum Message {
         id: RunId,
         target: PathBuf,
         recursive: bool,
+        is_campaign: bool,
         handle: RunHandle,
     },
     /// Issue reçue sur le canal d'événements.
@@ -297,6 +298,10 @@ pub enum Message {
     ConfirmGlobalSearch,
     /// `Échap` pendant la recherche globale : ferme le popup.
     CancelGlobalSearch,
+    /// `f` en focus Campagne : fait tourner le filtre de statut (Tous / Échecs / Réussis / Ignorés).
+    CycleCampaignFilter,
+    /// `R` en focus Campagne : relance uniquement les requêtes en échec de la dernière campagne.
+    RunFailedRequests,
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -403,6 +408,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('?') => Message::ToggleHelp,
         KeyCode::Char('z') => Message::ToggleZoom,
         KeyCode::Char('O') => Message::ToggleRunnerOptions,
+        KeyCode::Char('R') => Message::RunFailedRequests,
         _ => return None,
     };
     Some(message)
@@ -627,6 +633,8 @@ mod tests {
                 KeyModifiers::SHIFT,
                 "ToggleRunnerOptions",
             ),
+            (KeyCode::Char('R'), none, "RunFailedRequests"),
+            (KeyCode::Char('R'), KeyModifiers::SHIFT, "RunFailedRequests"),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(

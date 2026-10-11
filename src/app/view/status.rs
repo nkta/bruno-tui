@@ -212,6 +212,7 @@ mod tests {
             id: RunId(1),
             target: target.into(),
             recursive,
+            is_campaign: recursive,
             handle: None,
         }
     }
