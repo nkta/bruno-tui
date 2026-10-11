@@ -2786,7 +2786,7 @@ mod tests {
         model.focus = Focus::Detail;
         let screen = render(&model, 100, 30).join("\n");
         // Requête : les onglets remplacent le titre « Détail ».
-        assert!(screen.contains("Tests [plein écran — z]"), "{screen}");
+        assert!(screen.contains("Settings [plein écran — z]"), "{screen}");
         assert!(!screen.contains("Collection"), "{screen}");
         assert!(!screen.contains("Réponse"), "{screen}");
 

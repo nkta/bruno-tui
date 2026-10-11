@@ -3805,12 +3805,12 @@ mod tests {
         assert_eq!(model.shown_request_tab(), RequestTab::Body);
         update(&mut model, Message::Left);
         update(&mut model, Message::Left);
-        assert_eq!(model.shown_request_tab(), RequestTab::Tests);
+        assert_eq!(model.shown_request_tab(), RequestTab::Settings);
 
         // Session : Méthode puis URL gardent l'onglet choisi ; le premier
         // en-tête affiche l'onglet En-têtes.
         update(&mut model, Message::StartEdit);
-        assert_eq!(model.shown_request_tab(), RequestTab::Tests);
+        assert_eq!(model.shown_request_tab(), RequestTab::Settings);
         update(&mut model, Message::Down);
         update(&mut model, Message::Down);
         assert_eq!(

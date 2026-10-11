@@ -249,11 +249,48 @@ fn scripted_view() {
         ]
     );
     assert_eq!(
-        view.assertions,
+        view.assertions(),
         [
             kv("res.status", "eq 200", true),
             kv("res.body.ok", "isTrue", true)
         ]
+    );
+}
+
+#[test]
+fn extra_tabs_view() {
+    let source = "meta {\n  name: extra-tabs\n  type: http\n  seq: 15\n}\n\nget {\n  url: https://{{host}}/extra-tabs\n  body: none\n  auth: none\n}\n\nvars:pre-request {\n  departingDate: 2020-01-01\n  ~returningDate: 2020-01-02\n}\n\nvars:post-response {\n  token: $res.body.token\n  @orderNumber: $res.body.orderNumber\n  ~petId: $res.body.id\n  ~@transactionId: $res.body.transactionId\n}\n\nsettings {\n  encodeUrl: true\n  followRedirects: false\n  maxRedirects: 0\n  timeout: 60000\n}\n\ndocs {\n  This request needs auth token to be set in the headers.\n}\n";
+    let file = BruFile::parse(source.to_owned()).expect("parse");
+    let view = RequestView::from_ast(&file).expect("vue");
+    assert_eq!(view.method, "GET");
+    assert_eq!(
+        view.vars_pre_request(),
+        [
+            kv("departingDate", "2020-01-01", true),
+            kv("returningDate", "2020-01-02", false),
+        ]
+    );
+    assert_eq!(
+        view.vars_post_response(),
+        [
+            kv("token", "$res.body.token", true),
+            kv("@orderNumber", "$res.body.orderNumber", true),
+            kv("petId", "$res.body.id", false),
+            kv("@transactionId", "$res.body.transactionId", false),
+        ]
+    );
+    assert_eq!(
+        view.settings(),
+        [
+            kv("encodeUrl", "true", true),
+            kv("followRedirects", "false", true),
+            kv("maxRedirects", "0", true),
+            kv("timeout", "60000", true),
+        ]
+    );
+    assert_eq!(
+        view.docs(),
+        Some("This request needs auth token to be set in the headers.")
     );
 }
 
@@ -512,7 +549,7 @@ impl CollectionLoader for FakeLoader {
             has_post_response_script: false,
             has_tests: false,
             has_assert: false,
-            assertions: Vec::new(),
+            extra: Box::default(),
         };
         Ok(Collection {
             root: PathBuf::from("/fake"),

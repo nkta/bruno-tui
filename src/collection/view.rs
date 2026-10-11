@@ -127,6 +127,18 @@ pub struct BodyView {
     pub content: BodyContent,
 }
 
+/// Données des onglets additionnels (Vars, Docs, Settings), regroupées
+/// dans une indirection sur le tas pour préserver la taille de [`RequestView`]
+/// et éviter le gonflement des variantes d'énumérations (`TreeNode`, `AppEvent`, `Message`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExtraTabs {
+    pub vars_pre_request: Vec<KeyValue>,
+    pub vars_post_response: Vec<KeyValue>,
+    pub docs: Option<String>,
+    pub settings: Vec<KeyValue>,
+    pub assertions: Vec<KeyValue>,
+}
+
 /// Vue d'une requête pour l'affichage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestView {
@@ -148,10 +160,30 @@ pub struct RequestView {
     pub has_post_response_script: bool,
     pub has_tests: bool,
     pub has_assert: bool,
-    pub assertions: Vec<KeyValue>,
+    pub extra: Box<ExtraTabs>,
 }
 
 impl RequestView {
+    pub fn vars_pre_request(&self) -> &[KeyValue] {
+        &self.extra.vars_pre_request
+    }
+
+    pub fn vars_post_response(&self) -> &[KeyValue] {
+        &self.extra.vars_post_response
+    }
+
+    pub fn docs(&self) -> Option<&str> {
+        self.extra.docs.as_deref()
+    }
+
+    pub fn settings(&self) -> &[KeyValue] {
+        &self.extra.settings
+    }
+
+    pub fn assertions(&self) -> &[KeyValue] {
+        &self.extra.assertions
+    }
+
     /// Construit la vue ; échoue si aucun bloc de méthode HTTP n'existe.
     pub fn from_ast(file: &BruFile) -> Result<Self, ParseError> {
         let method = file
@@ -201,7 +233,13 @@ impl RequestView {
             has_post_response_script: file.has_block("script:post-response"),
             has_tests: file.has_block("tests"),
             has_assert: file.has_block("assert"),
-            assertions: key_values(file, "assert"),
+            extra: Box::new(ExtraTabs {
+                vars_pre_request: key_values(file, "vars:pre-request"),
+                vars_post_response: key_values(file, "vars:post-response"),
+                docs: file.text("docs"),
+                settings: key_values(file, "settings"),
+                assertions: key_values(file, "assert"),
+            }),
         })
     }
 }
@@ -381,9 +419,9 @@ mod tests {
         assert!(view.has_post_response_script);
         assert!(view.has_tests);
         assert!(view.has_assert);
-        assert_eq!(view.assertions.len(), 1);
-        assert_eq!(view.assertions[0].key, "res.status");
-        assert_eq!(view.assertions[0].value, "eq 200");
+        assert_eq!(view.assertions().len(), 1);
+        assert_eq!(view.assertions()[0].key, "res.status");
+        assert_eq!(view.assertions()[0].value, "eq 200");
     }
 
     #[test]
@@ -434,5 +472,63 @@ mod tests {
             ]
         );
         assert_eq!(env.secret_names, ["token"]);
+    }
+
+    #[test]
+    fn vars_docs_and_settings_views() {
+        let source = "get {\n  url: http://x\n}\n\nvars:pre-request {\n  a: 1\n  ~b: 2\n}\n\nvars:post-response {\n  token: abc\n  @order: 42\n  ~@tx: 99\n}\n\nsettings {\n  encodeUrl: true\n  timeout: 5000\n}\n\ndocs {\n  This is documentation.\n  Line 2.\n}\n";
+        let file = parse(source);
+        let view = RequestView::from_ast(&file).expect("vue");
+        assert_eq!(
+            view.vars_pre_request(),
+            &[
+                KeyValue {
+                    key: "a".into(),
+                    value: "1".into(),
+                    enabled: true,
+                },
+                KeyValue {
+                    key: "b".into(),
+                    value: "2".into(),
+                    enabled: false,
+                },
+            ]
+        );
+        assert_eq!(
+            view.vars_post_response(),
+            &[
+                KeyValue {
+                    key: "token".into(),
+                    value: "abc".into(),
+                    enabled: true,
+                },
+                KeyValue {
+                    key: "@order".into(),
+                    value: "42".into(),
+                    enabled: true,
+                },
+                KeyValue {
+                    key: "@tx".into(),
+                    value: "99".into(),
+                    enabled: false,
+                },
+            ]
+        );
+        assert_eq!(
+            view.settings(),
+            &[
+                KeyValue {
+                    key: "encodeUrl".into(),
+                    value: "true".into(),
+                    enabled: true,
+                },
+                KeyValue {
+                    key: "timeout".into(),
+                    value: "5000".into(),
+                    enabled: true,
+                },
+            ]
+        );
+        assert_eq!(view.docs(), Some("This is documentation.\nLine 2."));
     }
 }

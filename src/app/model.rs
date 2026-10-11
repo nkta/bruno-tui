@@ -81,21 +81,27 @@ pub enum RequestTab {
     Body,
     Headers,
     Auth,
+    Vars,
     Script,
     Assert,
     Tests,
+    Docs,
+    Settings,
 }
 
 impl RequestTab {
     /// Tous les onglets, dans l'ordre d'affichage.
-    pub const ALL: [RequestTab; 7] = [
+    pub const ALL: [RequestTab; 10] = [
         RequestTab::Params,
         RequestTab::Body,
         RequestTab::Headers,
         RequestTab::Auth,
+        RequestTab::Vars,
         RequestTab::Script,
         RequestTab::Assert,
         RequestTab::Tests,
+        RequestTab::Docs,
+        RequestTab::Settings,
     ];
 
     /// Libellé de l'onglet.
@@ -105,9 +111,12 @@ impl RequestTab {
             RequestTab::Body => "Corps",
             RequestTab::Headers => "En-têtes",
             RequestTab::Auth => "Auth",
+            RequestTab::Vars => "Vars",
             RequestTab::Script => "Script",
             RequestTab::Assert => "Assert",
             RequestTab::Tests => "Tests",
+            RequestTab::Docs => "Docs",
+            RequestTab::Settings => "Settings",
         }
     }
 
@@ -1478,7 +1487,7 @@ mod tests {
             has_post_response_script: false,
             has_tests: false,
             has_assert: false,
-            assertions: vec![],
+            extra: Box::default(),
         }
     }
 
