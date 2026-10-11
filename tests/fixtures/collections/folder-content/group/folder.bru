@@ -1,0 +1,41 @@
+meta {
+  name: group
+  seq: 1
+}
+
+headers {
+  X-Folder: folder-value
+}
+
+auth {
+  mode: basic
+}
+
+auth:basic {
+  username: myuser
+  password: supersecretpassword
+}
+
+vars:pre-request {
+  my_folder_var: 42
+}
+
+vars:post-response {
+  after_var: done
+}
+
+script:pre-request {
+  console.log("folder pre script");
+}
+
+script:post-response {
+  console.log("folder post script");
+}
+
+tests {
+  test("folder test", function() {});
+}
+
+docs {
+  Documentation du dossier group.
+}

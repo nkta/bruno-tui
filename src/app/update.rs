@@ -408,6 +408,11 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::Rename => match model.focus {
+            Focus::Tree => {
+                model.selected_collection = !model.selected_collection;
+                model.detail_scroll = 0;
+                Command::None
+            }
             Focus::Detail => {
                 start_rename(model);
                 Command::None
@@ -415,6 +420,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Focus::Response => copy_curl(model, true),
             _ => Command::None,
         },
+
         Message::CopyCurlFull => {
             if model.focus == Focus::Response {
                 copy_curl_full(model)
@@ -858,10 +864,30 @@ fn apply(model: &mut Model, message: Message) -> Command {
                         Message::Down => move_method_picker(model, 1),
                         _ => {}
                     },
-                    // Hors session : ←/→ changent d'onglet de requête.
+                    // Hors session : ←/→ changent d'onglet de requête ou dossier/collection.
                     None => match navigation {
-                        Message::Left => select_request_tab(model, model.request_tab.previous()),
-                        Message::Right => select_request_tab(model, model.request_tab.next()),
+                        Message::Left => {
+                            if model.is_folder_or_collection_selected() {
+                                select_request_tab(
+                                    model,
+                                    crate::app::model::previous_folder_tab(
+                                        model.shown_request_tab(),
+                                    ),
+                                );
+                            } else {
+                                select_request_tab(model, model.request_tab.previous());
+                            }
+                        }
+                        Message::Right => {
+                            if model.is_folder_or_collection_selected() {
+                                select_request_tab(
+                                    model,
+                                    crate::app::model::next_folder_tab(model.shown_request_tab()),
+                                );
+                            } else {
+                                select_request_tab(model, model.request_tab.next());
+                            }
+                        }
                         other => scroll_detail(model, other),
                     },
                     _ => scroll_detail(model, navigation),
@@ -893,11 +919,18 @@ fn run_selected(model: &mut Model) -> Command {
             .history
             .get(model.history_selected)
             .map(|entry| (entry.target.clone(), entry.recursive)),
-        Focus::Tree | Focus::Detail | Focus::Response => match model.selected_node() {
-            Some(TreeNode::Request(request)) => Some((request.path.clone(), false)),
-            Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
-            Some(TreeNode::Error(_)) | None => None,
-        },
+        Focus::Tree | Focus::Detail | Focus::Response => {
+            if model.selected_collection {
+                Some((std::path::PathBuf::new(), true))
+            } else {
+                match model.selected_node() {
+                    Some(TreeNode::Request(request)) => Some((request.path.clone(), false)),
+                    Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
+                    Some(TreeNode::Error(_)) | None => None,
+                }
+            }
+        }
+
         Focus::Campaign => {
             let target = model
                 .campaign
@@ -1922,6 +1955,12 @@ fn navigate_tree(model: &mut Model, message: Message) {
     }
     let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
     let before = model.tree.selected;
+    if matches!(
+        message,
+        Message::Up | Message::Down | Message::Home | Message::End
+    ) {
+        model.selected_collection = false;
+    }
     match message {
         Message::Up => model.tree.selected = before.saturating_sub(1),
         Message::Down => model.tree.selected = (before + 1).min(len - 1),
@@ -1941,6 +1980,7 @@ fn select_row(model: &mut Model, index: usize) {
     if index >= model.tree.rows.len() {
         return;
     }
+    model.selected_collection = false;
     let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
     let before = model.tree.selected;
     model.tree.selected = index;
@@ -3904,12 +3944,19 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
     }
     model.mouse.drag = None;
     match hit {
+        Hit::TreeHeader => {
+            model.focus = Focus::Tree;
+            model.selected_collection = true;
+            model.detail_scroll = 0;
+        }
         Hit::Tree { row } => {
             model.focus = Focus::Tree;
             if let Some(index) = row {
+                model.selected_collection = false;
                 click_tree_row(model, index);
             }
         }
+
         Hit::Detail { line } => {
             model.focus = Focus::Detail;
             model.mouse.drag = line.map(|anchor| Drag {
@@ -4159,7 +4206,7 @@ fn mouse_wheel(model: &mut Model, input: MouseInput, up: bool) {
                 scroll_response(model, step());
             }
         }
-        Hit::RunButton | Hit::UrlBar { .. } | Hit::RequestTab(_) => {}
+        Hit::RunButton | Hit::UrlBar { .. } | Hit::RequestTab(_) | Hit::TreeHeader => {}
     }
 }
 
