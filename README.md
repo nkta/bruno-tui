@@ -78,7 +78,7 @@ d'édition non enregistrée demande confirmation.
 | `S` | panneau Variables secrètes |
 | `?` | aide des raccourcis (popup centré) |
 | `C` | panneau Campagne (bilan TNR de la dernière exécution récursive) |
-| `O` | options de campagne (tags, délai, bail, tests-only, export de rapports JUnit/HTML) |
+| `O` | options de campagne (tags, TLS, données, sandbox, verbose, rapports JUnit/HTML) |
 | `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
 | `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
 

@@ -92,7 +92,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "O",
-                effect: "options de campagne (tags, délai, bail, rapports)",
+                effect: "options de campagne (tags, TLS, données, sandbox, rapports)",
             },
             HelpEntry {
                 key: "Ctrl+X",
