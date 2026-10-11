@@ -173,9 +173,28 @@ fn tree_order_and_folders_follow_the_bru_loader_rules() {
         .as_ref()
         .expect("valide");
     assert!(meta.has_headers);
+    assert_eq!(meta.headers().len(), 1);
+    assert_eq!(meta.headers()[0].key, "X-Folder");
+    assert_eq!(meta.headers()[0].value, "nested");
+
     assert!(meta.has_auth);
+    assert_eq!(meta.auth(), Some(&AuthMode::Bearer));
+    assert_eq!(meta.auth_params().len(), 1);
+    assert_eq!(meta.auth_params()[0].key, "token");
+    assert_eq!(meta.auth_params()[0].value, "{{token}}");
+
     assert!(meta.has_vars);
+    assert_eq!(meta.vars_pre_request().len(), 1);
+    assert_eq!(meta.vars_pre_request()[0].key, "folderVar");
+    assert_eq!(meta.vars_pre_request()[0].value, "1");
+
     assert!(meta.has_pre_request_script);
+    assert_eq!(
+        meta.script_pre_request(),
+        Some("bru.setVar(\"fromFolder\", true);")
+    );
+
+    assert_eq!(meta.docs(), Some("Dossier imbriqué."));
     assert!(!meta.has_tests);
     assert!(meta.ast.is_none());
 
@@ -185,6 +204,7 @@ fn tree_order_and_folders_follow_the_bru_loader_rules() {
     };
     let meta = pages.meta.as_ref().expect("meta").as_ref().expect("valide");
     assert!(!meta.has_auth);
+    assert_eq!(meta.auth(), Some(&AuthMode::Inherit));
 
     let settings = collection
         .settings
@@ -194,6 +214,13 @@ fn tree_order_and_folders_follow_the_bru_loader_rules() {
         .expect("valide");
     assert_eq!(settings.name.as_deref(), Some("oc-probe"));
     assert!(settings.has_headers);
+    assert_eq!(settings.headers().len(), 1);
+    assert_eq!(settings.headers()[0].key, "X-Collection");
+    assert_eq!(settings.headers()[0].value, "oc-probe");
+    assert_eq!(
+        settings.docs(),
+        Some("Collection de fixture OpenCollection.")
+    );
     assert!(collection.notices.is_empty(), "{:?}", collection.notices);
 }
 

@@ -69,7 +69,8 @@ d'édition non enregistrée demande confirmation.
 | `→`/`l`, `←`/`h` | déplier/replier un dossier (Collection) |
 | `Début`/`g`, `Fin`/`G` | début, fin de la liste |
 | `PageUp`/`PageDown` | page précédente/suivante |
-| `r` | lancer la requête (ou récursivement un dossier) ; `Ctrl+X` annule |
+| `r` | lancer la requête (ou récursivement un dossier / la collection) ; `Ctrl+X` annule |
+| `c` | sélectionner la collection racine (affiche `collection.bru` dans le panneau Détail) ; clic en-tête Collection |
 | `f` | filtrer l'arbre de la collection (en direct ; Entrée valide, Échap annule ou efface) |
 | `Ctrl+K` | recherche globale par nom, méthode, chemin et URL (popup centré en direct ; ↑↓ choisir, Entrée valide, Échap ferme) |
 | `M` | activer/désactiver la capture souris |
@@ -103,8 +104,8 @@ atténués ; une barre d'onglets adaptative fait défiler les onglets sur les
 |---|---|
 | `↑`/`k`, `↓`/`j` | défiler dans le détail |
 | `Début`/`g`, `Fin`/`G` | début, fin du détail |
-| `←`/`h`, `→`/`l` | onglet précédent/suivant de la requête (hors édition) |
-| `Entrée` / `e` | ouvrir une session d'édition |
+| `←`/`h`, `→`/`l` | onglet précédent/suivant (requête, dossier ou collection) |
+| `Entrée` / `e` | ouvrir une session d'édition (requêtes uniquement) |
 | `/` | chercher dans l'onglet affiché ; `n`/`N` : occurrence suivante/précédente |
 | `v` | sélection visuelle de lignes ; `y` copie dans le presse-papiers |
 | `Clic` | cliquer sur un onglet pour l'afficher |
@@ -114,6 +115,25 @@ pendant une session d'édition, ils ne sont pas des cibles éditables et la
 navigation entre champs reste inchangée. Les onglets Script (scripts pré-requête
 et post-réponse) et Tests affichent le code brut avec numérotation de lignes,
 aussi bien pour les fichiers `.bru` que pour les collections OpenCollection YAML.
+
+### Contenu des dossiers et de la collection racine
+
+- **Dossiers (`folder.bru` / `folder.yml`)** : quand un dossier est sélectionné dans l'arbre,
+  le panneau Détail affiche ses métadonnées dans six onglets dédiés (**En-têtes**, **Auth**,
+  **Vars**, **Script**, **Tests**, **Docs**).
+- **Collection racine (`collection.bru` / `opencollection.yml`)** : la touche `c` dans l'arbre
+  (ou un clic sur la bordure d'en-tête du panneau Collection) sélectionne la racine de la
+  collection pour afficher ses déclarations dans ces mêmes onglets. Appuyer sur `r` lorsque la
+  collection est sélectionnée lance toute la collection de manière récursive.
+- **Aucune résolution d'héritage** : le TUI n'affiche jamais d'authentification effective ni
+  d'en-têtes fusionnés. Chaque niveau montre strictement ce qu'il déclare lui-même (signalé par
+  la mention « sans héritage » dans l'en-tête du panneau).
+- **Masquage d'authentification** : les valeurs littérales sensibles (mots de passe, tokens,
+  secrets, clés d'API) sont masquées (`********`) dans l'onglet Auth, tandis que les références
+  de variables (`{{variable}}`) restent visibles en clair.
+- **Lecture seule** : les dossiers et la collection sont strictement en lecture seule ; aucune
+  session d'édition ne peut y être ouverte.
+
 
 ## Édition d'une requête
 

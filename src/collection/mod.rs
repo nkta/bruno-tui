@@ -9,6 +9,7 @@
 //! le disque.
 
 pub mod ast;
+pub mod auth;
 pub mod config;
 pub mod error;
 mod lexer;
@@ -18,6 +19,9 @@ pub mod tree;
 pub mod view;
 
 pub use ast::{Block, BlockBody, BruFile, Declaration, Entry, Node, NodeKind};
+pub use auth::{
+    MASKED_SECRET, is_sensitive_auth_key, is_variable_reference, mask_auth_params, mask_auth_value,
+};
 pub use config::BrunoConfig;
 pub use error::{LoadError, ParseError};
 pub use loader::{AutoLoader, BruLoader, CollectionLoader, OpenCollectionLoader};

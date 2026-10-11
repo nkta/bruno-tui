@@ -283,7 +283,11 @@ pub fn view(model: &Model, frame: &mut Frame) {
                         TITLE_DETAIL
                     };
                     let mut detail_block = panel(title, model.focus == Focus::Detail);
-                    if let Some(TreeNode::Request(request)) = model.selected_node() {
+
+                    let folder_meta_ok = model.folder_meta().and_then(|r| r.as_ref().ok());
+                    if let Some(TreeNode::Request(request)) = model.selected_node()
+                        && !model.selected_collection
+                    {
                         // Onglets de requête sur la bordure haute, comme
                         // les onglets de Bruno bureau : ils remplacent le
                         // titre « Détail ».
@@ -302,24 +306,40 @@ pub fn view(model: &Model, frame: &mut Frame) {
                             theme::BORDER
                         };
                         detail_block = theme::bordered().title(tabs).border_style(border);
+                    } else if let Some(meta) = folder_meta_ok {
+                        let mut tabs = detail::folder_tab_bar(
+                            meta,
+                            model.shown_request_tab(),
+                            areas.detail.width.saturating_sub(2),
+                        );
+                        if model.zoomed_panel() == Some(Focus::Detail) {
+                            tabs.spans
+                                .push(Span::styled("[plein écran — z] ", theme::PANEL_TITLE));
+                        }
+                        let border = if model.focus == Focus::Detail {
+                            theme::FOCUS
+                        } else {
+                            theme::BORDER
+                        };
+                        detail_block = theme::bordered().title(tabs).border_style(border);
                     }
-                    match model.selected_node() {
-                        Some(TreeNode::Request(_)) => {
-                            render_boxed_detail(model, frame, areas.detail, detail_block);
+                    if (matches!(model.selected_node(), Some(TreeNode::Request(_)))
+                        && !model.selected_collection)
+                        || folder_meta_ok.is_some()
+                    {
+                        render_boxed_detail(model, frame, areas.detail, detail_block);
+                    } else {
+                        // Pendant une saisie, pas de retour à la ligne : une
+                        // ligne logique = une ligne affichée, pour que le
+                        // curseur de texte et le décalage horizontal tombent
+                        // exactement (`improve-direct-editing`, D7).
+                        let mut detail = Paragraph::new(detail::render_text(model))
+                            .scroll((model.detail_scroll, 0))
+                            .block(detail_block);
+                        if detail_wraps(model) {
+                            detail = detail.wrap(Wrap { trim: false });
                         }
-                        _ => {
-                            // Pendant une saisie, pas de retour à la ligne : une
-                            // ligne logique = une ligne affichée, pour que le
-                            // curseur de texte et le décalage horizontal tombent
-                            // exactement (`improve-direct-editing`, D7).
-                            let mut detail = Paragraph::new(detail::render_text(model))
-                                .scroll((model.detail_scroll, 0))
-                                .block(detail_block);
-                            if detail_wraps(model) {
-                                detail = detail.wrap(Wrap { trim: false });
-                            }
-                            frame.render_widget(detail, areas.detail);
-                        }
+                        frame.render_widget(detail, areas.detail);
                     }
                     render_insert_cursor(model, frame, areas.detail);
                 }
@@ -460,6 +480,9 @@ fn breadcrumb_line(model: &Model) -> Line<'static> {
         separator(),
         Span::raw(collection.name.clone()),
     ];
+    if model.selected_collection {
+        return Line::from(spans);
+    }
     let Some(node) = model.selected_node() else {
         return Line::from(spans);
     };
@@ -967,7 +990,13 @@ fn titled_panel(title: String, focused: bool) -> Block<'static> {
 
 fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
     let base = if model.zoomed_panel() == Some(Focus::Tree) {
-        TITLE_TREE_ZOOMED
+        if model.selected_collection {
+            " Collection [sélectionnée — c] [plein écran — z] "
+        } else {
+            TITLE_TREE_ZOOMED
+        }
+    } else if model.selected_collection {
+        " Collection [sélectionnée — c] "
     } else {
         TITLE_TREE
     };
@@ -1001,10 +1030,14 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
             )))
         })
         .collect();
-    let selected = state
-        .selected
-        .checked_sub(start)
-        .filter(|index| *index < end - start);
+    let selected = if model.selected_collection {
+        None
+    } else {
+        state
+            .selected
+            .checked_sub(start)
+            .filter(|index| *index < end - start)
+    };
     let mut list_state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(
         List::new(items)
