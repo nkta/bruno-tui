@@ -84,6 +84,26 @@ pub fn is_watched_path(path: &Path) -> bool {
     false
 }
 
+/// Vrai pour un événement qui change le contenu ou l'arborescence.
+///
+/// Les accès (ouverture, lecture, fermeture sans écriture) et les seules
+/// métadonnées sont écartés : le chargement de la collection lit chaque
+/// fichier, et ces lectures déclencheraient sinon un rechargement après
+/// chaque chargement.
+pub fn is_change(kind: &notify::EventKind) -> bool {
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode, ModifyKind};
+
+    match kind {
+        EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        EventKind::Modify(_) => true,
+        // Fermeture après écriture : certains éditeurs n'émettent que celle-ci.
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) | EventKind::Any | EventKind::Other => false,
+    }
+}
+
 /// Vérifie si au moins un des chemins modifiés justifie un rechargement.
 pub fn should_reload(paths: &[PathBuf]) -> bool {
     paths.iter().any(|path| is_watched_path(path))
@@ -141,6 +161,9 @@ pub fn start_watcher(
     let watched_root = root.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
+            if !is_change(&event.kind) {
+                return;
+            }
             for path in event.paths {
                 // Chemins relatifs à la racine : les filtres ne doivent pas
                 // réagir aux dossiers parents de la collection (un ancêtre
@@ -218,6 +241,38 @@ mod tests {
         assert!(!is_watched_path(Path::new("node_modules/test.bru")));
         assert!(!is_watched_path(Path::new("test.bru~")));
         assert!(!is_watched_path(Path::new(".test.bru.swp")));
+    }
+
+    #[test]
+    fn only_content_or_tree_changes_count() {
+        use notify::EventKind;
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+            RenameMode,
+        };
+
+        assert!(is_change(&EventKind::Create(CreateKind::File)));
+        assert!(is_change(&EventKind::Remove(RemoveKind::File)));
+        assert!(is_change(&EventKind::Modify(ModifyKind::Data(
+            DataChange::Content
+        ))));
+        assert!(is_change(&EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both
+        ))));
+        assert!(is_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+
+        assert!(!is_change(&EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        ))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Read)));
+        assert!(!is_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(!is_change(&EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::AccessTime
+        ))));
     }
 
     #[test]
