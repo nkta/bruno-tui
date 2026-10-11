@@ -88,7 +88,11 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "r",
-                effect: "lancer la requête (ou récursivement un dossier) ; refusé pour gRPC/WebSocket",
+                effect: "lancer la requête (ou récursivement un dossier / la collection) ; refusé pour gRPC/WebSocket",
+            },
+            HelpEntry {
+                key: "c",
+                effect: "sélectionner la collection racine (affiche collection.bru dans le Détail)",
             },
             HelpEntry {
                 key: "O",
@@ -125,7 +129,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "←/h, →/l",
-                effect: "onglet précédent/suivant de la requête (hors édition)",
+                effect: "onglet précédent/suivant (requête, dossier ou collection)",
             },
             HelpEntry {
                 key: "Entrée / e",
@@ -248,6 +252,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 key: "Ctrl+E",
                 effect: "ouvrir le corps brut dans l'éditeur externe",
+            },
+            HelpEntry {
+                key: "x",
+                effect: "exporter le corps brut dans un fichier",
             },
             HelpEntry {
                 key: "Échap",

@@ -21,6 +21,7 @@ Options :
 | `--secret NOM[=CLÉ]` | variable secrète transmise à `bru` (répétable). Cherchée dans le `.env` de la collection puis le shell, sous `CLÉ` ou `NOM`/`NOM_EN_MAJUSCULES` ; une saisie dans le panneau Secrets prime. Jamais de valeur en clair sur la ligne de commande. |
 | `--no-mouse` | n'active pas la capture souris (la sélection native du terminal reste disponible) |
 | `--no-watch` | désactive la surveillance et le rechargement automatique de la collection |
+| `--no-history` | désactive la persistance de l'historique des exécutions dans le fichier d'état |
 | `-h`, `--help` | aide |
 | `-V`, `--version` | version |
 
@@ -70,7 +71,8 @@ d'édition non enregistrée demande confirmation.
 | `→`/`l`, `←`/`h` | déplier/replier un dossier (Collection) |
 | `Début`/`g`, `Fin`/`G` | début, fin de la liste |
 | `PageUp`/`PageDown` | page précédente/suivante |
-| `r` | lancer la requête (ou récursivement un dossier) ; `Ctrl+X` annule ; refusé pour gRPC/WebSocket |
+| `r` | lancer la requête (ou récursivement un dossier / la collection) ; `Ctrl+X` annule ; refusé pour gRPC/WebSocket |
+| `c` | sélectionner la collection racine (affiche `collection.bru` dans le panneau Détail) ; clic en-tête Collection |
 | `f` | filtrer l'arbre de la collection (en direct ; Entrée valide, Échap annule ou efface) |
 | `Ctrl+K` | recherche globale par nom, méthode, chemin et URL (popup centré en direct ; ↑↓ choisir, Entrée valide, Échap ferme) |
 | `M` | activer/désactiver la capture souris |
@@ -132,8 +134,8 @@ atténués ; une barre d'onglets adaptative fait défiler les onglets sur les
 |---|---|
 | `↑`/`k`, `↓`/`j` | défiler dans le détail |
 | `Début`/`g`, `Fin`/`G` | début, fin du détail |
-| `←`/`h`, `→`/`l` | onglet précédent/suivant de la requête (hors édition) |
-| `Entrée` / `e` | ouvrir une session d'édition (refusée pour gRPC/WebSocket) |
+| `←`/`h`, `→`/`l` | onglet précédent/suivant (requête, dossier ou collection) |
+| `Entrée` / `e` | ouvrir une session d'édition (requêtes HTTP uniquement ; refusée pour gRPC/WebSocket) |
 | `/` | chercher dans l'onglet affiché ; `n`/`N` : occurrence suivante/précédente |
 | `v` | sélection visuelle de lignes ; `y` copie dans le presse-papiers |
 | `Clic` | cliquer sur un onglet pour l'afficher |
@@ -143,6 +145,25 @@ pendant une session d'édition, ils ne sont pas des cibles éditables et la
 navigation entre champs reste inchangée. Les onglets Script (scripts pré-requête
 et post-réponse) et Tests affichent le code brut avec numérotation de lignes,
 aussi bien pour les fichiers `.bru` que pour les collections OpenCollection YAML.
+
+### Contenu des dossiers et de la collection racine
+
+- **Dossiers (`folder.bru` / `folder.yml`)** : quand un dossier est sélectionné dans l'arbre,
+  le panneau Détail affiche ses métadonnées dans six onglets dédiés (**En-têtes**, **Auth**,
+  **Vars**, **Script**, **Tests**, **Docs**).
+- **Collection racine (`collection.bru` / `opencollection.yml`)** : la touche `c` dans l'arbre
+  (ou un clic sur la bordure d'en-tête du panneau Collection) sélectionne la racine de la
+  collection pour afficher ses déclarations dans ces mêmes onglets. Appuyer sur `r` lorsque la
+  collection est sélectionnée lance toute la collection de manière récursive.
+- **Aucune résolution d'héritage** : le TUI n'affiche jamais d'authentification effective ni
+  d'en-têtes fusionnés. Chaque niveau montre strictement ce qu'il déclare lui-même (signalé par
+  la mention « sans héritage » dans l'en-tête du panneau).
+- **Masquage d'authentification** : les valeurs littérales sensibles (mots de passe, tokens,
+  secrets, clés d'API) sont masquées (`********`) dans l'onglet Auth, tandis que les références
+  de variables (`{{variable}}`) restent visibles en clair.
+- **Lecture seule** : les dossiers et la collection sont strictement en lecture seule ; aucune
+  session d'édition ne peut y être ouverte.
+
 
 ## Édition d'une requête
 
@@ -247,6 +268,7 @@ sur le disque, jamais enregistrée dans l'historique persistant, ni logguée.
 | `c` | copier en commande `curl` (en-têtes d'auth masqués) |
 | `u` | copier en commande `curl` complète (confirmation si des secrets sont présents) |
 | `Ctrl+E` | ouvrir le corps brut de la réponse (non filtré) dans `$VISUAL`, `$EDITOR`, ou `nano` — consultation seule, rien n'est relu |
+| `x` | exporter le corps brut dans un fichier (chemin proposé hors collection, confirmation si existant) |
 
 `Ctrl+E` fonctionne quel que soit le focus courant, tant qu'une requête
 sélectionnée a un résultat avec un corps non vide.
@@ -255,7 +277,10 @@ sélectionnée a un résultat avec un corps non vide.
 
 - **Diagnostics** (`D`) : erreurs de chargement de la collection ; `→`
   saute au nœud concerné dans l'arbre.
-- **Historique** (`H`) : exécutions passées ; `r` relance l'entrée
+- **Historique** (`H`) : journal persistant des exécutions (sauvegardé dans
+  `$XDG_STATE_HOME/bruno-tui/history.json` ou `~/.local/state/bruno-tui/history.json`,
+  borné à 200 entrées par collection, limité strictement aux métadonnées sans secrets
+  ni corps de réponse ; désactivable via `--no-history`) ; `r` relance l'entrée
   sélectionnée.
 - **Secrets** (`S`) : variables `vars:secret` de l'environnement actif et
   celles demandées par `--secret` ; `a` ajoute un nom, `Entrée` saisit sa

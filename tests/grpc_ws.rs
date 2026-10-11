@@ -61,6 +61,7 @@ fn bru_probe_loads_grpc_and_websocket_requests() {
     assert_eq!(grpc.view.method, "GRPC");
     assert_eq!(grpc.view.url, "grpc://localhost:50051");
     assert_eq!(grpc.view.auth, Some(AuthMode::NoAuth));
+    assert!(grpc.view.auth_params().is_empty());
     assert_eq!(grpc.view.headers.len(), 1);
     assert_eq!(grpc.view.headers[0].key, "x-custom-meta");
     assert_eq!(body_text(grpc), "▸ message 1\n{\n  \"name\": \"world\"\n}");
@@ -92,6 +93,10 @@ fn yaml_probe_loads_grpc_and_websocket_requests() {
     assert!(grpc.view.is_grpc());
     assert_eq!(grpc.view.method, "GRPC");
     assert_eq!(grpc.view.auth, Some(AuthMode::Bearer));
+    // Paramètres d'auth (lot auth) lus aussi pour gRPC, jamais résolus.
+    assert_eq!(grpc.view.auth_params().len(), 1);
+    assert_eq!(grpc.view.auth_params()[0].key, "token");
+    assert_eq!(grpc.view.auth_params()[0].value, "{{token}}");
     assert_eq!(grpc.view.headers.len(), 2);
     assert!(!grpc.view.headers[1].enabled);
     let details = grpc.view.grpc().expect("champs gRPC");
