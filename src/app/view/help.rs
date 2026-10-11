@@ -87,6 +87,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "lancer la requête (ou récursivement un dossier)",
             },
             HelpEntry {
+                key: "O",
+                effect: "options de campagne (tags, délai, bail, rapports)",
+            },
+            HelpEntry {
                 key: "Ctrl+X",
                 effect: "annuler l'exécution en cours",
             },
@@ -339,6 +343,14 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 key: "] / [",
                 effect: "requête en échec suivante / précédente",
+            },
+            HelpEntry {
+                key: "r",
+                effect: "relancer la campagne avec les options courantes",
+            },
+            HelpEntry {
+                key: "O",
+                effect: "options de campagne et export des rapports",
             },
         ],
     },

@@ -263,6 +263,8 @@ pub enum Message {
     ToggleHelp,
     /// `z`, hors saisie : bascule le mode plein écran du panneau actif.
     ToggleZoom,
+    /// `O`, hors saisie : ouvre ou ferme le popup d'options de campagne.
+    ToggleRunnerOptions,
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -366,6 +368,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('M') => Message::ToggleMouseCapture,
         KeyCode::Char('?') => Message::ToggleHelp,
         KeyCode::Char('z') => Message::ToggleZoom,
+        KeyCode::Char('O') => Message::ToggleRunnerOptions,
         _ => return None,
     };
     Some(message)
@@ -562,6 +565,12 @@ mod tests {
             ),
             (KeyCode::Char('?'), none, "ToggleHelp"),
             (KeyCode::Char('z'), none, "ToggleZoom"),
+            (KeyCode::Char('O'), none, "ToggleRunnerOptions"),
+            (
+                KeyCode::Char('O'),
+                KeyModifiers::SHIFT,
+                "ToggleRunnerOptions",
+            ),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(

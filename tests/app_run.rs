@@ -465,3 +465,28 @@ async fn missing_vars_secret_opens_the_panel_before_running() {
     assert!(!screen.contains("sans produire de rapport"), "{screen}");
     assert!(!screen.contains("fixture-value"), "{screen}");
 }
+
+#[tokio::test]
+async fn runner_options_popup_can_be_opened_and_closed_in_app() {
+    let collection = BruLoader.load(&runner_probe()).expect("collection chargée");
+    let (sender, handle, open) = spawn_app(collection, runner_probe(), fake_bru(), (120, 30)).await;
+
+    // Ouvre le popup des options avec 'O'
+    sender.send(key(KeyCode::Char('O'))).await.expect("envoi");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Ferme le popup avec Esc
+    sender.send(key(KeyCode::Esc)).await.expect("envoi");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Quitte l'application
+    sender.send(key(KeyCode::Char('q'))).await.expect("envoi");
+    let (terminal, exit) = timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("run retourne")
+        .expect("tâche");
+    let _ = open.send(());
+    assert!(matches!(exit, Exit::Normal));
+    let screen = screen(&terminal).join("\n");
+    assert!(!screen.contains("Options de la campagne"), "{screen}");
+}

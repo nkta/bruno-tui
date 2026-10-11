@@ -13,7 +13,7 @@ use super::{inner, panel, theme};
 use crate::app::diagnostics::diagnostics;
 use crate::app::model::{
     EnvironmentEditSession, EnvironmentEditState, Focus, HistoryEntry, HistoryOutcome, Model,
-    SecretError, SecretInput, secret_rows,
+    RunnerOptionsPopup, SecretError, SecretInput, secret_rows,
 };
 use crate::secrets::SecretSource;
 
@@ -106,7 +106,11 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
     let block = panel(" Campagne ", model.focus == Focus::Campaign);
     let Some(campaign) = &model.campaign else {
         frame.render_widget(
-            empty_state_message(area, "Aucune campagne lancée").block(block),
+            empty_state_message(
+                area,
+                "Aucune campagne lancée — r sur un dossier pour lancer, O pour les options",
+            )
+            .block(block),
             area,
         );
         return;
@@ -144,9 +148,38 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
             Style::new().add_modifier(Modifier::DIM),
         ),
     ]);
-    let header = vec![header_line, Line::default()];
 
-    let header_height = u16::try_from(header.len()).unwrap_or(2);
+    let options_str = model.runner_options.summary();
+    let options_line = Line::from(vec![
+        Span::styled("Options : ", theme::LABEL),
+        Span::styled(
+            options_str,
+            if model.runner_options.has_active_options() {
+                theme::SELECTION
+            } else {
+                Style::new().add_modifier(Modifier::DIM)
+            },
+        ),
+        Span::raw("  "),
+        Span::styled("(O pour modifier)", theme::LABEL),
+    ]);
+
+    let mut header = vec![header_line, options_line];
+    if !model.last_reports.is_empty() {
+        let reports_str = model
+            .last_reports
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        header.push(Line::from(vec![
+            Span::styled("Rapports : ", theme::LABEL),
+            Span::styled(reports_str, theme::SUCCESS),
+        ]));
+    }
+    header.push(Line::default());
+
+    let header_height = u16::try_from(header.len()).unwrap_or(3);
     let [header_area, list_area] =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(inner_area);
 
@@ -575,4 +608,207 @@ fn format_time(time: SystemTime) -> String {
 /// Statut : `0,07 s`.
 fn format_duration(secs: f64) -> String {
     format!("{secs:.2} s").replace('.', ",")
+}
+
+/// Calcule la zone centrée pour le popup des options de campagne.
+pub fn runner_options_popup_area(area: Rect) -> Rect {
+    let width = 72.min(area.width.saturating_sub(4)).max(42);
+    let height = 16.min(area.height.saturating_sub(2)).max(12);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect::new(x, y, width, height)
+}
+
+/// Dessine le popup de configuration des options de campagne.
+pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame, area: Rect) {
+    let block = theme::bordered()
+        .title(" Options de campagne (TNR) — touche O ")
+        .border_style(theme::FOCUS);
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = Vec::new();
+
+    // Champ 0: Tags inclus
+    let c0 = popup.cursor == 0;
+    let tags_val = if popup.tags_input.text().is_empty() {
+        "(aucun)"
+    } else {
+        popup.tags_input.text()
+    };
+    let tags_style = if c0 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c0 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Tags inclus        : ", theme::LABEL),
+        Span::styled(format!("[ {tags_val} ]"), tags_style),
+        if c0 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 1: Tags exclus
+    let c1 = popup.cursor == 1;
+    let excl_val = if popup.exclude_tags_input.text().is_empty() {
+        "(aucun)"
+    } else {
+        popup.exclude_tags_input.text()
+    };
+    let excl_style = if c1 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c1 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Tags exclus        : ", theme::LABEL),
+        Span::styled(format!("[ {excl_val} ]"), excl_style),
+        if c1 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 2: Délai en ms
+    let c2 = popup.cursor == 2;
+    let delay_val = if popup.delay_input.text().is_empty() {
+        "aucun"
+    } else {
+        popup.delay_input.text()
+    };
+    let delay_style = if c2 {
+        theme::SELECTION
+    } else {
+        Style::default()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(if c2 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Délai en ms        : ", theme::LABEL),
+        Span::styled(format!("[ {delay_val} ]"), delay_style),
+        if c2 && popup.editing_text {
+            Span::styled("  (saisie…)", theme::LABEL)
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Champ 3: Bail
+    let c3 = popup.cursor == 3;
+    let bail_check = if popup.bail { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c3 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Arrêt 1er échec    : ", theme::LABEL),
+        Span::styled(
+            format!("{bail_check} Interrompre au premier échec (--bail)"),
+            if c3 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 4: Tests-only
+    let c4 = popup.cursor == 4;
+    let tests_check = if popup.tests_only { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c4 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Tests uniquement   : ", theme::LABEL),
+        Span::styled(
+            format!("{tests_check} Uniquement requêtes avec tests (--tests-only)"),
+            if c4 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 5: Rapport JUnit
+    let c5 = popup.cursor == 5;
+    let junit_check = if popup.reporter_junit { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c5 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Rapport JUnit XML  : ", theme::LABEL),
+        Span::styled(
+            format!("{junit_check} Exporter rapport JUnit (--reporter-junit)"),
+            if c5 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 6: Rapport HTML
+    let c6 = popup.cursor == 6;
+    let html_check = if popup.reporter_html { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c6 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Rapport HTML       : ", theme::LABEL),
+        Span::styled(
+            format!("{html_check} Exporter rapport HTML (--reporter-html)"),
+            if c6 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    // Champ 7: Masquer en-têtes sensibles
+    let c7 = popup.cursor == 7;
+    let skip_check = if popup.skip_headers { "[x]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::styled(if c7 { "▶ " } else { "  " }, theme::FOCUS),
+        Span::styled("Masquer en-têtes   : ", theme::LABEL),
+        Span::styled(
+            format!("{skip_check} Omettre en-têtes sensibles (--reporter-skip-all-headers)"),
+            if c7 {
+                theme::SELECTION
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+
+    lines.push(Line::default());
+
+    // Boutons (Champs 8 et 9)
+    let c8 = popup.cursor == 8;
+    let c9 = popup.cursor == 9;
+    let save_btn = Span::styled(
+        " [ Enregistrer ] ",
+        if c8 { theme::SELECTION } else { theme::SECTION },
+    );
+    let run_btn = Span::styled(
+        " [ Lancer la campagne (r) ] ",
+        if c9 { theme::SELECTION } else { theme::SECTION },
+    );
+    lines.push(Line::from(vec![
+        Span::raw("   "),
+        save_btn,
+        Span::raw("    "),
+        run_btn,
+    ]));
+
+    lines.push(Line::default());
+
+    // Erreur ou raccourcis
+    if let Some(err) = &popup.error {
+        lines.push(Line::styled(format!(" ⚠ {err}"), theme::FAILURE));
+    } else {
+        lines.push(Line::styled(
+            " ↑↓ naviguer · Espace basculer · Entrée modifier / valider · Échap fermer",
+            theme::LABEL,
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner_area);
 }
