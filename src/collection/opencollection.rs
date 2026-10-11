@@ -14,7 +14,8 @@ use serde_norway::{Mapping, Value};
 use super::error::{LoadError, ParseError};
 use super::view::{
     AuthMode, BodyContent, BodyKind, BodyView, Environment, EnvironmentExtends, ExtraTabs,
-    FileMeta, FileMetaContent, KeyValue, RequestView, valid_environment_name,
+    FileMeta, FileMetaContent, GrpcView, KeyValue, MessageView, RequestView, messages_body,
+    valid_environment_name,
 };
 
 /// Fichier racine d'une collection OpenCollection.
@@ -65,7 +66,24 @@ const ENVIRONMENT_KEYS: [&str; 6] = [
     "description",
 ];
 /// Types de requête reconnus par Bruno mais non affichés par le TUI.
-const UNSUPPORTED_ITEM_TYPES: [&str; 5] = ["grpc", "websocket", "script", "app", "folder"];
+const UNSUPPORTED_ITEM_TYPES: [&str; 3] = ["script", "app", "folder"];
+
+/// Clés racine d'une requête gRPC (`stringifyGrpcRequest`).
+const GRPC_ITEM_KEYS: [&str; 5] = ["info", "grpc", "runtime", "settings", "docs"];
+/// Clés du bloc `grpc`.
+const GRPC_DETAILS_KEYS: [&str; 7] = [
+    "url",
+    "method",
+    "methodType",
+    "protoFilePath",
+    "metadata",
+    "message",
+    "auth",
+];
+/// Clés racine d'une requête WebSocket (`stringifyWebsocketRequest`).
+const WEBSOCKET_ITEM_KEYS: [&str; 5] = ["info", "websocket", "runtime", "settings", "docs"];
+/// Clés du bloc `websocket`.
+const WEBSOCKET_DETAILS_KEYS: [&str; 4] = ["url", "headers", "message", "auth"];
 
 /// Résultat d'une lecture : la valeur et les avis sur ce qui a été ignoré.
 #[derive(Debug)]
@@ -213,8 +231,9 @@ fn content_of(value: Option<&Value>) -> Option<String> {
 }
 
 /// En-têtes (`toBrunoHttpHeaders`).
-fn headers(map: &Mapping) -> Vec<KeyValue> {
-    sequence(map, "headers")
+/// En-têtes (ou métadonnées gRPC) de la liste `key` : `{ name, value, disabled }`.
+fn headers(map: &Mapping, key: &str) -> Vec<KeyValue> {
+    sequence(map, key)
         .map(|header| KeyValue {
             key: string_of(header, "name").unwrap_or_default(),
             value: string_of(header, "value").unwrap_or_default(),
@@ -275,39 +294,44 @@ struct Scripts {
     pre_request: Option<String>,
     post_response: Option<String>,
     tests: Option<String>,
+    /// Scripts `grpc:*`, lus seulement pour une requête gRPC.
+    grpc: GrpcView,
 }
 
-fn scripts(map: &Mapping, notices: &mut Notices, scope: &str) -> Scripts {
+/// Ajoute `code` au script déjà trouvé pour ce type, ligne à ligne.
+fn append(slot: &mut Option<String>, code: String) {
+    match slot {
+        Some(existing) => {
+            existing.push('\n');
+            existing.push_str(&code);
+        }
+        None => *slot = Some(code),
+    }
+}
+
+/// Lit `scripts` ; les types `grpc:*` ne sont reconnus que si `grpc` est
+/// vrai (requête gRPC), sinon ils donnent un avis comme tout type inconnu.
+fn scripts(map: &Mapping, notices: &mut Notices, scope: &str, grpc: bool) -> Scripts {
     let mut found = Scripts::default();
     for script in sequence(map, "scripts") {
         let code = string_of(script, "code").filter(|code| !code.is_empty());
         let Some(code) = code else {
             continue;
         };
-        match get(script, "type").and_then(Value::as_str) {
-            Some("before-request") => match &mut found.pre_request {
-                Some(existing) => {
-                    existing.push('\n');
-                    existing.push_str(&code);
-                }
-                None => found.pre_request = Some(code),
-            },
-            Some("after-response") => match &mut found.post_response {
-                Some(existing) => {
-                    existing.push('\n');
-                    existing.push_str(&code);
-                }
-                None => found.post_response = Some(code),
-            },
-            Some("tests") => match &mut found.tests {
-                Some(existing) => {
-                    existing.push('\n');
-                    existing.push_str(&code);
-                }
-                None => found.tests = Some(code),
-            },
-            _ => notices.push(format!("type de script `{scope}scripts` non affiché")),
-        }
+        let slot = match get(script, "type").and_then(Value::as_str) {
+            Some("before-request") => &mut found.pre_request,
+            Some("after-response") => &mut found.post_response,
+            Some("tests") => &mut found.tests,
+            Some("grpc:before-call-start") if grpc => &mut found.grpc.before_call_start,
+            Some("grpc:before-message-send") if grpc => &mut found.grpc.before_message_send,
+            Some("grpc:after-message-receive") if grpc => &mut found.grpc.after_message_receive,
+            Some("grpc:after-call-end") if grpc => &mut found.grpc.after_call_end,
+            _ => {
+                notices.push(format!("type de script `{scope}scripts` non affiché"));
+                continue;
+            }
+        };
+        append(slot, code);
     }
     found
 }
@@ -496,6 +520,77 @@ fn assertions(runtime: &Mapping) -> Vec<KeyValue> {
         .collect()
 }
 
+/// Messages gRPC (`parseGrpcRequest`) : liste `{ title, message }`, ou
+/// texte seul pour un message unique.
+fn grpc_messages(details: &Mapping) -> Vec<MessageView> {
+    match get(details, "message") {
+        Some(Value::Sequence(variants)) => variants
+            .iter()
+            .filter_map(|variant| untagged(variant).as_mapping())
+            .enumerate()
+            .map(|(index, variant)| MessageView {
+                name: string_of(variant, "title")
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| format!("message {}", index + 1)),
+                content: string_of(variant, "message").unwrap_or_default(),
+                ..MessageView::default()
+            })
+            .collect(),
+        // `isNonEmptyString` : un message unique n'est lu que s'il est texte.
+        Some(Value::String(content)) if !content.is_empty() => vec![MessageView {
+            content: content.clone(),
+            ..MessageView::default()
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// Messages WebSocket (`parseWebsocketRequest`) : liste
+/// `{ title, selected, message: { type, data } }`, ou message unique
+/// `{ type, data }`.
+fn websocket_messages(details: &Mapping) -> Vec<MessageView> {
+    let typed = |message: Option<&Mapping>| {
+        let kind = message
+            .and_then(|m| string_of(m, "type"))
+            .unwrap_or_else(|| "text".to_owned());
+        let content = message
+            .and_then(|m| string_of(m, "data"))
+            .unwrap_or_default();
+        (kind, content)
+    };
+    match get(details, "message") {
+        Some(Value::Sequence(variants)) => variants
+            .iter()
+            .filter_map(|variant| untagged(variant).as_mapping())
+            .enumerate()
+            .map(|(index, variant)| {
+                let (kind, content) = typed(mapping(variant, "message"));
+                MessageView {
+                    name: string_of(variant, "title")
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| format!("message {}", index + 1)),
+                    kind,
+                    selected: get(variant, "selected").and_then(Value::as_bool) == Some(true),
+                    content,
+                }
+            })
+            .collect(),
+        Some(message) => {
+            let (kind, content) = typed(untagged(message).as_mapping());
+            if content.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![MessageView {
+                    kind,
+                    content,
+                    ..MessageView::default()
+                }]
+            }
+        }
+        None => Vec::new(),
+    }
+}
+
 /// Lit une requête (`parseItem`). Seuls les types `http` et `graphql` sont
 /// affichables ; les autres donnent une erreur propre au fichier.
 pub fn parse_item(source: &str) -> Result<Parsed<RequestView>, ParseError> {
@@ -506,24 +601,33 @@ pub fn parse_item(source: &str) -> Result<Parsed<RequestView>, ParseError> {
         .or_else(|| get(&item, "type"))
         .and_then(Value::as_str)
         .ok_or(ParseError::MissingItemType)?;
-    let (details_key, default_method, known): (&str, &str, &[&str]) = match kind {
-        "http" => ("http", "GET", &HTTP_ITEM_KEYS),
-        "graphql" => ("graphql", "POST", &GRAPHQL_ITEM_KEYS),
-        other => {
-            return Err(ParseError::UnsupportedItemType {
-                kind: UNSUPPORTED_ITEM_TYPES
-                    .iter()
-                    .find(|known| **known == other)
-                    .map_or_else(|| "inconnu".to_owned(), |known| (*known).to_owned()),
-            });
-        }
-    };
+    let (details_key, default_method, known, details_keys): (&str, &str, &[&str], &[&str]) =
+        match kind {
+            "http" => ("http", "GET", &HTTP_ITEM_KEYS, &DETAILS_KEYS),
+            "graphql" => ("graphql", "POST", &GRAPHQL_ITEM_KEYS, &DETAILS_KEYS),
+            "grpc" => ("grpc", "GRPC", &GRPC_ITEM_KEYS, &GRPC_DETAILS_KEYS),
+            "websocket" => (
+                "websocket",
+                "WS",
+                &WEBSOCKET_ITEM_KEYS,
+                &WEBSOCKET_DETAILS_KEYS,
+            ),
+            other => {
+                return Err(ParseError::UnsupportedItemType {
+                    kind: UNSUPPORTED_ITEM_TYPES
+                        .iter()
+                        .find(|known| **known == other)
+                        .map_or_else(|| "inconnu".to_owned(), |known| (*known).to_owned()),
+                });
+            }
+        };
+    let is_grpc = kind == "grpc";
 
     let mut notices = Notices::default();
     notices.unknown_keys(&item, known, "");
     let empty = Mapping::new();
     let details = mapping(&item, details_key).unwrap_or(&empty);
-    notices.unknown_keys(details, &DETAILS_KEYS, &format!("{details_key}."));
+    notices.unknown_keys(details, details_keys, &format!("{details_key}."));
     let runtime = mapping(&item, "runtime").unwrap_or(&empty);
     notices.unknown_keys(runtime, &RUNTIME_KEYS, "runtime.");
 
@@ -558,28 +662,46 @@ pub fn parse_item(source: &str) -> Result<Parsed<RequestView>, ParseError> {
             kind: BodyKind::Graphql,
             content: BodyContent::Text(string_of(body, "query").unwrap_or_default()),
         })
+    } else if is_grpc {
+        messages_body(&grpc_messages(details), "grpc")
+    } else if kind == "websocket" {
+        messages_body(&websocket_messages(details), "ws")
     } else {
         body(details, &mut notices)
     };
 
-    let found = scripts(runtime, &mut notices, "runtime.");
+    // gRPC : métadonnées `metadata` (`toBrunoGrpcMetadata`), mêmes champs
+    // que des en-têtes.
+    let headers = headers(details, if is_grpc { "metadata" } else { "headers" });
+
+    let found = scripts(runtime, &mut notices, "runtime.", is_grpc);
     let assertions = assertions(runtime);
+    let has_pre = found.pre_request.is_some()
+        || found.grpc.before_call_start.is_some()
+        || found.grpc.before_message_send.is_some();
+    let has_post = found.post_response.is_some()
+        || found.grpc.after_message_receive.is_some()
+        || found.grpc.after_call_end.is_some();
     let view = RequestView {
         name: info.and_then(|info| string_of(info, "name")),
         kind: Some(kind.to_owned()),
         seq: seq_of(info),
-        method: string_of(details, "method")
-            .filter(|method| !method.is_empty())
-            .unwrap_or_else(|| default_method.to_owned())
-            .to_ascii_uppercase(),
+        method: if is_grpc || kind == "websocket" {
+            default_method.to_owned()
+        } else {
+            string_of(details, "method")
+                .filter(|method| !method.is_empty())
+                .unwrap_or_else(|| default_method.to_owned())
+                .to_ascii_uppercase()
+        },
         url: string_of(details, "url").unwrap_or_default(),
-        headers: headers(details),
+        headers,
         query_params,
         path_params,
         body,
         auth,
-        has_pre_request_script: found.pre_request.is_some(),
-        has_post_response_script: found.post_response.is_some(),
+        has_pre_request_script: has_pre,
+        has_post_response_script: has_post,
         has_tests: found.tests.is_some(),
         has_assert: !assertions.is_empty(),
         extra: Box::new(ExtraTabs {
@@ -591,6 +713,12 @@ pub fn parse_item(source: &str) -> Result<Parsed<RequestView>, ParseError> {
             docs: content_of(item.get("docs")),
             settings: settings(&item, &mut notices),
             assertions,
+            grpc: is_grpc.then(|| GrpcView {
+                method: string_of(details, "method"),
+                method_type: string_of(details, "methodType"),
+                proto_path: string_of(details, "protoFilePath"),
+                ..found.grpc
+            }),
             auth_params: auth_params(auth_source),
         }),
     };
@@ -644,10 +772,10 @@ fn defaults_meta(
     let empty = Mapping::new();
     let request = request.unwrap_or(&empty);
     notices.unknown_keys(request, &DEFAULTS_KEYS, "request.");
-    let found = scripts(request, notices, "request.");
+    let found = scripts(request, notices, "request.", false);
     let auth_mode = auth(request, notices, "request.");
     let auth_params = auth_parameters(request);
-    let hdrs = headers(request);
+    let hdrs = headers(request, "headers");
     let vars_pre = variables(request);
     let vars_post = post_response_variables(request, notices, "request.");
     let docs = content_of(docs_value);
@@ -849,8 +977,8 @@ mod tests {
 
     #[test]
     fn unsupported_types_are_errors_without_quoting_the_file() {
-        let error = parse_item("info:\n  type: grpc\n").expect_err("grpc");
-        assert!(matches!(error, ParseError::UnsupportedItemType { ref kind } if kind == "grpc"));
+        let error = parse_item("info:\n  type: script\n").expect_err("script");
+        assert!(matches!(error, ParseError::UnsupportedItemType { ref kind } if kind == "script"));
         let error = parse_item("info:\n  type: s3cr3t\n").expect_err("inconnu");
         assert!(!error.to_string().contains("s3cr3t"), "{error}");
         assert!(matches!(
@@ -859,6 +987,79 @@ mod tests {
         ));
         assert!(matches!(parse_item(""), Err(ParseError::NotAMapping)));
         assert!(matches!(parse_item("- a\n"), Err(ParseError::NotAMapping)));
+    }
+
+    #[test]
+    fn grpc_request_in_yaml() {
+        let parsed = item(
+            "info:\n  name: say hello\n  type: grpc\n  seq: 1\ngrpc:\n  url: grpc://localhost:50051\n  method: /hello.Greeter/SayHello\n  methodType: unary\n  protoFilePath: ./hello.proto\n  metadata:\n    - name: x-meta\n      value: v\n    - name: x-off\n      value: w\n      disabled: true\n  message:\n    - title: first\n      message: '{\"name\":\"world\"}'\n    - message: '{}'\nruntime:\n  scripts:\n    - type: grpc:before-call-start\n      code: a()\n    - type: grpc:after-call-end\n      code: b()\ndocs: gRPC docs\n",
+        );
+        assert!(parsed.notices.is_empty(), "{:?}", parsed.notices);
+        let view = parsed.value;
+        assert!(view.is_grpc());
+        assert_eq!(view.method, "GRPC");
+        assert_eq!(view.url, "grpc://localhost:50051");
+        assert_eq!(
+            view.headers,
+            [
+                KeyValue {
+                    key: "x-meta".into(),
+                    value: "v".into(),
+                    enabled: true
+                },
+                KeyValue {
+                    key: "x-off".into(),
+                    value: "w".into(),
+                    enabled: false
+                }
+            ]
+        );
+        assert_eq!(
+            view.body.clone().map(|body| body.content),
+            Some(BodyContent::Text(
+                "▸ first\n{\"name\":\"world\"}\n\n▸ message 2\n{}".into()
+            ))
+        );
+        let grpc = view.extra.grpc.as_ref().expect("gRPC");
+        assert_eq!(grpc.method.as_deref(), Some("/hello.Greeter/SayHello"));
+        assert_eq!(grpc.method_type.as_deref(), Some("unary"));
+        assert_eq!(grpc.proto_path.as_deref(), Some("./hello.proto"));
+        assert_eq!(grpc.before_call_start.as_deref(), Some("a()"));
+        assert_eq!(grpc.after_call_end.as_deref(), Some("b()"));
+        assert!(view.has_pre_request_script && view.has_post_response_script);
+        assert_eq!(view.docs(), Some("gRPC docs"));
+    }
+
+    #[test]
+    fn websocket_request_in_yaml() {
+        let parsed = item(
+            "info:\n  name: echo\n  type: websocket\nwebsocket:\n  url: ws://x\n  headers:\n    - name: a\n      value: b\n  message:\n    type: json\n    data: '{}'\n  auth:\n    type: bearer\n    token: t\n",
+        );
+        assert!(parsed.notices.is_empty(), "{:?}", parsed.notices);
+        let view = parsed.value;
+        assert!(view.is_ws());
+        assert_eq!(view.method, "WS");
+        assert_eq!(view.url, "ws://x");
+        assert_eq!(view.headers.len(), 1);
+        assert_eq!(view.auth, Some(AuthMode::Bearer));
+        assert_eq!(view.extra.grpc, None);
+        // Message unique sans nom : son type reste affiché.
+        assert_eq!(
+            view.body.clone().map(|body| body.content),
+            Some(BodyContent::Text("▸ message 1 (json)\n{}".into()))
+        );
+    }
+
+    #[test]
+    fn grpc_scripts_outside_grpc_give_a_notice() {
+        let parsed = item(
+            "info:\n  type: websocket\nruntime:\n  scripts:\n    - type: grpc:after-call-end\n      code: x\n",
+        );
+        assert_eq!(
+            parsed.notices,
+            ["type de script `runtime.scripts` non affiché"]
+        );
+        assert!(!parsed.value.has_post_response_script);
     }
 
     #[test]
@@ -875,7 +1076,7 @@ mod tests {
     #[test]
     fn unknown_fields_give_notices_citing_keys_only() {
         let parsed = item(
-            "info:\n  type: http\nhttp:\n  url: x\n  body:\n    type: hologram\n    data: s3cr3t\n  extra: s3cr3t\nruntime:\n  scripts:\n    - type: grpc:before-call-start\n      code: x\nfuture: 1\n",
+            "info:\n  type: http\nhttp:\n  url: x\n  body:\n    type: hologram\n    data: s3cr3t\n  extra: s3cr3t\nruntime:\n  scripts:\n    - type: future-unknown-hook\n      code: x\nfuture: 1\n",
         );
         assert_eq!(parsed.value.body, None);
         let all = parsed.notices.join("\n");

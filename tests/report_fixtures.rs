@@ -413,3 +413,65 @@ fn csv_iterations_report() {
     assert_eq!(report.iterations()[0].results[0].test.filename, "req.bru");
     assert_eq!(report.iterations()[1].results[0].test.filename, "req.bru");
 }
+
+/// Requêtes gRPC et WebSocket : `bru run` 4.2.1 les traite comme des
+/// requêtes HTTP et échoue sur le schéma de l'URL, sans lancer leurs
+/// tests ; la requête HTTP voisine s'exécute normalement.
+fn assert_grpc_ws_report(report: &Report, [grpc, ws, http]: [&str; 3], ws_method: Option<&str>) {
+    let iteration = &report.iterations()[0];
+    assert_eq!(iteration.summary.total_requests, 3);
+    assert_eq!(iteration.summary.passed_requests, 1);
+    assert_eq!(iteration.summary.error_requests, 2);
+    assert_eq!(iteration.summary.total_tests, 0);
+
+    for (name, scheme, method) in [
+        (grpc, "grpc", Some("/hello.Greeter/SayHello")),
+        (ws, "ws", ws_method),
+    ] {
+        let result = result(report, name);
+        assert_eq!(result.status, ResultStatus::Error, "{name}");
+        assert_eq!(
+            result.error.as_deref(),
+            Some(format!("Unsupported protocol {scheme}:").as_str())
+        );
+        assert_eq!(result.request.method.as_deref(), method, "{name}");
+        assert_eq!(result.response.status, ResponseStatus::Error);
+        assert_eq!(result.response.data, Value::Null);
+        assert!(result.test_results.is_empty());
+    }
+    let ping = result(report, http);
+    assert_eq!(ping.status, ResultStatus::Pass);
+    assert_eq!(ping.response.status, ResponseStatus::Http(200));
+}
+
+#[test]
+fn grpc_and_websocket_requests_are_not_executed() {
+    let report: Report = serde_json::from_str(include_str!("fixtures/reports/grpc-ws.json"))
+        .expect("grpc-ws.json doit se désérialiser");
+    // `.bru` : la méthode d'une requête WebSocket est une chaîne vide.
+    assert_grpc_ws_report(
+        &report,
+        ["say hello", "echo websocket", "http ping"],
+        Some(""),
+    );
+    assert_eq!(
+        result(&report, "say hello").request.url.as_deref(),
+        Some("grpc://localhost:50051")
+    );
+}
+
+#[test]
+fn grpc_and_websocket_yaml_requests_are_not_executed() {
+    let report: Report = serde_json::from_str(include_str!("fixtures/reports/oc-grpc-ws.json"))
+        .expect("oc-grpc-ws.json doit se désérialiser");
+    // YAML : la clé `method` est absente pour une requête WebSocket.
+    assert_grpc_ws_report(&report, ["say hello", "echo", "ping"], None);
+    // Les métadonnées actives sont envoyées comme en-têtes.
+    let headers = result(&report, "say hello")
+        .request
+        .headers
+        .clone()
+        .unwrap_or_default();
+    assert_eq!(headers.get("x-custom-meta"), Some(&json!("test-value")));
+    assert!(!headers.contains_key("x-off"));
+}

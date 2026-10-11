@@ -88,7 +88,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "r",
-                effect: "lancer la requête (ou récursivement un dossier / la collection)",
+                effect: "lancer la requête (ou récursivement un dossier / la collection) ; refusé pour gRPC/WebSocket",
             },
             HelpEntry {
                 key: "c",
@@ -133,7 +133,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Entrée / e",
-                effect: "ouvrir une session d'édition (refusée pour une collection YAML)",
+                effect: "ouvrir une session d'édition (refusée en YAML et pour gRPC/WebSocket)",
             },
             HelpEntry {
                 key: "/",

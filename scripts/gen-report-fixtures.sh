@@ -9,6 +9,10 @@
 # Produit aussi `opencollection.json` depuis
 # `tests/fixtures/collections/oc-probe` (collection OpenCollection YAML).
 #
+# Produit aussi `grpc-ws.json` et `oc-grpc-ws.json` depuis
+# `tests/fixtures/collections/grpc-ws-probe` (`.bru`) et `oc-grpc-ws-probe`
+# (YAML) : requêtes gRPC et WebSocket, que `bru run` 4.2.1 n'exécute pas.
+#
 # Produit aussi `pre-request-error.json` depuis
 # `tests/fixtures/collections/runner-probe-errored` : requête en échec avant
 # envoi (script pré-requête qui lève une exception), sans serveur requis.
@@ -25,6 +29,10 @@ YML_COLLECTION="$ROOT/tests/fixtures/collections/oc-probe"
 YML_OUT="$ROOT/tests/fixtures/reports/opencollection.json"
 CSV_COLLECTION="$ROOT/tests/fixtures/collections/csv-probe"
 CSV_OUT="$ROOT/tests/fixtures/reports/csv-iterations.json"
+GRPC_WS_COLLECTION="$ROOT/tests/fixtures/collections/grpc-ws-probe"
+GRPC_WS_OUT="$ROOT/tests/fixtures/reports/grpc-ws.json"
+OC_GRPC_WS_COLLECTION="$ROOT/tests/fixtures/collections/oc-grpc-ws-probe"
+OC_GRPC_WS_OUT="$ROOT/tests/fixtures/reports/oc-grpc-ws.json"
 PORT=18765
 
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$COLLECTION/www" \
@@ -66,6 +74,22 @@ CODE=$?
 set -e
 
 echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $YML_OUT"
+
+cd "$GRPC_WS_COLLECTION"
+set +e
+bru run -r --reporter-json /dev/fd/3 3>"$GRPC_WS_OUT" >/dev/null 2>&1
+CODE=$?
+set -e
+
+echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $GRPC_WS_OUT"
+
+cd "$OC_GRPC_WS_COLLECTION"
+set +e
+bru run -r --reporter-json /dev/fd/3 3>"$OC_GRPC_WS_OUT" >/dev/null 2>&1
+CODE=$?
+set -e
+
+echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $OC_GRPC_WS_OUT"
 
 cd "$ERRORED_COLLECTION"
 set +e

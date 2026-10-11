@@ -47,9 +47,10 @@ Pour une collection YAML :
 - l'édition est désactivée : `Entrée`/`e` dans le détail, `e` dans le
   panneau Environnement et `Ctrl+S` affichent « Collection OpenCollection
   (YAML) en lecture seule » ;
-- seules les requêtes `http` et `graphql` sont affichées ; les autres
-  types (`grpc`, `websocket`, ...) et les fichiers invalides apparaissent
-  en erreur dans l'arbre ;
+- les requêtes `http`, `graphql`, `grpc` et `websocket` sont affichées
+  (voir [Requêtes gRPC et WebSocket](#requêtes-grpc-et-websocket)) ; les
+  autres types (`script`, `app`, ...) et les fichiers invalides
+  apparaissent en erreur dans l'arbre ;
 - les clés que le TUI ne sait pas afficher sont ignorées et listées comme
   avis dans le panneau Diagnostics (`D`), sans jamais citer de valeur ;
 - le nom d'un environnement est son nom de fichier sans extension, celui
@@ -70,7 +71,7 @@ d'édition non enregistrée demande confirmation.
 | `→`/`l`, `←`/`h` | déplier/replier un dossier (Collection) |
 | `Début`/`g`, `Fin`/`G` | début, fin de la liste |
 | `PageUp`/`PageDown` | page précédente/suivante |
-| `r` | lancer la requête (ou récursivement un dossier / la collection) ; `Ctrl+X` annule |
+| `r` | lancer la requête (ou récursivement un dossier / la collection) ; `Ctrl+X` annule ; refusé pour gRPC/WebSocket |
 | `c` | sélectionner la collection racine (affiche `collection.bru` dans le panneau Détail) ; clic en-tête Collection |
 | `f` | filtrer l'arbre de la collection (en direct ; Entrée valide, Échap annule ou efface) |
 | `Ctrl+K` | recherche globale par nom, méthode, chemin et URL (popup centré en direct ; ↑↓ choisir, Entrée valide, Échap ferme) |
@@ -93,6 +94,34 @@ désactiver cette surveillance). Si une session d'édition comporte des
 modifications non enregistrées, le rechargement est différé après sa fermeture
 et un avertissement signale la modification sur disque.
 
+## Requêtes gRPC et WebSocket
+
+Les requêtes gRPC (`type: grpc`) et WebSocket (`type: ws` en `.bru`,
+`websocket` en YAML) de Bruno 4 sont affichées **en lecture seule** :
+
+- l'arbre et la barre d'URL montrent `GRPC` ou `WS` à la place de la
+  méthode HTTP ;
+- le Détail réutilise les onglets existants :
+  - **Params** : boîte « Appel gRPC » (méthode RPC, type, fichier proto) ;
+  - **En-têtes** : « Métadonnées » pour gRPC (bloc `metadata`) ;
+  - **Corps** : « Messages », chaque message précédé de `▸ nom (type,
+    sélectionné)` ;
+  - **Script** : les quatre scripts `grpc:*` pour gRPC
+    (`before-call-start`, `before-message-send`, `after-message-receive`,
+    `after-call-end`) ;
+  - **Auth**, **Tests**, **Docs**, **Vars**, **Settings** : comme en HTTP ;
+- l'édition est refusée (`Entrée`, `e`, clic) : « Requête gRPC en lecture
+  seule : l'édition ne gère que les requêtes HTTP » ;
+- `r` sur une telle requête n'appelle pas `bru` et affiche « Requête gRPC :
+  type non exécutable par bru run ».
+
+`bru run` 4.2.1 ne sait pas les exécuter : il les envoie comme des requêtes
+HTTP et échoue aussitôt (`Unsupported protocol grpc:` ou `ws:`), sans
+lancer leurs tests. Une campagne récursive (dossier, `C`, popup `O`) reste
+déléguée à `bru run` : ces requêtes y apparaissent en erreur avec ce
+message, et les autres requêtes s'exécutent normalement (fixtures
+`tests/fixtures/reports/grpc-ws.json` et `oc-grpc-ws.json`).
+
 ## Panneau Détail
 
 Affiche la requête sélectionnée selon dix onglets, comme Bruno bureau :
@@ -106,7 +135,7 @@ atténués ; une barre d'onglets adaptative fait défiler les onglets sur les
 | `↑`/`k`, `↓`/`j` | défiler dans le détail |
 | `Début`/`g`, `Fin`/`G` | début, fin du détail |
 | `←`/`h`, `→`/`l` | onglet précédent/suivant (requête, dossier ou collection) |
-| `Entrée` / `e` | ouvrir une session d'édition (requêtes uniquement) |
+| `Entrée` / `e` | ouvrir une session d'édition (requêtes HTTP uniquement ; refusée pour gRPC/WebSocket) |
 | `/` | chercher dans l'onglet affiché ; `n`/`N` : occurrence suivante/précédente |
 | `v` | sélection visuelle de lignes ; `y` copie dans le presse-papiers |
 | `Clic` | cliquer sur un onglet pour l'afficher |

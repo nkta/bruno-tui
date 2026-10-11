@@ -1230,6 +1230,12 @@ pub enum StatusMessage {
     /// Édition ou enregistrement refusé : la collection est au format
     /// OpenCollection (YAML), que le writer ne sait pas écrire.
     ReadOnlyCollection,
+    /// `r` sur une requête gRPC ou WebSocket (libellé du type) : `bru run`
+    /// 4.2.1 ne sait pas l'exécuter, rien n'est lancé.
+    NotExecutable(&'static str),
+    /// Édition refusée sur une requête gRPC ou WebSocket (libellé du
+    /// type) : le writer ne connaît que les requêtes HTTP.
+    ReadOnlyRequestType(&'static str),
     /// Corps de réponse exporté dans un fichier.
     ResponseExported(PathBuf),
     /// Échec de l'export du corps de réponse.
