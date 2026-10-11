@@ -1,0 +1,70 @@
+[
+  {
+    "iterationIndex": 0,
+    "results": [
+      {
+        "test": {
+          "filename": "post.bru"
+        },
+        "request": {
+          "method": "POST",
+          "url": "http://127.0.0.1:18765/index.html",
+          "headers": {
+            "content-type": "application/json",
+            "X-Custom-Header": "hello-world",
+            "Authorization": "Bearer ********"
+          },
+          "data": "{\n  \"greeting\": \"hello\",\n  \"target\": \"world\"\n}"
+        },
+        "response": {
+          "status": 501,
+          "statusText": "Unsupported method ('POST')",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.12.3",
+            "date": "Sun, 11 Oct 2026 10:05:19 GMT",
+            "connection": "close",
+            "content-type": "text/html;charset=utf-8",
+            "content-length": "357"
+          },
+          "data": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 501</p>\n        <p>Message: Unsupported method ('POST').</p>\n        <p>Error code explanation: 501 - Server does not support this operation.</p>\n    </body>\n</html>\n",
+          "url": "http://127.0.0.1/index.html",
+          "responseTime": 7,
+          "duration": 7,
+          "size": 357
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [],
+        "testResults": [],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.067779132,
+        "name": "post",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-response-timeline/tests/fixtures/collections/runner-probe-post/post",
+        "path": "post",
+        "iterationIndex": 0
+      }
+    ],
+    "summary": {
+      "totalRequests": 1,
+      "passedRequests": 1,
+      "failedRequests": 0,
+      "errorRequests": 0,
+      "skippedRequests": 0,
+      "skippedByBail": 0,
+      "totalAssertions": 0,
+      "passedAssertions": 0,
+      "failedAssertions": 0,
+      "totalTests": 0,
+      "passedTests": 0,
+      "failedTests": 0,
+      "totalPreRequestTests": 0,
+      "passedPreRequestTests": 0,
+      "failedPreRequestTests": 0,
+      "totalPostResponseTests": 0,
+      "passedPostResponseTests": 0,
+      "failedPostResponseTests": 0
+    }
+  }
+]

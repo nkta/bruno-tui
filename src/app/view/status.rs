@@ -45,7 +45,7 @@ pub fn classify(status: &ResponseStatus) -> StatusClass {
 }
 
 /// Texte du badge : code HTTP, ou mot-clé quand il n'y en a pas.
-fn badge_text(status: &ResponseStatus) -> String {
+pub fn badge_text(status: &ResponseStatus) -> String {
     match status {
         ResponseStatus::Http(code) => code.to_string(),
         ResponseStatus::Error => "aucune réponse".to_owned(),

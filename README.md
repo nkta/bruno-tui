@@ -122,10 +122,12 @@ restent gérées par le panneau Secrets (`S`).
 ## Panneau Réponse
 
 Affiche le résultat de la dernière exécution de la requête sélectionnée,
-en trois onglets (Corps, En-têtes, Tests). Le corps JSON (brut ou issu d'un
+en quatre onglets (Corps, En-têtes, Tests, Timeline). Le corps JSON (brut ou issu d'un
 filtre `jq`) bénéficie d'une coloration syntaxique (clés, chaînes, nombres,
 booléens, null, ponctuation), tandis qu'un corps textuel ou HTML reste
-affiché sans coloration.
+affiché sans coloration. L'onglet Timeline récapitule la requête envoyée
+(méthode, URL résolue, en-têtes, corps) et la réponse reçue (statut, durée,
+URL finale si redirigée).
 
 | Touche | Effet |
 |---|---|
@@ -135,6 +137,8 @@ affiché sans coloration.
 | `/` | chercher dans l'onglet courant ; `n`/`N` : occurrence suivante/précédente |
 | `\|` | filtrer le corps avec une expression `jq` |
 | `v` | sélection visuelle ; `y` copie |
+| `c` | copier en commande `curl` (en-têtes d'auth masqués) |
+| `u` | copier en commande `curl` complète (confirmation si des secrets sont présents) |
 | `Ctrl+E` | ouvrir le corps brut de la réponse (non filtré) dans `$VISUAL`, `$EDITOR`, ou `nano` — consultation seule, rien n'est relu |
 
 `Ctrl+E` fonctionne quel que soit le focus courant, tant qu'une requête

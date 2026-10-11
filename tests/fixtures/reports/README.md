@@ -46,3 +46,20 @@ Cas couvert :
 
 Même forme que pour des variables d'environnement requises manquantes
 (`Missing required environment variables: …`). Aucun secret.
+
+## `post-with-body.json`
+
+- Version : `bru` 4.1.0 (Node 22.19.0, Linux)
+- Date de capture : 2026-10-11
+- Collection : `tests/fixtures/collections/runner-probe-post/`
+- Commande : `scripts/gen-report-fixtures.sh`, soit
+  `bru run -r --reporter-json /dev/fd/3 3>post-with-body.json` à la racine de la
+  collection, avec `tests/fixtures/collections/runner-probe/www` servi sur `127.0.0.1:18765`
+- Code de sortie : 0
+
+Cas couvert :
+
+| Requête | `status` | `response.status` | Particularité |
+|---|---|---|---|
+| `post` | `pass` | `501` | requête POST envoyée avec en-têtes et corps JSON (`request.data`) |
+

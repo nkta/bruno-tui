@@ -142,6 +142,7 @@ fn response_text_and_body_start(model: &Model) -> (Text<'static>, Option<usize>)
         }
         ResponseTab::Headers => lines.extend(headers_tab_lines(outcome)),
         ResponseTab::Tests => lines.extend(tests_tab_lines(outcome)),
+        ResponseTab::Timeline => lines.extend(timeline_tab_lines(outcome)),
     }
     (Text::from(lines), body_start)
 }
@@ -1375,6 +1376,73 @@ fn tests_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
     lines
 }
 
+/// Contenu de l'onglet Timeline : méthode et URL résolue envoyées,
+/// en-têtes envoyés, corps envoyé s'il est disponible, puis statut,
+/// durée (`responseTime`) et URL finale de la réponse si différente.
+fn timeline_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
+    let result = &outcome.result;
+    let request = &result.request;
+    let response = &result.response;
+    let mut lines = Vec::new();
+
+    lines.push(section("Requête envoyée"));
+    if let Some(method) = &request.method {
+        lines.push(field("  Méthode", method));
+    } else {
+        lines.push(field("  Méthode", "aucune"));
+    }
+    if let Some(url) = &request.url {
+        lines.push(field("  URL", url));
+    } else {
+        lines.push(field("  URL", "aucune"));
+    }
+    lines.push(Line::from(Span::styled("  En-têtes :", theme::LABEL)));
+    match &request.headers {
+        Some(headers) if !headers.is_empty() => {
+            for (key, value) in headers {
+                lines.push(Line::raw(format!("    {key}: {}", json_display(value))));
+            }
+        }
+        _ => lines.push(Line::raw("    aucun")),
+    }
+    if let Some(data) = &request.data
+        && !data.is_null()
+    {
+        lines.push(Line::from(Span::styled("  Corps :", theme::LABEL)));
+        match data {
+            Value::String(s) => {
+                for line in s.lines() {
+                    lines.push(Line::raw(format!("    {line}")));
+                }
+            }
+            other => {
+                let formatted =
+                    serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string());
+                for line in formatted.lines() {
+                    lines.push(Line::raw(format!("    {line}")));
+                }
+            }
+        }
+    }
+
+    lines.push(Line::default());
+    lines.push(section("Réponse reçue"));
+    let mut status_str = super::status::badge_text(&response.status);
+    if let Some(text) = response.status_text.as_deref().filter(|t| !t.is_empty()) {
+        status_str.push(' ');
+        status_str.push_str(text);
+    }
+    lines.push(field("  Statut", status_str));
+    lines.push(field("  Durée", format!("{} ms", response.response_time)));
+    if let Some(resp_url) = &response.url
+        && request.url.as_ref() != Some(resp_url)
+    {
+        lines.push(field("  URL finale", resp_url));
+    }
+
+    lines
+}
+
 /// Barre d'onglets du panneau Réponse : l'onglet actif en clair, gras et
 /// souligné comme dans Bruno bureau, les autres en gris.
 pub fn tab_bar(active: ResponseTab) -> Line<'static> {
@@ -1382,6 +1450,7 @@ pub fn tab_bar(active: ResponseTab) -> Line<'static> {
         (ResponseTab::Body, "Corps"),
         (ResponseTab::Headers, "En-têtes"),
         (ResponseTab::Tests, "Tests"),
+        (ResponseTab::Timeline, "Timeline"),
     ];
     let mut spans = Vec::new();
     for (index, (tab, label)) in tabs.into_iter().enumerate() {
@@ -2115,6 +2184,7 @@ mod tests {
                 method: Some("GET".into()),
                 url: Some("https://x/ping".into()),
                 headers: Some(Default::default()),
+                data: None,
             },
             response: ResponseInfo {
                 status: ResponseStatus::Http(200),
@@ -2249,7 +2319,12 @@ mod tests {
 
     #[test]
     fn status_band_shows_error_of_a_request_failed_before_sending() {
-        for tab in [ResponseTab::Body, ResponseTab::Headers, ResponseTab::Tests] {
+        for tab in [
+            ResponseTab::Body,
+            ResponseTab::Headers,
+            ResponseTab::Tests,
+            ResponseTab::Timeline,
+        ] {
             let text = result_detail_on_tab(pre_request_error_result(), tab);
             assert!(
                 text.starts_with("Erreur : pre-request failure (fixture)"),
@@ -2765,5 +2840,113 @@ mod tests {
         // 3. Copie (yank) : response_plain_lines produit le texte brut sans couleur
         let copied = plain_lines[null_line_idx].clone();
         assert_eq!(copied, "    \"b\": null");
+    }
+
+    #[test]
+    fn timeline_tab_shows_request_and_response_details() {
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert(
+            "content-type".to_string(),
+            serde_json::json!("application/json"),
+        );
+        headers.insert("X-Api-Key".to_string(), serde_json::json!("secret123"));
+
+        let result = RequestResult {
+            request: RequestInfo {
+                method: Some("POST".into()),
+                url: Some("http://api.example.com/v1/items".into()),
+                headers: Some(headers),
+                data: Some(serde_json::json!("{\"test\": 1}")),
+            },
+            response: ResponseInfo {
+                status: ResponseStatus::Http(201),
+                status_text: Some("Created".into()),
+                headers: Some(Default::default()),
+                data: Value::Null,
+                url: Some("http://api.example.com/v1/items/42".into()),
+                response_time: 45,
+            },
+            ..base_result()
+        };
+
+        let text = result_detail_on_tab(result, ResponseTab::Timeline);
+        assert!(text.contains("Requête envoyée"), "{text}");
+        assert!(text.contains("Méthode : POST"), "{text}");
+        assert!(
+            text.contains("URL : http://api.example.com/v1/items"),
+            "{text}"
+        );
+        assert!(text.contains("content-type: application/json"), "{text}");
+        assert!(text.contains("X-Api-Key: secret123"), "{text}");
+        assert!(text.contains("{\"test\": 1}"), "{text}");
+        assert!(text.contains("Réponse reçue"), "{text}");
+        assert!(text.contains("Statut : 201 Created"), "{text}");
+        assert!(text.contains("Durée : 45 ms"), "{text}");
+        assert!(
+            text.contains("URL finale : http://api.example.com/v1/items/42"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn timeline_tab_hides_final_url_when_identical() {
+        let result = RequestResult {
+            request: RequestInfo {
+                method: Some("GET".into()),
+                url: Some("http://api.example.com/items".into()),
+                headers: None,
+                data: None,
+            },
+            response: ResponseInfo {
+                status: ResponseStatus::Http(200),
+                status_text: Some("OK".into()),
+                headers: None,
+                data: Value::Null,
+                url: Some("http://api.example.com/items".into()),
+                response_time: 10,
+            },
+            ..base_result()
+        };
+
+        let text = result_detail_on_tab(result, ResponseTab::Timeline);
+        assert!(!text.contains("URL finale"), "{text}");
+    }
+
+    #[test]
+    fn timeline_tab_handles_missing_fields_gracefully() {
+        let result = pre_request_error_result();
+        let text = result_detail_on_tab(result, ResponseTab::Timeline);
+        assert!(text.contains("Requête envoyée"), "{text}");
+        assert!(text.contains("Méthode : aucune"), "{text}");
+        assert!(text.contains("URL : aucune"), "{text}");
+        assert!(text.contains("aucun"), "{text}");
+        assert!(text.contains("Réponse reçue"), "{text}");
+        assert!(text.contains("Statut : aucune réponse"), "{text}");
+        assert!(text.contains("Durée : 0 ms"), "{text}");
+    }
+
+    #[test]
+    fn timeline_tab_with_real_post_fixture() {
+        let report: crate::runner::report::Report = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/reports/post-with-body.json"
+        ))
+        .expect("post fixture");
+        let result = report.iterations()[0].results[0].clone();
+        let text = result_detail_on_tab(result, ResponseTab::Timeline);
+        assert!(text.contains("Méthode : POST"), "{text}");
+        assert!(
+            text.contains("URL : http://127.0.0.1:18765/index.html"),
+            "{text}"
+        );
+        assert!(text.contains("X-Custom-Header: hello-world"), "{text}");
+        assert!(text.contains("\"greeting\": \"hello\""), "{text}");
+        assert!(
+            text.contains("Statut : 501 Unsupported method ('POST')"),
+            "{text}"
+        );
+        assert!(
+            text.contains("URL finale : http://127.0.0.1/index.html"),
+            "{text}"
+        );
     }
 }

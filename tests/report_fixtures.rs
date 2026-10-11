@@ -320,10 +320,11 @@ fn request_failed_before_sending() {
             filename: "boom.bru".into()
         }
     );
-    // Requête jamais envoyée : `bru` rapporte méthode, URL et en-têtes à `null`.
+    // Requête jamais envoyée : `bru` rapporte méthode, URL, en-têtes et corps à `null`.
     assert_eq!(boom.request.method, None);
     assert_eq!(boom.request.url, None);
     assert_eq!(boom.request.headers, None);
+    assert_eq!(boom.request.data, None);
     assert_eq!(boom.response.status, ResponseStatus::Error);
     assert_eq!(boom.response.status_text, None);
     assert_eq!(boom.response.headers, None);
@@ -341,4 +342,54 @@ fn request_failed_before_sending() {
     assert_eq!(boom.run_duration, 0.043209747);
     assert_eq!(boom.iteration_index, 0);
     assert!(boom.is_failure());
+}
+
+const POST_WITH_BODY: &str = include_str!("fixtures/reports/post-with-body.json");
+
+fn post_with_body() -> Report {
+    serde_json::from_str(POST_WITH_BODY).expect("post-with-body.json doit se désérialiser")
+}
+
+#[test]
+fn post_request_with_body_and_headers() {
+    let report = post_with_body();
+    assert_eq!(report.iterations().len(), 1);
+    let post = result(&report, "post");
+    assert_eq!(post.path, "post");
+    assert_eq!(
+        post.test,
+        RequestFile {
+            filename: "post.bru".into(),
+        }
+    );
+    assert_eq!(post.request.method.as_deref(), Some("POST"));
+    assert_eq!(
+        post.request.url.as_deref(),
+        Some("http://127.0.0.1:18765/index.html")
+    );
+    assert_eq!(
+        post.request.data,
+        Some(json!(
+            "{\n  \"greeting\": \"hello\",\n  \"target\": \"world\"\n}"
+        ))
+    );
+    let headers = post
+        .request
+        .headers
+        .as_ref()
+        .expect("en-têtes de requête présents");
+    assert_eq!(
+        headers.get("content-type"),
+        Some(&json!("application/json"))
+    );
+    assert_eq!(headers.get("X-Custom-Header"), Some(&json!("hello-world")));
+    assert_eq!(
+        headers.get("Authorization"),
+        Some(&json!("Bearer ********"))
+    );
+    assert_eq!(post.response.status, ResponseStatus::Http(501));
+    assert_eq!(
+        post.response.url.as_deref(),
+        Some("http://127.0.0.1/index.html")
+    );
 }

@@ -3,6 +3,7 @@
 //! Le module lance `bru` en processus asynchrone, récupère le rapport JSON
 //! par un pipe hérité (jamais sur disque) et le restitue sous forme typée.
 
+pub mod curl;
 pub mod error;
 pub mod options;
 pub mod process;

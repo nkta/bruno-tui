@@ -53,6 +53,7 @@ pub enum ResponseTab {
     Body,
     Headers,
     Tests,
+    Timeline,
 }
 
 impl ResponseTab {
@@ -60,15 +61,17 @@ impl ResponseTab {
         match self {
             ResponseTab::Body => ResponseTab::Headers,
             ResponseTab::Headers => ResponseTab::Tests,
-            ResponseTab::Tests => ResponseTab::Body,
+            ResponseTab::Tests => ResponseTab::Timeline,
+            ResponseTab::Timeline => ResponseTab::Body,
         }
     }
 
     pub fn previous(self) -> Self {
         match self {
-            ResponseTab::Body => ResponseTab::Tests,
+            ResponseTab::Body => ResponseTab::Timeline,
             ResponseTab::Headers => ResponseTab::Body,
             ResponseTab::Tests => ResponseTab::Headers,
+            ResponseTab::Timeline => ResponseTab::Tests,
         }
     }
 }
@@ -743,13 +746,15 @@ pub fn field_display_name(field: &EditableField, view: &RequestView) -> String {
     field.display_name(view)
 }
 
-/// Confirmation en attente avant une action destructive ou de fermeture (D6).
+/// Confirmation en attente avant une action destructive ou sensible (D6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingConfirm {
     /// Fermer la session en cours (Échap) malgré des modifications.
     DiscardEdit,
     /// Fermer l'application (`q` ou `Ctrl+C`) malgré une session modifiée.
     QuitWithUnsavedEdit,
+    /// Copier la commande curl avec les secrets en clair (en-têtes d'auth).
+    CopyUnmaskedCurl,
 }
 
 /// Résultat d'une sauvegarde réussie (D7).
@@ -863,10 +868,9 @@ pub struct Model {
     /// dont le jeton ne correspond plus est ignoré (résultat en retard sur
     /// une copie plus récente).
     pub(crate) pending_clipboard_token: Option<u64>,
-    /// Panneau dont la sélection a été copiée par la copie en cours : elle
-    /// n'est levée qu'une fois la copie réussie (`search-and-yank`,
-    /// `mouse-support`).
-    pub(crate) pending_clipboard_selection: Option<Focus>,
+    /// Origine de la copie en cours : la sélection visuelle n'est levée
+    /// qu'une fois la copie réussie (`search-and-yank`, `mouse-support`).
+    pub(crate) pending_clipboard_source: Option<ClipboardSource>,
     /// Prochain jeton à distribuer à une copie.
     pub(crate) next_clipboard_token: u64,
     /// Session d'édition active sur la requête du focus Détail.
@@ -959,10 +963,25 @@ pub struct SecretRow {
     pub declared: bool,
 }
 
+/// Origine d'une copie dans le presse-papiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardSource {
+    /// Sélection visuelle d'un panneau (Détail ou Réponse).
+    Selection(Focus),
+    /// Commande curl générée.
+    Curl { masked: bool },
+}
+
 /// Message affiché temporairement dans la barre d'état.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusMessage {
     Copied,
+    /// Commande curl copiée dans le presse-papiers (`masked` indique si les secrets sont masqués).
+    CopiedCurl {
+        masked: bool,
+    },
+    /// Aucune requête exécutée à copier en commande curl.
+    NoCurlResult,
     ClipboardError(String),
     /// Recherche validée sans aucune correspondance.
     NoMatch,
@@ -1163,7 +1182,7 @@ impl Model {
             last_status: None,
             mouse: MouseState::default(),
             pending_clipboard_token: None,
-            pending_clipboard_selection: None,
+            pending_clipboard_source: None,
             next_clipboard_token: 0,
             editing: None,
             environment_editing: None,

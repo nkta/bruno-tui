@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use super::filter::{FilterState, evaluate};
 use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
-    CampaignFailure, CampaignSummary, CollectionState, DetailSelection, Drag, DragPanel,
-    EditSession, EditState, EditableField, EnvironmentEditSession, EnvironmentEditState, Exit,
-    Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, RequestTab, ResponseTab,
+    CampaignFailure, CampaignSummary, ClipboardSource, CollectionState, DetailSelection, Drag,
+    DragPanel, EditSession, EditState, EditableField, EnvironmentEditSession, EnvironmentEditState,
+    Exit, Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, RequestTab, ResponseTab,
     RunnerOptionsField, RunnerOptionsPopup, SecretError, SecretInput, StatusMessage, all_rows,
     environment_name_at, field_enabled, field_value, field_value_committed, secret_env_vars,
     secret_lookups, secret_rows, section_entries, selected_response_body, tree_node_at,
@@ -118,12 +118,14 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 match confirm {
                     super::model::PendingConfirm::DiscardEdit => {
                         model.editing = None;
+                        Command::None
                     }
                     super::model::PendingConfirm::QuitWithUnsavedEdit => {
                         model.exit = Some(Exit::Normal);
+                        Command::None
                     }
+                    super::model::PendingConfirm::CopyUnmaskedCurl => copy_curl(model, false),
                 }
-                Command::None
             }
             Message::ConfirmNo | Message::NextMatch | Message::FocusTree => {
                 model.confirm = None;
@@ -325,11 +327,20 @@ fn apply(model: &mut Model, message: Message) -> Command {
             }
             Command::None
         }
-        Message::Rename => {
-            if model.focus == Focus::Detail {
+        Message::Rename => match model.focus {
+            Focus::Detail => {
                 start_rename(model);
+                Command::None
             }
-            Command::None
+            Focus::Response => copy_curl(model, true),
+            _ => Command::None,
+        },
+        Message::CopyCurlFull => {
+            if model.focus == Focus::Response {
+                copy_curl_full(model)
+            } else {
+                Command::None
+            }
         }
         Message::SecretInput(c) => {
             match &mut model.secrets.input {
@@ -3758,7 +3769,7 @@ fn yank(model: &mut Model) -> Command {
     let token = model.next_clipboard_token;
     model.next_clipboard_token += 1;
     model.pending_clipboard_token = Some(token);
-    model.pending_clipboard_selection = selection;
+    model.pending_clipboard_source = selection.map(ClipboardSource::Selection);
     Command::CopyToClipboard { token, text }
 }
 
@@ -3774,18 +3785,65 @@ fn apply_clipboard_result(
         return;
     }
     model.pending_clipboard_token = None;
-    let selection = model.pending_clipboard_selection.take();
-    if result.is_ok() {
-        match selection {
-            Some(Focus::Detail) => model.detail_selection = None,
-            Some(Focus::Response) => model.response_selection = None,
+    let source = model.pending_clipboard_source.take();
+    if let (Ok(()), Some(ClipboardSource::Selection(focus))) = (&result, source) {
+        match focus {
+            Focus::Detail => model.detail_selection = None,
+            Focus::Response => model.response_selection = None,
             _ => {}
         }
     }
     model.last_status = Some(match result {
-        Ok(()) => StatusMessage::Copied,
+        Ok(()) => match source {
+            Some(ClipboardSource::Curl { masked }) => StatusMessage::CopiedCurl { masked },
+            _ => StatusMessage::Copied,
+        },
         Err(error) => StatusMessage::ClipboardError(error.to_string()),
     });
+}
+
+/// Renvoie la requête résolue du résultat d'exécution courant si elle a une URL.
+fn current_result_request(model: &Model) -> Option<&crate::runner::report::RequestInfo> {
+    let TreeNode::Request(request_node) = model.selected_node()? else {
+        return None;
+    };
+    let outcome = model.run.outcomes.get(&request_node.path)?;
+    outcome.result.request.url.as_ref()?;
+    Some(&outcome.result.request)
+}
+
+/// Copie dans le presse-papiers la commande curl issue du dernier résultat d'exécution.
+fn copy_curl(model: &mut Model, masked: bool) -> Command {
+    let Some(request) = current_result_request(model) else {
+        model.last_status = Some(StatusMessage::NoCurlResult);
+        return Command::None;
+    };
+    let Some(curl_command) = crate::runner::curl::build_curl(request, masked) else {
+        model.last_status = Some(StatusMessage::NoCurlResult);
+        return Command::None;
+    };
+    let token = model.next_clipboard_token;
+    model.next_clipboard_token += 1;
+    model.pending_clipboard_token = Some(token);
+    model.pending_clipboard_source = Some(ClipboardSource::Curl { masked });
+    Command::CopyToClipboard {
+        token,
+        text: curl_command,
+    }
+}
+
+/// Copie complète (démasquée) de la commande curl, avec confirmation si des secrets sont présents.
+fn copy_curl_full(model: &mut Model) -> Command {
+    let Some(request) = current_result_request(model) else {
+        model.last_status = Some(StatusMessage::NoCurlResult);
+        return Command::None;
+    };
+    if crate::runner::curl::has_sensitive_headers(request) {
+        model.confirm = Some(super::model::PendingConfirm::CopyUnmaskedCurl);
+        Command::None
+    } else {
+        copy_curl(model, false)
+    }
 }
 
 /// Résout le programme éditeur à lancer : `VISUAL` si définie et non vide,
@@ -3938,6 +3996,7 @@ mod tests {
                 method: Some("GET".into()),
                 url: Some("http://x".into()),
                 headers: Some(Default::default()),
+                data: None,
             },
             response: ResponseInfo {
                 status: ResponseStatus::Http(200),
@@ -5796,6 +5855,106 @@ mod tests {
     }
 
     #[test]
+    fn copy_curl_in_response_panel() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "ok.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        assert_eq!(model.focus, Focus::Response);
+
+        // 'c' (Message::Rename) copie la commande curl masquée
+        let cmd = update(&mut model, Message::Rename);
+        let Command::CopyToClipboard { token, text } = cmd else {
+            panic!("CopyToClipboard attendu");
+        };
+        assert!(text.starts_with("curl -X GET 'http://127.0.0.1:18765/index.html'"));
+
+        update(
+            &mut model,
+            Message::ClipboardResult {
+                token,
+                result: Ok(()),
+            },
+        );
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::CopiedCurl { masked: true })
+        ));
+    }
+
+    #[test]
+    fn copy_curl_unmasked_requires_confirmation_when_secrets_present() {
+        use crate::app::test_support::runner_probe_model;
+        use serde_json::json;
+        use std::collections::BTreeMap;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "ok.bru");
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+
+        // Injecter un en-tête d'auth dans le résultat
+        let mut headers = BTreeMap::new();
+        headers.insert("Authorization".to_string(), json!("Bearer mon-secret"));
+        let outcome = model
+            .run
+            .outcomes
+            .get_mut(std::path::Path::new("ok.bru"))
+            .expect("outcome ok.bru présent");
+        outcome.result.request.headers = Some(headers);
+
+        // 'u' demande confirmation
+        let cmd = update(&mut model, Message::CopyCurlFull);
+        assert!(matches!(cmd, Command::None));
+        assert_eq!(
+            model.confirm,
+            Some(super::super::model::PendingConfirm::CopyUnmaskedCurl)
+        );
+
+        // 'y' confirme la copie démasquée
+        let cmd = update(&mut model, Message::ConfirmYes);
+        let Command::CopyToClipboard { token, text } = cmd else {
+            panic!("CopyToClipboard attendu");
+        };
+        assert!(text.contains("Bearer mon-secret"));
+        assert!(!text.contains("********"));
+
+        update(
+            &mut model,
+            Message::ClipboardResult {
+                token,
+                result: Ok(()),
+            },
+        );
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::CopiedCurl { masked: false })
+        ));
+    }
+
+    #[test]
+    fn copy_curl_without_result_shows_status_message() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::Response;
+
+        let cmd = update(&mut model, Message::Rename);
+        assert!(matches!(cmd, Command::None));
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NoCurlResult)
+        ));
+
+        let cmd = update(&mut model, Message::CopyCurlFull);
+        assert!(matches!(cmd, Command::None));
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::NoCurlResult)
+        ));
+    }
+
+    #[test]
     fn confirm_priority_and_responses() {
         use super::super::model::{EditSession, EditState, EditableField, PendingConfirm};
         use std::path::PathBuf;
@@ -5971,7 +6130,9 @@ mod tests {
         assert_eq!(model.response_tab, ResponseTab::Headers);
         update(&mut model, Message::Right);
         assert_eq!(model.response_tab, ResponseTab::Tests);
-        // Cycle circulaire : un troisième Right revient à Corps.
+        update(&mut model, Message::Right);
+        assert_eq!(model.response_tab, ResponseTab::Timeline);
+        // Cycle circulaire : un quatrième Right revient à Corps.
         update(&mut model, Message::Right);
         assert_eq!(model.response_tab, ResponseTab::Body);
     }
@@ -5986,7 +6147,9 @@ mod tests {
         update(&mut model, Message::NextFocus); // Réponse
         assert_eq!(model.response_tab, ResponseTab::Body);
 
-        // Cycle circulaire vers l'arrière : depuis Corps, Left va à Tests.
+        // Cycle circulaire vers l'arrière : depuis Corps, Left va à Timeline.
+        update(&mut model, Message::Left);
+        assert_eq!(model.response_tab, ResponseTab::Timeline);
         update(&mut model, Message::Left);
         assert_eq!(model.response_tab, ResponseTab::Tests);
     }
