@@ -373,6 +373,18 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "options de campagne et export des rapports",
             },
             HelpEntry {
+                key: "t",
+                effect: "basculer liste / tableau comparatif (campagne multi-environnements)",
+            },
+            HelpEntry {
+                key: "←→ (tableau)",
+                effect: "changer d'environnement ; Entrée affiche son résultat dans Réponse",
+            },
+            HelpEntry {
+                key: "f (tableau)",
+                effect: "filtre Tous / Divergences / Échecs / Réussis / Ignorés",
+            },
+            HelpEntry {
                 key: "O puis Espace",
                 effect: "cocher des environnements : un bru run par environnement",
             },

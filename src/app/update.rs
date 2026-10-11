@@ -587,6 +587,10 @@ fn apply(model: &mut Model, message: Message) -> Command {
         // session d'édition), une majuscule tapée par erreur ne relance rien.
         Message::RunFailedRequests if model.focus == Focus::Campaign => run_failed_requests(model),
         Message::RunFailedRequests => Command::None,
+        Message::ToggleCampaignView => {
+            toggle_campaign_view(model);
+            Command::None
+        }
         Message::CycleCampaignFilter => {
             cycle_campaign_filter(model);
             Command::None
@@ -748,6 +752,13 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 Command::None
             } else if model.focus == Focus::EnvironmentPicker {
                 navigate_environment_picker(model, Message::Enter);
+                Command::None
+            } else if model.focus == Focus::Campaign
+                && model.campaign_view == CampaignView::Comparison
+                && model.comparison.is_some()
+            {
+                // Dans le tableau, `→` change de colonne : `Entrée` ouvre la cellule.
+                navigate_comparison(model, Message::Enter);
                 Command::None
             } else {
                 update(model, Message::Right)
@@ -1526,8 +1537,14 @@ fn run_failed_requests(model: &mut Model) -> Command {
 }
 
 /// Fait tourner le filtre de statut de la campagne (Échecs -> Réussis -> Ignorés -> Tous -> Échecs)
-/// et repositionne le curseur en tête de la liste.
+/// et repositionne le curseur en tête de la liste. Dans le tableau
+/// comparatif, fait tourner son propre filtre, qui ajoute « Divergences ».
 fn cycle_campaign_filter(model: &mut Model) {
+    if let Some(comparison) = comparison_shown_mut(model) {
+        comparison.filter = comparison.filter.next();
+        model.campaign_selected = 0;
+        return;
+    }
     if let Some(campaign) = &mut model.campaign {
         campaign.filter = campaign.filter.next();
         model.campaign_selected = 0;
@@ -3564,7 +3581,89 @@ fn cross_navigate_to_tree(model: &mut Model, address: &[usize]) {
     model.focus = Focus::Tree;
 }
 
+/// Tableau comparatif, s'il existe et que la vue Comparaison est active.
+fn comparison_shown_mut(model: &mut Model) -> Option<&mut CampaignComparison> {
+    if model.campaign_view == CampaignView::Comparison {
+        model.comparison.as_mut()
+    } else {
+        None
+    }
+}
+
+/// `t` en focus Campagne : bascule entre la liste et le tableau comparatif,
+/// seulement si la dernière campagne porte sur plusieurs environnements.
+fn toggle_campaign_view(model: &mut Model) {
+    if model.focus != Focus::Campaign || model.comparison.is_none() {
+        return;
+    }
+    model.campaign_view = match model.campaign_view {
+        CampaignView::List => CampaignView::Comparison,
+        CampaignView::Comparison => CampaignView::List,
+    };
+    model.campaign_selected = 0;
+}
+
+/// Navigation dans le tableau comparatif : `↑`/`↓` changent de requête,
+/// `←`/`→` d'environnement, `Entrée` affiche le résultat de la cellule.
+fn navigate_comparison(model: &mut Model, message: Message) {
+    let Some(comparison) = &model.comparison else {
+        return;
+    };
+    let count = comparison.filtered_rows().len();
+    let columns = comparison.environments.len();
+    let page = body_height(model);
+    let row = model.campaign_selected.min(count.saturating_sub(1));
+    let column = model.comparison_column.min(columns.saturating_sub(1));
+    match message {
+        Message::Up => model.campaign_selected = row.saturating_sub(1),
+        Message::Down => model.campaign_selected = (row + 1).min(count.saturating_sub(1)),
+        Message::Home => model.campaign_selected = 0,
+        Message::End => model.campaign_selected = count.saturating_sub(1),
+        Message::PageUp => model.campaign_selected = row.saturating_sub(page),
+        Message::PageDown => {
+            model.campaign_selected = (row + page).min(count.saturating_sub(1));
+        }
+        Message::Left => model.comparison_column = column.saturating_sub(1),
+        Message::Right => model.comparison_column = (column + 1).min(columns.saturating_sub(1)),
+        Message::Enter => show_comparison_cell(model, row, column),
+        _ => {}
+    }
+}
+
+/// Sélectionne la requête de la ligne dans l'arbre et affiche, dans le
+/// panneau Réponse, son résultat pour l'environnement de la colonne.
+fn show_comparison_cell(model: &mut Model, row: usize, column: usize) {
+    let Some(comparison) = &model.comparison else {
+        return;
+    };
+    let Some(path) = comparison.filtered_rows().get(row).map(|r| r.path.clone()) else {
+        return;
+    };
+    let Some(environment) = comparison.environments.get(column).cloned() else {
+        return;
+    };
+    let Some(outcome) = comparison
+        .outcomes
+        .get(column)
+        .and_then(|outcomes| outcomes.get(&path))
+        .cloned()
+    else {
+        model.last_status = Some(StatusMessage::NoEnvironmentResult(environment));
+        return;
+    };
+    if !select_request_in_tree(model, &path) {
+        return;
+    }
+    model.run.outcomes.insert(path, outcome);
+    reset_response_tab_view_state(model);
+    model.focus = Focus::Response;
+}
+
 fn navigate_campaign(model: &mut Model, message: Message) {
+    if model.campaign_view == CampaignView::Comparison && model.comparison.is_some() {
+        navigate_comparison(model, message);
+        return;
+    }
     let Some(campaign) = &model.campaign else {
         model.campaign_selected = 0;
         return;
@@ -12519,5 +12618,225 @@ mod series_tests {
         let request = started(update(&mut model, Message::RunSelected));
         assert_eq!(request.env.as_deref(), Some("staging"));
         assert!(model.series.is_none());
+    }
+
+    /// `multi-env-probe` chargée, après une série sur ses deux
+    /// environnements, dans l'ordre de la collection : `down` puis `up`.
+    fn compared_model(size: (u16, u16)) -> Model {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/collections/multi-env-probe");
+        let mut model = Model::new(root.clone(), size);
+        update(
+            &mut model,
+            Message::CollectionLoaded(crate::collection::CollectionLoader::load(
+                &crate::collection::BruLoader,
+                &root,
+            )),
+        );
+        model.runner_options.environments = vec!["up".into(), "down".into()];
+        model.focus = Focus::Campaign;
+        assert_eq!(
+            started(update(&mut model, Message::RunSelected))
+                .env
+                .as_deref(),
+            Some("down")
+        );
+        mark_active(&mut model, 1);
+        started(finish(&mut model, 1, completed(down_report())));
+        mark_active(&mut model, 2);
+        finish(&mut model, 2, completed(up_report()));
+        model.focus = Focus::Campaign;
+        model
+    }
+
+    #[test]
+    fn comparison_view_toggles_only_with_a_comparison() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::Campaign;
+        let message = crate::app::message::to_message(
+            crate::app::event::AppEvent::Terminal(ratatui::crossterm::event::Event::Key(
+                ratatui::crossterm::event::KeyEvent::from(
+                    ratatui::crossterm::event::KeyCode::Char('t'),
+                ),
+            )),
+            None,
+        )
+        .expect("t");
+        update(&mut model, message);
+        assert_eq!(model.campaign_view, CampaignView::List);
+
+        let mut model = compared_model((100, 30));
+        // La série ouvre directement la vue Comparaison.
+        assert_eq!(model.campaign_view, CampaignView::Comparison);
+        update(&mut model, Message::ToggleCampaignView);
+        assert_eq!(model.campaign_view, CampaignView::List);
+        // Hors du panneau Campagne, `t` ne fait rien.
+        model.focus = Focus::Tree;
+        update(&mut model, Message::ToggleCampaignView);
+        assert_eq!(model.campaign_view, CampaignView::List);
+        model.focus = Focus::Campaign;
+        update(&mut model, Message::ToggleCampaignView);
+        assert_eq!(model.campaign_view, CampaignView::Comparison);
+
+        // Une campagne hors série efface la comparaison.
+        model.runner_options.environments.clear();
+        started(update(&mut model, Message::RunSelected));
+        mark_active(&mut model, 3);
+        finish(&mut model, 3, completed(up_report()));
+        assert!(model.comparison.is_none());
+        let screen = render(&model, 100, 30);
+        assert!(
+            !screen.iter().any(|l| l.contains("comparaison")),
+            "{screen:#?}"
+        );
+    }
+
+    #[test]
+    fn f_adds_a_divergences_filter_in_the_comparison() {
+        let mut model = compared_model((100, 30));
+        update(&mut model, Message::Down);
+        assert_eq!(model.campaign_selected, 1);
+        update(&mut model, Message::OpenTreeFilter);
+        let comparison = model.comparison.as_ref().expect("comparaison");
+        assert_eq!(
+            comparison.filter,
+            crate::app::model::ComparisonFilter::Divergent
+        );
+        assert_eq!(model.campaign_selected, 0);
+        assert_eq!(comparison.filtered_rows().len(), 1);
+        // Le filtre de la liste n'a pas bougé.
+        assert_eq!(
+            model.campaign.as_ref().expect("campagne").filter,
+            CampaignFilter::Failed
+        );
+    }
+
+    #[test]
+    fn enter_on_a_cell_shows_that_environment_in_the_response_panel() {
+        let mut model = compared_model((100, 30));
+        // Ligne `data.bru`, colonne `down` : `→` puis `←` restent bornés.
+        update(&mut model, Message::Left);
+        assert_eq!(model.comparison_column, 0);
+        update(&mut model, Message::Right);
+        update(&mut model, Message::Right);
+        assert_eq!(model.comparison_column, 1);
+        update(&mut model, Message::Left);
+        assert_eq!(model.comparison_column, 0);
+
+        update(&mut model, Message::Enter);
+        assert_eq!(model.focus, Focus::Response);
+        assert_eq!(
+            model.selected_node().map(|node| node.path().to_path_buf()),
+            Some(PathBuf::from("data.bru"))
+        );
+        let outcome = &model.run.outcomes[&PathBuf::from("data.bru")];
+        assert_eq!(outcome.environment.as_deref(), Some("down"));
+        assert!(outcome.result.is_failure());
+        let screen = render(&model, 100, 30);
+        assert!(screen.iter().any(|l| l.contains("[down]")), "{screen:#?}");
+
+        // Retour au tableau, colonne `up` : le résultat bascule.
+        model.focus = Focus::Campaign;
+        update(&mut model, Message::Right);
+        update(&mut model, Message::Enter);
+        let outcome = &model.run.outcomes[&PathBuf::from("data.bru")];
+        assert_eq!(outcome.environment.as_deref(), Some("up"));
+        assert!(!outcome.result.is_failure());
+        let screen = render(&model, 100, 30);
+        assert!(screen.iter().any(|l| l.contains("[up]")), "{screen:#?}");
+        // Lisible aussi en 80 colonnes.
+        let screen = render(&model, 80, 24);
+        assert!(screen.iter().any(|l| l.contains("[up]")), "{screen:#?}");
+    }
+
+    #[test]
+    fn enter_on_an_absent_cell_reports_it() {
+        let mut model = compared_model((100, 30));
+        let comparison = model.comparison.as_mut().expect("comparaison");
+        comparison.outcomes[1].remove(std::path::Path::new("data.bru"));
+        model.comparison_column = 1;
+        update(&mut model, Message::Enter);
+        assert_eq!(model.focus, Focus::Campaign);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::NoEnvironmentResult("up".into()))
+        );
+    }
+
+    #[test]
+    fn comparison_table_renders_in_80_columns() {
+        let model = compared_model((80, 24));
+        let screen = render(&model, 80, 24);
+        let text = screen.join("\n");
+        assert!(text.contains("Campagne — comparaison"), "{text}");
+        assert!(text.contains("1 divergence"), "{text}");
+        let header = screen
+            .iter()
+            .find(|l| l.contains("Requête"))
+            .expect("en-tête du tableau");
+        assert!(header.contains("up") && header.contains("down"), "{header}");
+        let data = screen
+            .iter()
+            .find(|l| l.contains("data.bru"))
+            .expect("ligne data.bru");
+        assert!(
+            data.contains('≠') && data.contains('✓') && data.contains('✗'),
+            "{data}"
+        );
+        let fixed = screen
+            .iter()
+            .find(|l| l.contains("static.bru"))
+            .expect("ligne static.bru");
+        assert!(!fixed.contains('≠'), "{fixed}");
+        let skip = screen
+            .iter()
+            .find(|l| l.contains("skip.bru"))
+            .expect("skip");
+        assert!(skip.contains('–'), "{skip}");
+        assert!(screen.iter().all(|l| l.chars().count() <= 80));
+    }
+
+    /// Plus d'environnements que de place : noms tronqués, défilement
+    /// horizontal signalé par `‹` / `›`.
+    #[test]
+    fn many_environments_scroll_horizontally() {
+        let mut model = compared_model((80, 24));
+        let base = model.comparison.take().expect("comparaison");
+        let runs = (0..9)
+            .map(|i| EnvRun {
+                environment: format!("environnement-{i}"),
+                outcome: EnvRunOutcome::Completed {
+                    report: if i % 2 == 0 {
+                        up_report()
+                    } else {
+                        down_report()
+                    },
+                    exit_code: Some(0),
+                    console: std::sync::Arc::from(""),
+                },
+            })
+            .collect();
+        model.comparison = Some(CampaignComparison::build(base.target, runs));
+        let screen = render(&model, 80, 24);
+        let header = screen
+            .iter()
+            .find(|l| l.contains("Requête"))
+            .expect("en-tête")
+            .clone();
+        assert!(header.contains("environ…"), "{header}");
+        assert!(header.contains('›') && !header.contains('‹'), "{header}");
+
+        for _ in 0..8 {
+            update(&mut model, Message::Right);
+        }
+        assert_eq!(model.comparison_column, 8);
+        let screen = render(&model, 80, 24);
+        let header = screen
+            .iter()
+            .find(|l| l.contains("Requête"))
+            .expect("en-tête")
+            .clone();
+        assert!(header.contains('‹') && !header.contains('›'), "{header}");
+        assert!(screen.iter().all(|l| l.chars().count() <= 80));
     }
 }

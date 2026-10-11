@@ -78,7 +78,8 @@ d'édition non enregistrée demande confirmation.
 | `S` | panneau Variables secrètes |
 | `?` | aide des raccourcis (popup centré) |
 | `C` | panneau Campagne (bilan TNR de la dernière exécution récursive) |
-| `O` | options de campagne (tags, TLS, données, sandbox, verbose, rapports JUnit/HTML) |
+| `O` | options de campagne (environnements, tags, TLS, données, sandbox, verbose, rapports JUnit/HTML) |
+| `t` | panneau Campagne : liste / tableau comparatif multi-environnements |
 | `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
 | `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
 
@@ -240,6 +241,20 @@ sélectionnée a un résultat avec un corps non vide.
   `Entrée` ou `→` sélectionne la requête dans l'arbre et donne le focus au Détail ;
   `R` relance uniquement les requêtes en échec avec les options courantes ;
   `r` relance l'ensemble de la campagne.
+  Après une campagne sur plusieurs environnements (voir **Environnements** dans les
+  options `O`), le panneau s'ouvre sur la vue **Comparaison** ; `t` bascule entre la
+  liste (dernier environnement exécuté) et ce tableau. Une ligne par requête, une
+  colonne par environnement : `✓` réussi, `✗` échec, `–` ignoré, `·` absente du rapport
+  de cet environnement. Avec des itérations CSV/JSON, une cellule résume toutes les
+  itérations (`✗` dès qu'une échoue). Les requêtes dont le verdict diffère entre
+  environnements sont marquées `≠` et mises en évidence ; `f` fait tourner le filtre
+  (`Tous` / `Divergences` / `Échecs` / `Réussis` / `Ignorés`). `↑`/`↓` choisit la requête,
+  `←`/`→` l'environnement (défilement horizontal quand les colonnes ne tiennent pas,
+  signalé par `‹` / `›` ; noms d'environnement tronqués à 8 caractères), `Entrée`
+  sélectionne la requête et affiche le résultat de cet environnement dans le panneau
+  Réponse, dont la bordure rappelle l'environnement (`[staging]`). Les résultats par
+  environnement restent en mémoire uniquement ; une nouvelle campagne sur un seul
+  environnement efface le tableau.
 - **Options du runner** (`O`) : popup de configuration des options d'exécution
   récursive mémorisées en session :
   - **Tags inclus** (`--tags`) et **tags exclus** (`--exclude-tags`) sous forme

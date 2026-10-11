@@ -1416,6 +1416,8 @@ pub enum StatusMessage {
     /// Édition ou enregistrement refusé : la collection est au format
     /// OpenCollection (YAML), que le writer ne sait pas écrire.
     ReadOnlyCollection,
+    /// Cellule du tableau comparatif sans résultat pour cet environnement.
+    NoEnvironmentResult(String),
 }
 
 /// Série de campagnes multi-environnements : un `bru run` par
@@ -3090,5 +3092,181 @@ mod tests {
         assert_eq!(filtered[0].path, PathBuf::from("legacy.bru"));
         assert_eq!(filtered[0].status, CampaignItemStatus::Failed);
         assert_eq!(filtered[0].reason, Some("bad gateway".into()));
+    }
+
+    fn fixture_report(json: &str) -> runner::Report {
+        serde_json::from_str(json).expect("rapport de fixture")
+    }
+
+    fn env_run(environment: &str, report: runner::Report) -> EnvRun {
+        EnvRun {
+            environment: environment.into(),
+            outcome: EnvRunOutcome::Completed {
+                report,
+                exit_code: Some(0),
+                console: std::sync::Arc::from("console"),
+            },
+        }
+    }
+
+    fn multi_env_comparison() -> CampaignComparison {
+        CampaignComparison::build(
+            PathBuf::new(),
+            vec![
+                env_run(
+                    "up",
+                    fixture_report(include_str!(
+                        "../../tests/fixtures/reports/multi-env-up.json"
+                    )),
+                ),
+                env_run(
+                    "down",
+                    fixture_report(include_str!(
+                        "../../tests/fixtures/reports/multi-env-down.json"
+                    )),
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn comparison_is_built_from_real_reports() {
+        use ComparisonCell::*;
+        let comparison = multi_env_comparison();
+        assert_eq!(comparison.environments, ["up", "down"]);
+        assert_eq!(comparison.errors, [None, None]);
+        let rows: Vec<(&Path, &[ComparisonCell])> = comparison
+            .rows
+            .iter()
+            .map(|row| (row.path.as_path(), row.cells.as_slice()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Path::new("data.bru"), &[Passed, Failed][..]),
+                (Path::new("static.bru"), &[Passed, Passed][..]),
+                (Path::new("skip.bru"), &[Skipped, Skipped][..]),
+            ]
+        );
+        assert_eq!(comparison.divergent_count(), 1);
+        // Résultats par environnement conservés pour le panneau Réponse.
+        let down = &comparison.outcomes[1][Path::new("data.bru")];
+        assert_eq!(down.environment.as_deref(), Some("down"));
+        assert!(down.result.is_failure());
+        assert!(
+            !comparison.outcomes[0][Path::new("data.bru")]
+                .result
+                .is_failure()
+        );
+    }
+
+    #[test]
+    fn comparison_filters_cycle_and_select_rows() {
+        let mut comparison = multi_env_comparison();
+        let paths = |c: &CampaignComparison| -> Vec<String> {
+            c.filtered_rows()
+                .iter()
+                .map(|row| row.path.display().to_string())
+                .collect()
+        };
+        assert_eq!(comparison.filter, ComparisonFilter::All);
+        assert_eq!(paths(&comparison).len(), 3);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter.label(), "Divergences");
+        assert_eq!(paths(&comparison), ["data.bru"]);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter, ComparisonFilter::Failed);
+        assert_eq!(paths(&comparison), ["data.bru"]);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter, ComparisonFilter::Passed);
+        assert_eq!(paths(&comparison), ["data.bru", "static.bru"]);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter, ComparisonFilter::Skipped);
+        assert_eq!(paths(&comparison), ["skip.bru"]);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter, ComparisonFilter::All);
+    }
+
+    #[test]
+    fn a_request_missing_from_an_environment_is_absent_and_diverges() {
+        let comparison = CampaignComparison::build(
+            PathBuf::new(),
+            vec![
+                env_run(
+                    "up",
+                    fixture_report(include_str!(
+                        "../../tests/fixtures/reports/multi-env-up.json"
+                    )),
+                ),
+                env_run(
+                    "csv",
+                    fixture_report(include_str!(
+                        "../../tests/fixtures/reports/csv-iterations.json"
+                    )),
+                ),
+                EnvRun {
+                    environment: "cassé".into(),
+                    outcome: EnvRunOutcome::Failed("bru introuvable".into()),
+                },
+            ],
+        );
+        assert_eq!(comparison.errors[2].as_deref(), Some("bru introuvable"));
+        let req = comparison
+            .rows
+            .iter()
+            .find(|row| row.path == Path::new("req.bru"))
+            .expect("req.bru");
+        assert_eq!(
+            req.cells,
+            [
+                ComparisonCell::Absent,
+                ComparisonCell::Passed,
+                ComparisonCell::Absent
+            ]
+        );
+        assert!(req.diverges());
+        assert!(comparison.outcomes[2].is_empty());
+    }
+
+    /// Avec des itérations CSV, une cellule résume toutes les itérations :
+    /// ✗ dès qu'une seule échoue.
+    #[test]
+    fn a_cell_summarises_all_iterations() {
+        let report = || {
+            fixture_report(include_str!(
+                "../../tests/fixtures/reports/csv-iterations.json"
+            ))
+        };
+        let mut failing = report();
+        assert_eq!(failing.0.len(), 2);
+        // Seule la seconde itération échoue sur cet environnement.
+        failing.0[1].results[0].error = Some("échec simulé".into());
+        let comparison = CampaignComparison::build(
+            PathBuf::new(),
+            vec![env_run("a", report()), env_run("b", failing)],
+        );
+        assert_eq!(comparison.rows.len(), 1);
+        assert_eq!(
+            comparison.rows[0].cells,
+            [ComparisonCell::Passed, ComparisonCell::Failed]
+        );
+        // Le résultat conservé est celui de la dernière itération.
+        assert_eq!(
+            comparison.outcomes[1][Path::new("req.bru")].iteration,
+            Some((2, 2))
+        );
+    }
+
+    #[test]
+    fn cell_merge_prefers_failure_then_success() {
+        use ComparisonCell::*;
+        assert_eq!(Passed.merge(Failed), Failed);
+        assert_eq!(Skipped.merge(Passed), Passed);
+        assert_eq!(Absent.merge(Skipped), Skipped);
+        assert_eq!(Absent.merge(Absent), Absent);
+        assert_eq!(
+            [Passed, Failed, Skipped, Absent].map(ComparisonCell::symbol),
+            ["✓", "✗", "–", "·"]
+        );
     }
 }

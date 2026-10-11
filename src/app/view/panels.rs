@@ -12,9 +12,10 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use super::{inner, panel, theme};
 use crate::app::diagnostics::diagnostics;
 use crate::app::model::{
-    CampaignFilter, CampaignItemStatus, EnvironmentEditSession, EnvironmentEditState, Focus,
-    HistoryEntry, HistoryOutcome, Model, RunnerOptionsField, RunnerOptionsPopup, SecretError,
-    SecretInput, secret_rows,
+    CampaignComparison, CampaignFilter, CampaignItemStatus, CampaignView, ComparisonCell,
+    ComparisonFilter, EnvironmentEditSession, EnvironmentEditState, Focus, HistoryEntry,
+    HistoryOutcome, Model, RunnerOptionsField, RunnerOptionsPopup, SecretError, SecretInput,
+    secret_rows,
 };
 use crate::secrets::SecretSource;
 
@@ -108,6 +109,12 @@ pub fn render_history(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Dessine le panneau plein corps de la campagne de TNR.
 pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
+    if model.campaign_view == CampaignView::Comparison
+        && let Some(comparison) = &model.comparison
+    {
+        render_comparison(model, comparison, frame, area);
+        return;
+    }
     let block = panel(" Campagne ", model.focus == Focus::Campaign);
     let Some(campaign) = &model.campaign else {
         frame.render_widget(
@@ -190,7 +197,11 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
     }
     filter_spans.push(Span::raw("  "));
     filter_spans.push(Span::styled(
-        "(f changer · R relancer échecs)",
+        if model.comparison.is_some() {
+            "(f changer · R relancer échecs · t comparaison)"
+        } else {
+            "(f changer · R relancer échecs)"
+        },
         theme::LABEL,
     ));
     let filter_line = Line::from(filter_spans);
@@ -292,6 +303,227 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
         list_area,
         &mut list_state,
     );
+}
+
+/// Largeur d'une colonne d'environnement du tableau comparatif, espace
+/// de séparation compris.
+pub const COMPARISON_COLUMN_WIDTH: usize = 9;
+/// Largeur minimale de la colonne des requêtes.
+const COMPARISON_NAME_MIN_WIDTH: usize = 20;
+/// Marque de ligne (divergence) en tête de chaque ligne.
+const COMPARISON_MARK_WIDTH: usize = 2;
+
+/// Géométrie horizontale du tableau comparatif : largeur de la colonne des
+/// requêtes, première colonne d'environnement affichée et nombre de colonnes
+/// visibles. Le défilement suit la colonne sélectionnée.
+pub fn comparison_layout(
+    inner_width: usize,
+    columns: usize,
+    selected: usize,
+) -> (usize, usize, usize) {
+    // Une case est réservée à droite pour l'indicateur « › ».
+    let room = inner_width.saturating_sub(COMPARISON_MARK_WIDTH + 1);
+    let fit = (room.saturating_sub(COMPARISON_NAME_MIN_WIDTH) / COMPARISON_COLUMN_WIDTH).max(1);
+    let visible = fit.min(columns);
+    let first = selected
+        .min(columns.saturating_sub(1))
+        .saturating_sub(visible.saturating_sub(1))
+        .min(columns.saturating_sub(visible));
+    let name_width = room.saturating_sub(visible * COMPARISON_COLUMN_WIDTH);
+    (name_width, first, visible)
+}
+
+/// Tronque à `width` caractères en gardant le début (`…` final).
+pub fn truncate_end(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// Tronque à `width` caractères en gardant la fin (`…` initial), pour un
+/// chemin dont le nom de fichier compte plus que les dossiers.
+fn truncate_start(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().skip(count + 1 - width.max(1)).collect();
+    format!("…{kept}")
+}
+
+fn comparison_cell_style(cell: ComparisonCell) -> Style {
+    match cell {
+        ComparisonCell::Passed => theme::SUCCESS,
+        ComparisonCell::Failed => theme::FAILURE,
+        ComparisonCell::Skipped | ComparisonCell::Absent => theme::LABEL,
+    }
+}
+
+/// Dessine le tableau comparatif d'une campagne multi-environnements : une
+/// ligne par requête, une colonne par environnement.
+fn render_comparison(
+    model: &Model,
+    comparison: &CampaignComparison,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let block = panel(" Campagne — comparaison ", model.focus == Focus::Campaign);
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let target = if comparison.target.as_os_str().is_empty() {
+        "collection entière".to_owned()
+    } else {
+        comparison.target.display().to_string()
+    };
+    let divergent = comparison.divergent_count();
+    let mut header = vec![
+        Line::from(vec![
+            Span::styled("Cible : ", theme::LABEL),
+            Span::styled(target, Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw("  ·  "),
+            Span::raw(format!("{} environnements", comparison.environments.len())),
+            Span::raw("  ·  "),
+            Span::styled(
+                format!(
+                    "{divergent} divergence{}",
+                    if divergent > 1 { "s" } else { "" }
+                ),
+                if divergent == 0 {
+                    theme::SUCCESS
+                } else {
+                    theme::CLIENT_ERROR
+                },
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Filtre : ", theme::LABEL),
+            Span::styled(
+                format!(
+                    "[ {} ] ({}/{})",
+                    comparison.filter.label(),
+                    comparison.filtered_rows().len(),
+                    comparison.rows.len()
+                ),
+                theme::SELECTION,
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "(f filtre · ←→ env · Entrée réponse · t liste)",
+                theme::LABEL,
+            ),
+        ]),
+    ];
+    for (env, error) in comparison.environments.iter().zip(&comparison.errors) {
+        if let Some(error) = error {
+            header.push(Line::styled(
+                format!("{env} : aucun rapport — {error}"),
+                theme::FAILURE,
+            ));
+        }
+    }
+    header.push(Line::default());
+
+    let header_height = u16::try_from(header.len()).unwrap_or(4);
+    let [header_area, table_area] =
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(inner_area);
+    frame.render_widget(Paragraph::new(header), header_area);
+
+    let rows = comparison.filtered_rows();
+    let columns = comparison.environments.len();
+    let selected_column = model.comparison_column.min(columns.saturating_sub(1));
+    let (name_width, first, visible) =
+        comparison_layout(usize::from(table_area.width), columns, selected_column);
+    let shown = first..first + visible;
+
+    // Ligne d'en-tête : noms d'environnement tronqués, flèches de défilement.
+    let mut spans = vec![
+        Span::styled(
+            format!(
+                "{:<COMPARISON_MARK_WIDTH$}",
+                if first > 0 { "‹" } else { "" }
+            ),
+            theme::FOCUS,
+        ),
+        Span::styled(format!("{:<name_width$}", "Requête"), theme::LABEL),
+    ];
+    for (index, env) in comparison.environments[shown.clone()].iter().enumerate() {
+        let style = if first + index == selected_column {
+            theme::FOCUS
+        } else {
+            theme::LABEL
+        };
+        let name = truncate_end(env, COMPARISON_COLUMN_WIDTH - 1);
+        spans.push(Span::styled(
+            format!("{name:^width$} ", width = COMPARISON_COLUMN_WIDTH - 1),
+            style,
+        ));
+    }
+    if shown.end < columns {
+        spans.push(Span::styled("›", theme::FOCUS));
+    }
+    let mut lines = vec![Line::from(spans)];
+
+    if rows.is_empty() {
+        let message = match comparison.filter {
+            ComparisonFilter::Divergent => "aucune divergence entre environnements",
+            _ => "aucune requête",
+        };
+        lines.push(Line::styled(message, theme::EMPTY_MESSAGE));
+        frame.render_widget(Paragraph::new(lines), table_area);
+        return;
+    }
+
+    let height = usize::from(table_area.height.saturating_sub(1)).max(1);
+    let selected_row = model.campaign_selected.min(rows.len() - 1);
+    let offset = selected_row.saturating_sub(height - 1);
+    for (index, row) in rows.iter().enumerate().skip(offset).take(height) {
+        let is_selected = index == selected_row;
+        let diverges = row.diverges();
+        let name_style = match (is_selected, diverges) {
+            (true, _) => theme::SELECTION,
+            (false, true) => theme::CLIENT_ERROR.add_modifier(Modifier::BOLD),
+            (false, false) => Style::default(),
+        };
+        let mut spans = vec![
+            Span::styled(
+                format!(
+                    "{:<COMPARISON_MARK_WIDTH$}",
+                    if diverges { "≠" } else { "" }
+                ),
+                theme::CLIENT_ERROR,
+            ),
+            Span::styled(
+                format!(
+                    "{:<name_width$}",
+                    truncate_start(
+                        &row.path.display().to_string(),
+                        name_width.saturating_sub(1)
+                    )
+                ),
+                name_style,
+            ),
+        ];
+        for (offset, cell) in row.cells[shown.clone()].iter().enumerate() {
+            let mut style = comparison_cell_style(*cell);
+            if is_selected && first + offset == selected_column {
+                style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            }
+            spans.push(Span::styled(
+                format!(
+                    "{:^width$}",
+                    cell.symbol(),
+                    width = COMPARISON_COLUMN_WIDTH - 1
+                ),
+                style,
+            ));
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(lines), table_area);
 }
 
 const DISABLED_ENTRY_VALUE: Style =
@@ -1410,5 +1642,31 @@ mod tests {
         assert_eq!(line.spans[0].content, "  ");
         assert_eq!(line.spans[1].content, "multi");
         assert_eq!(line.spans[2].content, " ← base, parent2");
+    }
+
+    #[test]
+    fn comparison_layout_fits_80_columns_and_follows_the_selection() {
+        // 80 colonnes, bordures retirées : 78 de large.
+        let (name, first, visible) = comparison_layout(78, 2, 0);
+        assert_eq!((first, visible), (0, 2));
+        assert_eq!(name + 2 * COMPARISON_COLUMN_WIDTH + 3, 78);
+        // Plus d'environnements que de place : la fenêtre suit la colonne.
+        let (_, first, visible) = comparison_layout(78, 9, 0);
+        assert_eq!((first, visible), (0, 6));
+        let (_, first, _) = comparison_layout(78, 9, 7);
+        assert_eq!(first, 2);
+        let (_, first, _) = comparison_layout(78, 9, 8);
+        assert_eq!(first, 3);
+        // Terminal minuscule : au moins une colonne.
+        let (_, first, visible) = comparison_layout(10, 3, 2);
+        assert_eq!((first, visible), (2, 1));
+    }
+
+    #[test]
+    fn truncation_keeps_the_useful_end() {
+        assert_eq!(truncate_end("staging", 8), "staging");
+        assert_eq!(truncate_end("production-eu", 8), "product…");
+        assert_eq!(truncate_start("a/b/data.bru", 20), "a/b/data.bru");
+        assert_eq!(truncate_start("folder/sub/data.bru", 10), "…/data.bru");
     }
 }
