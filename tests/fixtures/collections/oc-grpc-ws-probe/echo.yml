@@ -1,0 +1,31 @@
+info:
+  name: echo
+  type: websocket
+  seq: 2
+websocket:
+  url: ws://localhost:8080/ws
+  headers:
+    - name: Sec-WebSocket-Protocol
+      value: chat
+  message:
+    - title: hello message
+      selected: true
+      message:
+        type: json
+        data: |-
+          {
+            "type": "greet"
+          }
+    - title: bye
+      selected: false
+      message:
+        type: text
+        data: bye
+runtime:
+  scripts:
+    - type: before-request
+      code: bru.setVar("connecting", true);
+settings:
+  timeout: 0
+  keepAliveInterval: 0
+docs: Requête WebSocket de test

@@ -1,0 +1,34 @@
+info:
+  name: say hello
+  type: grpc
+  seq: 1
+grpc:
+  url: grpc://localhost:50051
+  method: /hello.Greeter/SayHello
+  methodType: unary
+  protoFilePath: ./hello.proto
+  metadata:
+    - name: x-custom-meta
+      value: test-value
+    - name: x-off
+      value: "1"
+      disabled: true
+  message:
+    - title: message 1
+      message: |-
+        {
+          "name": "world"
+        }
+  auth:
+    type: bearer
+    token: "{{token}}"
+runtime:
+  scripts:
+    - type: grpc:before-call-start
+      code: bru.setVar("started", true);
+    - type: tests
+      code: |-
+        test("grpc status ok", function() {
+          expect(res.getStatus()).to.equal(0);
+        });
+docs: Requête gRPC de test

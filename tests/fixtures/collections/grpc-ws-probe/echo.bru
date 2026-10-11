@@ -1,0 +1,41 @@
+meta {
+  name: echo websocket
+  type: ws
+  seq: 2
+}
+
+ws {
+  url: ws://localhost:8080/ws
+  body: ws
+  auth: none
+}
+
+headers {
+  Sec-WebSocket-Protocol: chat
+}
+
+body:ws {
+  name: hello message
+  type: json
+  selected: true
+  content: '''
+    {
+      "type": "greet",
+      "text": "hello"
+    }
+  '''
+}
+
+script:pre-request {
+  bru.setVar("connecting", true);
+}
+
+tests {
+  test("connected", function() {
+    expect(true).to.be.true;
+  });
+}
+
+docs {
+  Test WebSocket request
+}

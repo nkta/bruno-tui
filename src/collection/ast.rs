@@ -34,11 +34,17 @@ pub fn known_form(name: &str) -> Option<BlockForm> {
     if METHODS.contains(&name) || name.starts_with("auth:") {
         return Some(BlockForm::Dictionary);
     }
+    if name.starts_with("script:grpc:") {
+        return Some(BlockForm::Text);
+    }
     match name {
         "meta"
         | "params:query"
         | "params:path"
         | "headers"
+        | "metadata"
+        | "grpc"
+        | "ws"
         | "settings"
         | "assert"
         | "vars"
@@ -47,7 +53,9 @@ pub fn known_form(name: &str) -> Option<BlockForm> {
         | "auth"
         | "body:form-urlencoded"
         | "body:multipart-form"
-        | "body:file" => Some(BlockForm::Dictionary),
+        | "body:file"
+        | "body:grpc"
+        | "body:ws" => Some(BlockForm::Dictionary),
         "body"
         | "body:json"
         | "body:text"
@@ -490,7 +498,19 @@ mod tests {
         assert_eq!(known_form("vars:secret"), Some(BlockForm::List));
         // `extends [..]` reste un bloc inconnu : sa liste est interprétée par `Environment`.
         assert_eq!(known_form("extends"), None);
-        assert_eq!(known_form("grpc"), None);
+        assert_eq!(known_form("grpc"), Some(BlockForm::Dictionary));
+        assert_eq!(known_form("ws"), Some(BlockForm::Dictionary));
+        assert_eq!(known_form("metadata"), Some(BlockForm::Dictionary));
+        assert_eq!(known_form("body:grpc"), Some(BlockForm::Dictionary));
+        assert_eq!(known_form("body:ws"), Some(BlockForm::Dictionary));
+        assert_eq!(
+            known_form("script:grpc:before-call-start"),
+            Some(BlockForm::Text)
+        );
+        assert_eq!(
+            known_form("script:grpc:after-call-end"),
+            Some(BlockForm::Text)
+        );
     }
 
     #[test]

@@ -332,7 +332,7 @@ fn broken_files_become_error_nodes_and_unknown_fields_notices() {
     .expect("yml");
     fs::write(dir.join("ok.yml"), "info:\n  type: http\n  seq: 1\n").expect("ok");
     fs::write(dir.join("broken.yml"), "info: [\n").expect("broken");
-    fs::write(dir.join("ws.yml"), "info:\n  type: websocket\n").expect("ws");
+    fs::write(dir.join("script.yml"), "info:\n  type: script\n").expect("script");
     fs::write(
         dir.join("extra.yml"),
         "info:\n  type: http\n  seq: 2\nhttp:\n  url: x\n  mystery: s3cr3t\n",
@@ -352,7 +352,7 @@ fn broken_files_become_error_nodes_and_unknown_fields_notices() {
         Some(TreeNode::Error(e)) if matches!(e.error, ParseError::InvalidYaml { .. })
     ));
     assert!(matches!(
-        find(&collection.tree, "ws.yml"),
+        find(&collection.tree, "script.yml"),
         Some(TreeNode::Error(e)) if matches!(e.error, ParseError::UnsupportedItemType { .. })
     ));
 

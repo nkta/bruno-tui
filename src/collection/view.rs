@@ -142,6 +142,98 @@ pub struct ExtraTabs {
     pub docs: Option<String>,
     pub settings: Vec<KeyValue>,
     pub assertions: Vec<KeyValue>,
+    /// Champs propres à une requête gRPC ; `None` pour les autres types.
+    pub grpc: Option<GrpcView>,
+}
+
+/// Champs propres à une requête gRPC (bloc `grpc` et scripts
+/// `script:grpc:*`), tels qu'écrits dans le fichier.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GrpcView {
+    /// Méthode RPC complète (`/package.Service/Method`).
+    pub method: Option<String>,
+    /// `unary`, `client-streaming`, `server-streaming` ou `bidi-streaming`.
+    pub method_type: Option<String>,
+    pub proto_path: Option<String>,
+    pub before_call_start: Option<String>,
+    pub before_message_send: Option<String>,
+    pub after_message_receive: Option<String>,
+    pub after_call_end: Option<String>,
+}
+
+impl GrpcView {
+    /// Les quatre scripts gRPC avec leur libellé, dans l'ordre du cycle
+    /// de vie d'un appel.
+    pub fn scripts(&self) -> [(&'static str, Option<&str>); 4] {
+        [
+            ("before-call-start", self.before_call_start.as_deref()),
+            ("before-message-send", self.before_message_send.as_deref()),
+            (
+                "after-message-receive",
+                self.after_message_receive.as_deref(),
+            ),
+            ("after-call-end", self.after_call_end.as_deref()),
+        ]
+    }
+
+    /// Vrai si au moins un script gRPC est déclaré.
+    pub fn has_scripts(&self) -> bool {
+        self.scripts()
+            .iter()
+            .any(|(_, code)| code.is_some_and(|c| !c.trim().is_empty()))
+    }
+}
+
+/// Un message d'une requête gRPC ou WebSocket (bloc `body:grpc` ou
+/// `body:ws`, élément de `message` en YAML).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MessageView {
+    pub name: String,
+    /// Type de message WebSocket (`text`, `json`, `xml`, `binary`).
+    pub kind: String,
+    pub selected: bool,
+    pub content: String,
+}
+
+/// Corps affiché d'une requête gRPC ou WebSocket : le contenu seul pour un
+/// message unique anonyme, sinon chaque message précédé d'un en-tête
+/// `▸ nom (type, sélectionné)`. `None` sans message.
+pub fn messages_body(messages: &[MessageView], kind: &str) -> Option<BodyView> {
+    let text = match messages {
+        [] => return None,
+        [only] if only.name.is_empty() && only.kind.is_empty() && !only.selected => {
+            only.content.clone()
+        }
+        _ => messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                let name = if message.name.is_empty() {
+                    format!("message {}", index + 1)
+                } else {
+                    message.name.clone()
+                };
+                let mut tags = Vec::new();
+                if !message.kind.is_empty() {
+                    tags.push(message.kind.as_str());
+                }
+                if message.selected {
+                    tags.push("sélectionné");
+                }
+                let tags = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", tags.join(", "))
+                };
+                format!("▸ {name}{tags}\n{}", message.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    };
+    Some(BodyView {
+        kind: BodyKind::Other(kind.to_owned()),
+        content: BodyContent::Text(text),
+    })
 }
 
 /// Vue d'une requête pour l'affichage.
@@ -201,8 +293,37 @@ impl RequestView {
         &self.extra.assertions
     }
 
+    /// Champs gRPC ; `None` hors requête gRPC.
+    pub fn grpc(&self) -> Option<&GrpcView> {
+        self.extra.grpc.as_ref()
+    }
+
+    /// Vrai pour une requête gRPC (`type: grpc`).
+    pub fn is_grpc(&self) -> bool {
+        self.kind.as_deref() == Some("grpc")
+    }
+
+    /// Vrai pour une requête WebSocket (`type: ws` en `.bru`,
+    /// `type: websocket` en YAML).
+    pub fn is_ws(&self) -> bool {
+        matches!(self.kind.as_deref(), Some("ws" | "websocket"))
+    }
+
+    /// Vrai pour une requête HTTP ou GraphQL : la seule sorte que
+    /// `bru run` 4.2.1 exécute et que le writer sait modifier.
+    pub fn is_http(&self) -> bool {
+        !self.is_grpc() && !self.is_ws()
+    }
+
     /// Construit la vue ; échoue si aucun bloc de méthode HTTP n'existe.
+    /// Le type `grpc` ou `ws` se lit dans `meta`, comme le fait Bruno ;
+    /// leur bloc principal (`grpc`, `ws`) remplace alors le bloc de méthode.
     pub fn from_ast(file: &BruFile) -> Result<Self, ParseError> {
+        match file.entry("meta", "type") {
+            Some("grpc") => return Ok(Self::grpc_from_ast(file)),
+            Some("ws") => return Ok(Self::ws_from_ast(file)),
+            _ => {}
+        }
         let method = file
             .blocks()
             .find(|block| METHODS.contains(&block.name.as_str()))
@@ -259,8 +380,73 @@ impl RequestView {
                 docs: file.text("docs"),
                 settings: key_values(file, "settings"),
                 assertions: key_values(file, "assert"),
+                grpc: None,
             }),
         })
+    }
+
+    /// Vue d'une requête gRPC : bloc `grpc`, métadonnées `metadata`,
+    /// messages `body:grpc` et scripts `script:grpc:*`.
+    fn grpc_from_ast(file: &BruFile) -> Self {
+        let entry = |key: &str| file.entry("grpc", key).map(str::to_owned);
+        let grpc = GrpcView {
+            method: entry("method"),
+            method_type: entry("methodType"),
+            proto_path: entry("protoPath"),
+            before_call_start: file.text("script:grpc:before-call-start"),
+            before_message_send: file.text("script:grpc:before-message-send"),
+            after_message_receive: file.text("script:grpc:after-message-receive"),
+            after_call_end: file.text("script:grpc:after-call-end"),
+        };
+        let mut view = Self::common_from_ast(file, "GRPC", "grpc");
+        view.headers = key_values(file, "metadata");
+        view.body = messages_body(&messages(file, "body:grpc"), "grpc");
+        view.has_pre_request_script |=
+            grpc.before_call_start.is_some() || grpc.before_message_send.is_some();
+        view.has_post_response_script |=
+            grpc.after_message_receive.is_some() || grpc.after_call_end.is_some();
+        view.extra.grpc = Some(grpc);
+        view
+    }
+
+    /// Vue d'une requête WebSocket : bloc `ws`, en-têtes `headers` et
+    /// messages `body:ws`.
+    fn ws_from_ast(file: &BruFile) -> Self {
+        let mut view = Self::common_from_ast(file, "WS", "ws");
+        view.body = messages_body(&messages(file, "body:ws"), "ws");
+        view
+    }
+
+    /// Champs communs à gRPC et WebSocket ; `block` est le bloc principal
+    /// qui porte `url` et `auth`.
+    fn common_from_ast(file: &BruFile, label: &str, block: &str) -> Self {
+        Self {
+            name: meta_name(file),
+            kind: file.entry("meta", "type").map(str::to_owned),
+            seq: meta_seq(file),
+            method: label.to_owned(),
+            url: file.entry(block, "url").unwrap_or_default().to_owned(),
+            headers: key_values(file, "headers"),
+            query_params: key_values(file, "params:query"),
+            path_params: key_values(file, "params:path"),
+            body: None,
+            auth: file.entry(block, "auth").map(AuthMode::parse),
+            has_pre_request_script: file.has_block("script:pre-request"),
+            has_post_response_script: file.has_block("script:post-response"),
+            has_tests: file.has_block("tests"),
+            has_assert: file.has_block("assert"),
+            extra: Box::new(ExtraTabs {
+                vars_pre_request: key_values(file, "vars:pre-request"),
+                vars_post_response: key_values(file, "vars:post-response"),
+                script_pre_request: file.text("script:pre-request"),
+                script_post_response: file.text("script:post-response"),
+                tests: file.text("tests"),
+                docs: file.text("docs"),
+                settings: key_values(file, "settings"),
+                assertions: key_values(file, "assert"),
+                grpc: None,
+            }),
+        }
     }
 }
 
@@ -452,6 +638,32 @@ fn meta_name(file: &BruFile) -> Option<String> {
 
 fn meta_seq(file: &BruFile) -> Option<u32> {
     file.entry("meta", "seq").and_then(|seq| seq.parse().ok())
+}
+
+/// Messages des blocs `block` (`body:grpc` ou `body:ws`), un par bloc,
+/// dans l'ordre du fichier (`bodygrpc` / `bodyws` de bru-lang).
+fn messages(file: &BruFile, block: &str) -> Vec<MessageView> {
+    file.blocks()
+        .filter(|b| b.name == block)
+        .filter_map(|b| match &b.body {
+            BlockBody::Dictionary(entries) => {
+                let value = |key: &str| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.key == key)
+                        .map(|entry| entry.value.clone())
+                        .unwrap_or_default()
+                };
+                Some(MessageView {
+                    name: value("name"),
+                    kind: value("type"),
+                    selected: value("selected") == "true",
+                    content: value("content"),
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -731,5 +943,188 @@ mod tests {
         assert_eq!(valid_environment_name("-x"), None);
         assert_eq!(valid_environment_name("x."), None);
         assert_eq!(valid_environment_name(" base "), Some("base".into()));
+    }
+
+    #[test]
+    fn grpc_request_view_from_ast() {
+        let source = r#"meta {
+  name: say hello
+  type: grpc
+  seq: 1
+}
+
+grpc {
+  url: grpc://localhost:50051
+  method: /hello.Greeter/SayHello
+  body: grpc
+  protoPath: ./hello.proto
+  auth: none
+  methodType: unary
+}
+
+metadata {
+  x-custom-meta: test-value
+}
+
+body:grpc {
+  name: message 1
+  content: '''
+    {
+      "name": "world"
+    }
+  '''
+}
+
+script:grpc:before-call-start {
+  bru.setVar("started", true);
+}
+
+tests {
+  test("ok", function() {});
+}
+
+docs {
+  gRPC docs
+}
+"#;
+        let file = parse(source);
+        let view = RequestView::from_ast(&file).expect("vue gRPC");
+        assert_eq!(view.name.as_deref(), Some("say hello"));
+        assert_eq!(view.kind.as_deref(), Some("grpc"));
+        assert_eq!(view.method, "GRPC");
+        assert!(view.is_grpc());
+        assert!(!view.is_ws());
+        assert!(!view.is_http());
+        assert_eq!(view.url, "grpc://localhost:50051");
+        assert_eq!(view.auth, Some(AuthMode::NoAuth));
+        let grpc = view.grpc().expect("champs gRPC");
+        assert_eq!(grpc.method.as_deref(), Some("/hello.Greeter/SayHello"));
+        assert_eq!(grpc.method_type.as_deref(), Some("unary"));
+        assert_eq!(grpc.proto_path.as_deref(), Some("./hello.proto"));
+        assert_eq!(view.headers.len(), 1);
+        assert_eq!(view.headers[0].key, "x-custom-meta");
+        assert_eq!(view.headers[0].value, "test-value");
+        assert_eq!(
+            view.body,
+            Some(BodyView {
+                kind: BodyKind::Other("grpc".to_owned()),
+                content: BodyContent::Text("▸ message 1\n{\n  \"name\": \"world\"\n}".to_owned()),
+            })
+        );
+        assert!(view.has_pre_request_script);
+        assert!(!view.has_post_response_script);
+        assert_eq!(
+            grpc.before_call_start.as_deref(),
+            Some("bru.setVar(\"started\", true);")
+        );
+        assert!(grpc.has_scripts());
+        assert!(view.has_tests);
+        assert_eq!(view.docs(), Some("gRPC docs"));
+    }
+
+    #[test]
+    fn ws_request_view_from_ast() {
+        let source = r#"meta {
+  name: echo websocket
+  type: ws
+  seq: 2
+}
+
+ws {
+  url: ws://localhost:8080/ws
+  body: ws
+  auth: none
+}
+
+headers {
+  Sec-WebSocket-Protocol: chat
+}
+
+body:ws {
+  name: hello message
+  type: json
+  selected: true
+  content: '''
+    {
+      "type": "greet"
+    }
+  '''
+}
+
+script:pre-request {
+  bru.setVar("connecting", true);
+}
+"#;
+        let file = parse(source);
+        let view = RequestView::from_ast(&file).expect("vue WS");
+        assert_eq!(view.name.as_deref(), Some("echo websocket"));
+        assert_eq!(view.kind.as_deref(), Some("ws"));
+        assert_eq!(view.method, "WS");
+        assert!(!view.is_grpc());
+        assert!(view.is_ws());
+        assert!(!view.is_http());
+        assert_eq!(view.grpc(), None);
+        assert_eq!(view.url, "ws://localhost:8080/ws");
+        assert_eq!(view.headers.len(), 1);
+        assert_eq!(view.headers[0].key, "Sec-WebSocket-Protocol");
+        assert_eq!(view.headers[0].value, "chat");
+        assert_eq!(
+            view.body,
+            Some(BodyView {
+                kind: BodyKind::Other("ws".to_owned()),
+                content: BodyContent::Text(
+                    "▸ hello message (json, sélectionné)\n{\n  \"type\": \"greet\"\n}".to_owned()
+                ),
+            })
+        );
+        assert!(view.has_pre_request_script);
+        assert_eq!(
+            view.script_pre_request(),
+            Some("bru.setVar(\"connecting\", true);")
+        );
+    }
+
+    #[test]
+    fn grpc_type_comes_from_meta_and_metadata_is_not_headers() {
+        // Bruno lit le type dans `meta` : un bloc `grpc` dans une requête
+        // HTTP ne change rien, et `headers` n'alimente pas une requête gRPC.
+        let http = parse("meta {\n  type: http\n}\n\nget {\n  url: x\n}\n\ngrpc {\n  url: y\n}\n");
+        let view = RequestView::from_ast(&http).expect("http");
+        assert!(view.is_http());
+        assert_eq!(view.url, "x");
+
+        let grpc = parse("meta {\n  type: grpc\n}\n\nheaders {\n  a: 1\n}\n");
+        let view = RequestView::from_ast(&grpc).expect("grpc sans bloc");
+        assert!(view.is_grpc());
+        assert_eq!(view.method, "GRPC");
+        assert_eq!(view.url, "");
+        assert!(view.headers.is_empty());
+        assert_eq!(view.body, None);
+        assert!(!view.grpc().expect("grpc").has_scripts());
+    }
+
+    #[test]
+    fn messages_body_layouts() {
+        assert_eq!(messages_body(&[], "ws"), None);
+        let anonymous = MessageView {
+            content: "hello".into(),
+            ..MessageView::default()
+        };
+        assert_eq!(
+            messages_body(std::slice::from_ref(&anonymous), "ws").map(|b| b.content),
+            Some(BodyContent::Text("hello".into()))
+        );
+        let named = MessageView {
+            name: "bye".into(),
+            kind: "text".into(),
+            content: "bye".into(),
+            ..MessageView::default()
+        };
+        assert_eq!(
+            messages_body(&[anonymous, named], "ws").map(|b| b.content),
+            Some(BodyContent::Text(
+                "▸ message 1\nhello\n\n▸ bye (text)\nbye".into()
+            ))
+        );
     }
 }
