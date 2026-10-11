@@ -48,6 +48,9 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Avant tout autre thread : voir `clock::init_local_offset`.
+    bruno_tui::app::clock::init_local_offset();
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -1,8 +1,6 @@
 //! Rendu des panneaux Diagnostics, Historique, sélection d'environnement
 //! et variables secrètes.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -656,7 +654,7 @@ pub(crate) fn environment_item_line(
 }
 
 fn history_row_line(entry: &HistoryEntry) -> Line<'static> {
-    let time_str = format_time(entry.started_at);
+    let time_str = crate::app::clock::short_date_time(entry.started_at);
     let target_str = if entry.recursive {
         format!("{} (récursif)", entry.target.display())
     } else {
@@ -704,18 +702,6 @@ fn history_row_line(entry: &HistoryEntry) -> Line<'static> {
         Span::raw("  ·  "),
         duration_span,
     ])
-}
-
-fn format_time(time: SystemTime) -> String {
-    let secs = time
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let seconds_in_day = secs % 86400;
-    let hours = seconds_in_day / 3600;
-    let minutes = (seconds_in_day % 3600) / 60;
-    let seconds = seconds_in_day % 60;
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 /// Durée en secondes au format français, comme les tailles du panneau

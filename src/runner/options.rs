@@ -398,15 +398,17 @@ pub fn default_reports_dir() -> PathBuf {
         .join("reports")
 }
 
-/// Génère un nom de fichier horodaté dans `dir` (ex: `report-1710000000-123.xml`).
+/// Génère un nom de fichier horodaté dans `dir` (ex. `report-20261012-215420-123.xml`).
 pub fn generate_report_path(dir: &Path, extension: &str) -> PathBuf {
     let now = std::time::SystemTime::now();
-    let duration = now
+    // Millisecondes en suffixe : deux rapports lancés dans la même seconde
+    // ne s'écrasent pas.
+    let millis = now
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    let millis = duration.subsec_millis();
-    let filename = format!("report-{secs}-{millis:03}.{extension}");
+        .unwrap_or_default()
+        .subsec_millis();
+    let stamp = crate::app::clock::file_stamp(now);
+    let filename = format!("report-{stamp}-{millis:03}.{extension}");
     dir.join(filename)
 }
 

@@ -15,6 +15,7 @@ serde_norway = "0.9.42"
 thiserror = "2.0.20"
 notify = "8.2.0"
 tokio = { version = "1.53.1", features = ["process", "rt-multi-thread", "macros", "sync", "io-util", "time"] }
+time = { version = "0.3.55", default-features = false, features = ["std", "local-offset"] }
 
 [target.'cfg(unix)'.dependencies]
 command-fds = { version = "0.3.3", features = ["tokio"] }

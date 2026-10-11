@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use serde_json::Value;
 
@@ -82,8 +82,7 @@ pub fn default_export_path(
     now: SystemTime,
 ) -> PathBuf {
     let safe_name = sanitize_filename(req_name);
-    let duration = now.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let timestamp = format!("{}-{}", duration.as_secs(), duration.subsec_millis());
+    let timestamp = crate::app::clock::file_stamp(now);
     let filename = format!("{safe_name}-{timestamp}.{ext}");
 
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -182,9 +181,13 @@ mod tests {
 
     #[test]
     fn default_path_generation() {
-        let now = UNIX_EPOCH + std::time::Duration::from_secs(1700000000);
+        // 2023-11-14 22:13:20 UTC ; les tests tournent en UTC.
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000);
         let path = default_export_path(None, "mon-test", "json", now);
-        let s = path.to_str().unwrap();
-        assert!(s.starts_with("./mon-test-1700000000-0.json") || s.contains("mon-test-1700000000"));
+        assert!(
+            path.to_string_lossy()
+                .ends_with("mon-test-20231114-221320.json"),
+            "{path:?}"
+        );
     }
 }

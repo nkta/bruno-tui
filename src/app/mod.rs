@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub mod clipboard;
+pub mod clock;
 pub mod diagnostics;
 pub mod editor;
 pub mod event;
