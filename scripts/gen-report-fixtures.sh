@@ -6,6 +6,9 @@
 # via le fd 3 (même transport que le runner), puis arrête le serveur.
 # Le port 18799 doit rester fermé : il simule une erreur de connexion.
 #
+# Produit aussi `opencollection.json` depuis
+# `tests/fixtures/collections/oc-probe` (collection OpenCollection YAML).
+#
 # Produit aussi `pre-request-error.json` depuis
 # `tests/fixtures/collections/runner-probe-errored` : requête en échec avant
 # envoi (script pré-requête qui lève une exception), sans serveur requis.
@@ -18,6 +21,8 @@ ERRORED_COLLECTION="$ROOT/tests/fixtures/collections/runner-probe-errored"
 ERRORED_OUT="$ROOT/tests/fixtures/reports/pre-request-error.json"
 POST_COLLECTION="$ROOT/tests/fixtures/collections/runner-probe-post"
 POST_OUT="$ROOT/tests/fixtures/reports/post-with-body.json"
+YML_COLLECTION="$ROOT/tests/fixtures/collections/oc-probe"
+YML_OUT="$ROOT/tests/fixtures/reports/opencollection.json"
 PORT=18765
 
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$COLLECTION/www" \
@@ -48,6 +53,17 @@ CODE=$?
 set -e
 
 echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $POST_OUT"
+
+# Collection OpenCollection (YAML) : même serveur, environnement `local`,
+# jeton factice transmis en variable (aucun secret réel).
+cd "$YML_COLLECTION"
+set +e
+bru run -r --env local --env-var token=fixture-token \
+  --reporter-json /dev/fd/3 3>"$YML_OUT" >/dev/null 2>&1
+CODE=$?
+set -e
+
+echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $YML_OUT"
 
 cd "$ERRORED_COLLECTION"
 set +e

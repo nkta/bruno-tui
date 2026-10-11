@@ -1,0 +1,22 @@
+info:
+  name: nested
+  type: folder
+  seq: 3
+
+request:
+  headers:
+    - name: X-Folder
+      value: nested
+  auth:
+    type: bearer
+    token: "{{token}}"
+  variables:
+    - name: folderVar
+      value: "1"
+  scripts:
+    - type: before-request
+      code: bru.setVar("fromFolder", true);
+
+docs:
+  content: Dossier imbriqué.
+  type: text/markdown

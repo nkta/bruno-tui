@@ -63,3 +63,29 @@ Cas couvert :
 |---|---|---|---|
 | `post` | `pass` | `501` | requête POST envoyée avec en-têtes et corps JSON (`request.data`) |
 
+
+## `opencollection.json`
+
+- Version : `bru` 4.1.0 (Node 22.19.0, Linux)
+- Date de capture : 2026-10-11
+- Collection : `tests/fixtures/collections/oc-probe/` (OpenCollection YAML)
+- Commande : `scripts/gen-report-fixtures.sh`, soit
+  `bru run -r --env local --env-var token=fixture-token --reporter-json /dev/fd/3 3>opencollection.json`
+  à la racine de la collection, avec `tests/fixtures/collections/runner-probe/www`
+  servi sur `127.0.0.1:18765`
+- Code de sortie : 0
+
+Cas couverts :
+
+| Requête | `status` | `response.status` | Particularité |
+|---|---|---|---|
+| `data/nested/secure` | `pass` | `200` | auth bearer (masquée `********` par `bru`), 1 test et 2 assertions réussis |
+| `data/data` | `pass` | `200` | |
+| `data/create data` | `pass` | `501` | POST avec corps JSON, sans test |
+| `pages/index` | `pass` | `200` | en-tête et paramètre de requête |
+
+Différence avec une collection `.bru` : `path` garde l'extension
+(`data/nested/secure.yml`), identique à `test.filename`. L'appariement
+du TUI passe par `test.filename`, donc fonctionne sans conversion.
+
+Aucun secret : jeton factice `fixture-token`, masqué dans le rapport.
