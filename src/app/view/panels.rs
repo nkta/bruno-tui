@@ -10,8 +10,10 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use super::{inner, panel, theme};
 use crate::app::diagnostics::diagnostics;
 use crate::app::model::{
-    CampaignFilter, CampaignItemStatus, EnvironmentEditSession, EnvironmentEditState, Focus,
-    HistoryEntry, HistoryOutcome, Model, RunnerOptionsPopup, SecretError, SecretInput, secret_rows,
+    CampaignComparison, CampaignFilter, CampaignItemStatus, CampaignView, ComparisonCell,
+    ComparisonFilter, EnvironmentEditSession, EnvironmentEditState, Focus, HistoryEntry,
+    HistoryOutcome, Model, RunnerOptionsField, RunnerOptionsPopup, SecretError, SecretInput,
+    secret_rows,
 };
 use crate::secrets::SecretSource;
 
@@ -105,6 +107,12 @@ pub fn render_history(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Dessine le panneau plein corps de la campagne de TNR.
 pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
+    if model.campaign_view == CampaignView::Comparison
+        && let Some(comparison) = &model.comparison
+    {
+        render_comparison(model, comparison, frame, area);
+        return;
+    }
     let block = panel(" Campagne ", model.focus == Focus::Campaign);
     let Some(campaign) = &model.campaign else {
         frame.render_widget(
@@ -187,7 +195,11 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
     }
     filter_spans.push(Span::raw("  "));
     filter_spans.push(Span::styled(
-        "(f changer · R relancer échecs)",
+        if model.comparison.is_some() {
+            "(f changer · R relancer échecs · t comparaison)"
+        } else {
+            "(f changer · R relancer échecs)"
+        },
         theme::LABEL,
     ));
     let filter_line = Line::from(filter_spans);
@@ -289,6 +301,227 @@ pub fn render_campaign(model: &Model, frame: &mut Frame, area: Rect) {
         list_area,
         &mut list_state,
     );
+}
+
+/// Largeur d'une colonne d'environnement du tableau comparatif, espace
+/// de séparation compris.
+pub const COMPARISON_COLUMN_WIDTH: usize = 9;
+/// Largeur minimale de la colonne des requêtes.
+const COMPARISON_NAME_MIN_WIDTH: usize = 20;
+/// Marque de ligne (divergence) en tête de chaque ligne.
+const COMPARISON_MARK_WIDTH: usize = 2;
+
+/// Géométrie horizontale du tableau comparatif : largeur de la colonne des
+/// requêtes, première colonne d'environnement affichée et nombre de colonnes
+/// visibles. Le défilement suit la colonne sélectionnée.
+pub fn comparison_layout(
+    inner_width: usize,
+    columns: usize,
+    selected: usize,
+) -> (usize, usize, usize) {
+    // Une case est réservée à droite pour l'indicateur « › ».
+    let room = inner_width.saturating_sub(COMPARISON_MARK_WIDTH + 1);
+    let fit = (room.saturating_sub(COMPARISON_NAME_MIN_WIDTH) / COMPARISON_COLUMN_WIDTH).max(1);
+    let visible = fit.min(columns);
+    let first = selected
+        .min(columns.saturating_sub(1))
+        .saturating_sub(visible.saturating_sub(1))
+        .min(columns.saturating_sub(visible));
+    let name_width = room.saturating_sub(visible * COMPARISON_COLUMN_WIDTH);
+    (name_width, first, visible)
+}
+
+/// Tronque à `width` caractères en gardant le début (`…` final).
+pub fn truncate_end(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// Tronque à `width` caractères en gardant la fin (`…` initial), pour un
+/// chemin dont le nom de fichier compte plus que les dossiers.
+fn truncate_start(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count <= width {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().skip(count + 1 - width.max(1)).collect();
+    format!("…{kept}")
+}
+
+fn comparison_cell_style(cell: ComparisonCell) -> Style {
+    match cell {
+        ComparisonCell::Passed => theme::SUCCESS,
+        ComparisonCell::Failed => theme::FAILURE,
+        ComparisonCell::Skipped | ComparisonCell::Absent => theme::LABEL,
+    }
+}
+
+/// Dessine le tableau comparatif d'une campagne multi-environnements : une
+/// ligne par requête, une colonne par environnement.
+fn render_comparison(
+    model: &Model,
+    comparison: &CampaignComparison,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let block = panel(" Campagne — comparaison ", model.focus == Focus::Campaign);
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    let target = if comparison.target.as_os_str().is_empty() {
+        "collection entière".to_owned()
+    } else {
+        comparison.target.display().to_string()
+    };
+    let divergent = comparison.divergent_count();
+    let mut header = vec![
+        Line::from(vec![
+            Span::styled("Cible : ", theme::LABEL),
+            Span::styled(target, Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw("  ·  "),
+            Span::raw(format!("{} environnements", comparison.environments.len())),
+            Span::raw("  ·  "),
+            Span::styled(
+                format!(
+                    "{divergent} divergence{}",
+                    if divergent > 1 { "s" } else { "" }
+                ),
+                if divergent == 0 {
+                    theme::SUCCESS
+                } else {
+                    theme::CLIENT_ERROR
+                },
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Filtre : ", theme::LABEL),
+            Span::styled(
+                format!(
+                    "[ {} ] ({}/{})",
+                    comparison.filter.label(),
+                    comparison.filtered_rows().len(),
+                    comparison.rows.len()
+                ),
+                theme::SELECTION,
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "(f filtre · ←→ env · Entrée réponse · t liste)",
+                theme::LABEL,
+            ),
+        ]),
+    ];
+    for (env, error) in comparison.environments.iter().zip(&comparison.errors) {
+        if let Some(error) = error {
+            header.push(Line::styled(
+                format!("{env} : aucun rapport — {error}"),
+                theme::FAILURE,
+            ));
+        }
+    }
+    header.push(Line::default());
+
+    let header_height = u16::try_from(header.len()).unwrap_or(4);
+    let [header_area, table_area] =
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(inner_area);
+    frame.render_widget(Paragraph::new(header), header_area);
+
+    let rows = comparison.filtered_rows();
+    let columns = comparison.environments.len();
+    let selected_column = model.comparison_column.min(columns.saturating_sub(1));
+    let (name_width, first, visible) =
+        comparison_layout(usize::from(table_area.width), columns, selected_column);
+    let shown = first..first + visible;
+
+    // Ligne d'en-tête : noms d'environnement tronqués, flèches de défilement.
+    let mut spans = vec![
+        Span::styled(
+            format!(
+                "{:<COMPARISON_MARK_WIDTH$}",
+                if first > 0 { "‹" } else { "" }
+            ),
+            theme::FOCUS,
+        ),
+        Span::styled(format!("{:<name_width$}", "Requête"), theme::LABEL),
+    ];
+    for (index, env) in comparison.environments[shown.clone()].iter().enumerate() {
+        let style = if first + index == selected_column {
+            theme::FOCUS
+        } else {
+            theme::LABEL
+        };
+        let name = truncate_end(env, COMPARISON_COLUMN_WIDTH - 1);
+        spans.push(Span::styled(
+            format!("{name:^width$} ", width = COMPARISON_COLUMN_WIDTH - 1),
+            style,
+        ));
+    }
+    if shown.end < columns {
+        spans.push(Span::styled("›", theme::FOCUS));
+    }
+    let mut lines = vec![Line::from(spans)];
+
+    if rows.is_empty() {
+        let message = match comparison.filter {
+            ComparisonFilter::Divergent => "aucune divergence entre environnements",
+            _ => "aucune requête",
+        };
+        lines.push(Line::styled(message, theme::EMPTY_MESSAGE));
+        frame.render_widget(Paragraph::new(lines), table_area);
+        return;
+    }
+
+    let height = usize::from(table_area.height.saturating_sub(1)).max(1);
+    let selected_row = model.campaign_selected.min(rows.len() - 1);
+    let offset = selected_row.saturating_sub(height - 1);
+    for (index, row) in rows.iter().enumerate().skip(offset).take(height) {
+        let is_selected = index == selected_row;
+        let diverges = row.diverges();
+        let name_style = match (is_selected, diverges) {
+            (true, _) => theme::SELECTION,
+            (false, true) => theme::CLIENT_ERROR.add_modifier(Modifier::BOLD),
+            (false, false) => Style::default(),
+        };
+        let mut spans = vec![
+            Span::styled(
+                format!(
+                    "{:<COMPARISON_MARK_WIDTH$}",
+                    if diverges { "≠" } else { "" }
+                ),
+                theme::CLIENT_ERROR,
+            ),
+            Span::styled(
+                format!(
+                    "{:<name_width$}",
+                    truncate_start(
+                        &row.path.display().to_string(),
+                        name_width.saturating_sub(1)
+                    )
+                ),
+                name_style,
+            ),
+        ];
+        for (offset, cell) in row.cells[shown.clone()].iter().enumerate() {
+            let mut style = comparison_cell_style(*cell);
+            if is_selected && first + offset == selected_column {
+                style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            }
+            spans.push(Span::styled(
+                format!(
+                    "{:^width$}",
+                    cell.symbol(),
+                    width = COMPARISON_COLUMN_WIDTH - 1
+                ),
+                style,
+            ));
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(lines), table_area);
 }
 
 const DISABLED_ENTRY_VALUE: Style =
@@ -544,6 +777,22 @@ fn secrets_header(model: &Model) -> Vec<Line<'static>> {
             ),
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
+        // Série multi-environnements : préciser l'environnement proposé.
+        if let Some(env) = &state.prompt_env {
+            let position = state
+                .pending_envs
+                .iter()
+                .position(|name| name == env)
+                .map(|index| format!(" ({}/{})", index + 1, state.pending_envs.len()))
+                .unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::styled("Environnement : ", theme::LABEL),
+                Span::styled(
+                    format!("{env}{position}"),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
     }
     match &state.input {
         Some(SecretInput::Name(name)) => lines.push(Line::from(vec![
@@ -730,7 +979,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Filtres & Exécution ──", theme::SECTION));
 
     // Champ 0: Tags inclus
-    let c0 = popup.cursor == 0;
+    let c0 = popup.current_field() == RunnerOptionsField::from_static_index(0);
     if c0 {
         selected_line_idx = lines.len();
     }
@@ -756,7 +1005,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 1: Tags exclus
-    let c1 = popup.cursor == 1;
+    let c1 = popup.current_field() == RunnerOptionsField::from_static_index(1);
     if c1 {
         selected_line_idx = lines.len();
     }
@@ -782,7 +1031,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 2: Délai en ms
-    let c2 = popup.cursor == 2;
+    let c2 = popup.current_field() == RunnerOptionsField::from_static_index(2);
     if c2 {
         selected_line_idx = lines.len();
     }
@@ -808,7 +1057,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 3: Bail
-    let c3 = popup.cursor == 3;
+    let c3 = popup.current_field() == RunnerOptionsField::from_static_index(3);
     if c3 {
         selected_line_idx = lines.len();
     }
@@ -827,7 +1076,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 4: Tests-only
-    let c4 = popup.cursor == 4;
+    let c4 = popup.current_field() == RunnerOptionsField::from_static_index(4);
     if c4 {
         selected_line_idx = lines.len();
     }
@@ -849,7 +1098,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Réseau & TLS ──", theme::SECTION));
 
     // Champ 5: Insecure
-    let c5 = popup.cursor == 5;
+    let c5 = popup.current_field() == RunnerOptionsField::from_static_index(5);
     if c5 {
         selected_line_idx = lines.len();
     }
@@ -868,7 +1117,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 6: Cacert
-    let c6 = popup.cursor == 6;
+    let c6 = popup.current_field() == RunnerOptionsField::from_static_index(6);
     if c6 {
         selected_line_idx = lines.len();
     }
@@ -894,7 +1143,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 7: IgnoreTruststore
-    let c7 = popup.cursor == 7;
+    let c7 = popup.current_field() == RunnerOptionsField::from_static_index(7);
     if c7 {
         selected_line_idx = lines.len();
     }
@@ -917,7 +1166,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 8: ClientCertConfig
-    let c8 = popup.cursor == 8;
+    let c8 = popup.current_field() == RunnerOptionsField::from_static_index(8);
     if c8 {
         selected_line_idx = lines.len();
     }
@@ -943,7 +1192,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 9: NoProxy
-    let c9 = popup.cursor == 9;
+    let c9 = popup.current_field() == RunnerOptionsField::from_static_index(9);
     if c9 {
         selected_line_idx = lines.len();
     }
@@ -962,7 +1211,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 10: DisableCookies
-    let c10 = popup.cursor == 10;
+    let c10 = popup.current_field() == RunnerOptionsField::from_static_index(10);
     if c10 {
         selected_line_idx = lines.len();
     }
@@ -984,7 +1233,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Données & Itérations ──", theme::SECTION));
 
     // Champ 11: CsvFilePath
-    let c11 = popup.cursor == 11;
+    let c11 = popup.current_field() == RunnerOptionsField::from_static_index(11);
     if c11 {
         selected_line_idx = lines.len();
     }
@@ -1010,7 +1259,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 12: JsonFilePath
-    let c12 = popup.cursor == 12;
+    let c12 = popup.current_field() == RunnerOptionsField::from_static_index(12);
     if c12 {
         selected_line_idx = lines.len();
     }
@@ -1036,7 +1285,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 13: IterationCount
-    let c13 = popup.cursor == 13;
+    let c13 = popup.current_field() == RunnerOptionsField::from_static_index(13);
     if c13 {
         selected_line_idx = lines.len();
     }
@@ -1062,7 +1311,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 14: Parallel
-    let c14 = popup.cursor == 14;
+    let c14 = popup.current_field() == RunnerOptionsField::from_static_index(14);
     if c14 {
         selected_line_idx = lines.len();
     }
@@ -1084,7 +1333,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Divers ──", theme::SECTION));
 
     // Champ 15: Sandbox
-    let c15 = popup.cursor == 15;
+    let c15 = popup.current_field() == RunnerOptionsField::from_static_index(15);
     if c15 {
         selected_line_idx = lines.len();
     }
@@ -1106,7 +1355,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 16: Verbose
-    let c16 = popup.cursor == 16;
+    let c16 = popup.current_field() == RunnerOptionsField::from_static_index(16);
     if c16 {
         selected_line_idx = lines.len();
     }
@@ -1128,7 +1377,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Rapports & Export ──", theme::SECTION));
 
     // Champ 17: Rapport JUnit
-    let c17 = popup.cursor == 17;
+    let c17 = popup.current_field() == RunnerOptionsField::from_static_index(17);
     if c17 {
         selected_line_idx = lines.len();
     }
@@ -1147,7 +1396,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 18: Rapport HTML
-    let c18 = popup.cursor == 18;
+    let c18 = popup.current_field() == RunnerOptionsField::from_static_index(18);
     if c18 {
         selected_line_idx = lines.len();
     }
@@ -1166,7 +1415,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 19: Masquer en-têtes sensibles
-    let c19 = popup.cursor == 19;
+    let c19 = popup.current_field() == RunnerOptionsField::from_static_index(19);
     if c19 {
         selected_line_idx = lines.len();
     }
@@ -1184,11 +1433,91 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
+    // --- Section Environnements ---
+    lines.push(Line::styled(
+        "── Environnements (un bru run par environnement coché) ──",
+        theme::SECTION,
+    ));
+    if popup.available_environments.is_empty() {
+        lines.push(Line::styled(
+            "  (aucun environnement déclaré dans la collection)",
+            theme::LABEL,
+        ));
+    } else {
+        for (i, env_name) in popup.available_environments.iter().enumerate() {
+            let is_cur = popup.current_field() == RunnerOptionsField::Environment(i);
+            if is_cur {
+                selected_line_idx = lines.len();
+            }
+            let is_checked = popup.selected_environments.contains(env_name);
+            let check_str = if is_checked { "[x]" } else { "[ ]" };
+            let style = if is_cur {
+                theme::SELECTION
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(if is_cur { "▶ " } else { "  " }, theme::FOCUS),
+                Span::styled(format!("{check_str} {env_name}"), style),
+            ]));
+        }
+    }
+
+    // Options d'environnement de `bru` : fichier, environnement global, workspace.
+    let env_fields = [
+        (
+            RunnerOptionsField::EnvFile,
+            "Fichier d'env.     : ",
+            &popup.env_file_input,
+            "(aucun — exclusif avec les cases)",
+        ),
+        (
+            RunnerOptionsField::GlobalEnv,
+            "Env. global        : ",
+            &popup.global_env_input,
+            "(aucun — exige un workspace)",
+        ),
+        (
+            RunnerOptionsField::WorkspacePath,
+            "Workspace          : ",
+            &popup.workspace_path_input,
+            "(détection automatique)",
+        ),
+    ];
+    for (field, label, input, placeholder) in env_fields {
+        let current = popup.current_field() == field;
+        if current {
+            selected_line_idx = lines.len();
+        }
+        let value = if input.text().is_empty() {
+            placeholder
+        } else {
+            input.text()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if current { "▶ " } else { "  " }, theme::FOCUS),
+            Span::styled(label, theme::LABEL),
+            Span::styled(
+                format!("[ {value} ]"),
+                if current {
+                    theme::SELECTION
+                } else {
+                    Style::default()
+                },
+            ),
+            if current && popup.editing_text {
+                Span::styled("  (saisie…)", theme::LABEL)
+            } else {
+                Span::raw("")
+            },
+        ]));
+    }
+
     lines.push(Line::default());
 
-    // Boutons (Champs 20 et 21)
-    let c20 = popup.cursor == 20;
-    let c21 = popup.cursor == 21;
+    // Boutons
+    let c20 = popup.current_field() == RunnerOptionsField::SaveButton;
+    let c21 = popup.current_field() == RunnerOptionsField::RunButton;
     if c20 || c21 {
         selected_line_idx = lines.len();
     }
@@ -1349,5 +1678,31 @@ mod tests {
         assert_eq!(line.spans[0].content, "  ");
         assert_eq!(line.spans[1].content, "multi");
         assert_eq!(line.spans[2].content, " ← base, parent2");
+    }
+
+    #[test]
+    fn comparison_layout_fits_80_columns_and_follows_the_selection() {
+        // 80 colonnes, bordures retirées : 78 de large.
+        let (name, first, visible) = comparison_layout(78, 2, 0);
+        assert_eq!((first, visible), (0, 2));
+        assert_eq!(name + 2 * COMPARISON_COLUMN_WIDTH + 3, 78);
+        // Plus d'environnements que de place : la fenêtre suit la colonne.
+        let (_, first, visible) = comparison_layout(78, 9, 0);
+        assert_eq!((first, visible), (0, 6));
+        let (_, first, _) = comparison_layout(78, 9, 7);
+        assert_eq!(first, 2);
+        let (_, first, _) = comparison_layout(78, 9, 8);
+        assert_eq!(first, 3);
+        // Terminal minuscule : au moins une colonne.
+        let (_, first, visible) = comparison_layout(10, 3, 2);
+        assert_eq!((first, visible), (2, 1));
+    }
+
+    #[test]
+    fn truncation_keeps_the_useful_end() {
+        assert_eq!(truncate_end("staging", 8), "staging");
+        assert_eq!(truncate_end("production-eu", 8), "product…");
+        assert_eq!(truncate_start("a/b/data.bru", 20), "a/b/data.bru");
+        assert_eq!(truncate_start("folder/sub/data.bru", 10), "…/data.bru");
     }
 }

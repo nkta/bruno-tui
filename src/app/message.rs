@@ -305,6 +305,9 @@ pub enum Message {
     CycleCampaignFilter,
     /// `R` en focus Campagne : relance uniquement les requêtes en échec de la dernière campagne.
     RunFailedRequests,
+    /// `t` en focus Campagne : bascule entre la liste et le tableau comparatif
+    /// d'une campagne multi-environnements.
+    ToggleCampaignView,
     /// Modification de fichiers sur disque signalée par le watcher après débounce.
     WatchReload(Vec<PathBuf>),
     /// `x` en focus Réponse : démarre la saisie du chemin pour exporter le corps brut.
@@ -458,6 +461,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('z') => Message::ToggleZoom,
         KeyCode::Char('O') => Message::ToggleRunnerOptions,
         KeyCode::Char('R') => Message::RunFailedRequests,
+        KeyCode::Char('t') => Message::ToggleCampaignView,
         KeyCode::Char('x') => Message::ExportResponseBody,
         _ => return None,
     };
@@ -702,6 +706,7 @@ mod tests {
             ),
             (KeyCode::Char('R'), none, "RunFailedRequests"),
             (KeyCode::Char('R'), KeyModifiers::SHIFT, "RunFailedRequests"),
+            (KeyCode::Char('t'), none, "ToggleCampaignView"),
         ];
         for (code, modifiers, expected) in cases {
             assert_eq!(

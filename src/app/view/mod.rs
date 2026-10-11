@@ -26,7 +26,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{
-    CollectionState, EditState, Focus, Model, PendingConfirm, RunFailure, StatusMessage,
+    CampaignView, CollectionState, EditState, Focus, Model, PendingConfirm, RunFailure,
+    StatusMessage,
 };
 use super::update::{active_tree_filter_pattern, is_tree_filtered};
 use crate::collection::TreeNode;
@@ -708,7 +709,14 @@ fn run_status(model: &Model, node: &TreeNode) -> tree::RunStatus {
 fn active_run_message(model: &Model) -> Option<String> {
     let active = model.run.active.as_ref()?;
     let target = active.target.display();
-    if active.recursive {
+    if let Some(series) = model.series.as_ref().filter(|_| active.recursive) {
+        Some(format!(
+            "Exécution récursive de {target}… (env {}/{} : {}) (Ctrl+X annuler)",
+            series.current + 1,
+            series.environments.len(),
+            series.current_environment().unwrap_or_default()
+        ))
+    } else if active.recursive {
         Some(format!("Exécution récursive de {target}… (Ctrl+X annuler)"))
     } else {
         Some(format!("Exécution de {target}… (Ctrl+X annuler)"))
@@ -803,6 +811,9 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::ReadOnlyCollection => {
             "Collection OpenCollection (YAML) en lecture seule : édition et enregistrement désactivés"
                 .to_owned()
+        }
+        StatusMessage::NoEnvironmentResult(env) => {
+            format!("Aucun résultat pour l'environnement {env}")
         }
         StatusMessage::NotExecutable(kind) => {
             format!("Requête {kind} : type non exécutable par bru run")
@@ -980,6 +991,16 @@ fn status_line(model: &Model) -> String {
         (CollectionState::Loaded(_), Focus::EnvironmentPicker) => {
             "↑↓ naviguer  Entrée activer  e éditer  Échap arbre".to_owned()
         }
+        (CollectionState::Loaded(_), Focus::Campaign)
+            if model.campaign_view == CampaignView::Comparison && model.comparison.is_some() =>
+        {
+            "↑↓ requête  ←→ environnement  Entrée réponse  f filtre  t liste  Échap arbre  r relancer"
+                .to_owned()
+        }
+        (CollectionState::Loaded(_), Focus::Campaign) if model.comparison.is_some() => {
+            "↑↓ naviguer  Entrée/→ aller au détail  t comparaison  Échap arbre  r relancer  O options"
+                .to_owned()
+        }
         (CollectionState::Loaded(_), Focus::Campaign) => {
             "↑↓ naviguer  Entrée/→ aller au détail  Échap arbre  r relancer  O options".to_owned()
         }
@@ -1147,9 +1168,24 @@ fn render_response(model: &Model, frame: &mut Frame, area: Rect) {
     // à droite des onglets dans Bruno bureau) : toujours visible, même
     // sans résultat pendant une première exécution.
     let mut block = panel(title, model.focus == Focus::Response);
-    let summary = status::status_summary(model);
+    let mut summary = status::status_summary(model);
+    // Résultat d'une série multi-environnements : l'environnement affiché
+    // est rappelé sur la bordure, en fin de résumé : quand la place manque,
+    // le titre et le début du résumé sont rognés, jamais la fin.
+    let environment = match model.selected_node() {
+        Some(TreeNode::Request(request)) => model
+            .run
+            .outcomes
+            .get(&request.path)
+            .and_then(|outcome| outcome.environment.clone()),
+        _ => None,
+    };
+    if let Some(env) = environment.filter(|_| summary.width() > 0) {
+        summary
+            .spans
+            .push(Span::styled(format!("  [{env}]"), theme::FOCUS));
+    }
     if summary.width() > 0 {
-        let mut summary = summary;
         summary.spans.insert(0, Span::raw(" "));
         summary.spans.push(Span::raw(" "));
         block = block.title(summary.right_aligned());

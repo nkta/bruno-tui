@@ -333,6 +333,216 @@ impl CampaignSummary {
     }
 }
 
+/// Vue du panneau Campagne : la liste des requêtes ou le tableau comparatif
+/// d'une campagne multi-environnements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CampaignView {
+    #[default]
+    List,
+    Comparison,
+}
+
+/// Verdict d'une requête pour un environnement, toutes itérations
+/// confondues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComparisonCell {
+    Passed,
+    Failed,
+    Skipped,
+    /// Requête absente du rapport de cet environnement.
+    Absent,
+}
+
+impl ComparisonCell {
+    /// Symbole affiché dans le tableau.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Passed => "✓",
+            Self::Failed => "✗",
+            Self::Skipped => "–",
+            Self::Absent => "·",
+        }
+    }
+
+    /// Verdict d'un résultat, même règle que la liste de la campagne.
+    fn of(result: &runner::report::RequestResult) -> Self {
+        if result.is_failure() {
+            Self::Failed
+        } else if result.skipped || result.status == runner::report::ResultStatus::Skipped {
+            Self::Skipped
+        } else {
+            Self::Passed
+        }
+    }
+
+    /// Cumul de deux itérations : un échec l'emporte, puis une réussite.
+    fn merge(self, other: Self) -> Self {
+        use ComparisonCell::*;
+        match (self, other) {
+            (Failed, _) | (_, Failed) => Failed,
+            (Passed, _) | (_, Passed) => Passed,
+            (Skipped, _) | (_, Skipped) => Skipped,
+            (Absent, Absent) => Absent,
+        }
+    }
+}
+
+/// Ligne du tableau comparatif : une requête, une cellule par environnement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComparisonRow {
+    /// Chemin de la requête, relatif à la racine (`test.filename`).
+    pub path: PathBuf,
+    pub name: String,
+    pub cells: Vec<ComparisonCell>,
+}
+
+impl ComparisonRow {
+    /// Vrai si le verdict diffère entre au moins deux environnements.
+    pub fn diverges(&self) -> bool {
+        self.cells.windows(2).any(|pair| pair[0] != pair[1])
+    }
+}
+
+/// Filtre des lignes du tableau comparatif (touche `f`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ComparisonFilter {
+    #[default]
+    All,
+    Divergent,
+    Failed,
+    Passed,
+    Skipped,
+}
+
+impl ComparisonFilter {
+    /// Tous -> Divergences -> Échecs -> Réussis -> Ignorés -> Tous.
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Divergent,
+            Self::Divergent => Self::Failed,
+            Self::Failed => Self::Passed,
+            Self::Passed => Self::Skipped,
+            Self::Skipped => Self::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "Tous",
+            Self::Divergent => "Divergences",
+            Self::Failed => "Échecs",
+            Self::Passed => "Réussis",
+            Self::Skipped => "Ignorés",
+        }
+    }
+
+    /// Vrai si la ligne passe le filtre : divergente, ou ayant au moins une
+    /// cellule du verdict filtré.
+    pub fn accepts(self, row: &ComparisonRow) -> bool {
+        let any = |cell: ComparisonCell| row.cells.contains(&cell);
+        match self {
+            Self::All => true,
+            Self::Divergent => row.diverges(),
+            Self::Failed => any(ComparisonCell::Failed),
+            Self::Passed => any(ComparisonCell::Passed),
+            Self::Skipped => any(ComparisonCell::Skipped),
+        }
+    }
+}
+
+/// Tableau comparatif de la dernière série multi-environnements. Les
+/// résultats restent en mémoire, jamais sur disque.
+#[derive(Debug, Clone)]
+pub struct CampaignComparison {
+    /// Cible commune de la série.
+    pub target: PathBuf,
+    /// Colonnes, dans l'ordre d'exécution.
+    pub environments: Vec<String>,
+    /// Erreur d'exécution d'un environnement sans rapport, par colonne.
+    pub errors: Vec<Option<String>>,
+    /// Lignes, dans l'ordre de première apparition dans les rapports.
+    pub rows: Vec<ComparisonRow>,
+    /// Résultat de chaque requête, par colonne, pour le panneau Réponse.
+    pub outcomes: Vec<HashMap<PathBuf, RequestOutcome>>,
+    pub filter: ComparisonFilter,
+}
+
+impl CampaignComparison {
+    /// Construit le tableau à partir des issues d'une série.
+    pub fn build(target: PathBuf, runs: Vec<EnvRun>) -> Self {
+        let columns = runs.len();
+        let mut environments = Vec::with_capacity(columns);
+        let mut errors = Vec::with_capacity(columns);
+        let mut outcomes = Vec::with_capacity(columns);
+        let mut rows: Vec<ComparisonRow> = Vec::new();
+        let mut row_index: HashMap<PathBuf, usize> = HashMap::new();
+        for (column, run) in runs.into_iter().enumerate() {
+            let mut env_outcomes = HashMap::new();
+            match run.outcome {
+                EnvRunOutcome::Completed {
+                    report,
+                    exit_code,
+                    console,
+                } => {
+                    errors.push(None);
+                    let total_iterations = report.iterations().len() as u32;
+                    for iteration in report.0 {
+                        for result in iteration.results {
+                            let path = PathBuf::from(&result.test.filename);
+                            let index = *row_index.entry(path.clone()).or_insert_with(|| {
+                                rows.push(ComparisonRow {
+                                    path: path.clone(),
+                                    name: result.name.clone(),
+                                    cells: vec![ComparisonCell::Absent; columns],
+                                });
+                                rows.len() - 1
+                            });
+                            let cell = &mut rows[index].cells[column];
+                            *cell = cell.merge(ComparisonCell::of(&result));
+                            // Dernière itération affichée, comme `RunState::outcomes`.
+                            env_outcomes.insert(
+                                path,
+                                RequestOutcome::with_console(
+                                    result,
+                                    exit_code,
+                                    std::sync::Arc::clone(&console),
+                                    true,
+                                )
+                                .with_iteration(iteration.iteration_index + 1, total_iterations)
+                                .with_environment(Some(run.environment.clone())),
+                            );
+                        }
+                    }
+                }
+                EnvRunOutcome::Failed(error) => errors.push(Some(error)),
+            }
+            environments.push(run.environment);
+            outcomes.push(env_outcomes);
+        }
+        Self {
+            target,
+            environments,
+            errors,
+            rows,
+            outcomes,
+            filter: ComparisonFilter::default(),
+        }
+    }
+
+    /// Lignes passant le filtre actif.
+    pub fn filtered_rows(&self) -> Vec<&ComparisonRow> {
+        self.rows
+            .iter()
+            .filter(|row| self.filter.accepts(row))
+            .collect()
+    }
+
+    /// Nombre de requêtes dont le verdict diffère entre environnements.
+    pub fn divergent_count(&self) -> usize {
+        self.rows.iter().filter(|row| row.diverges()).count()
+    }
+}
+
 /// Information sur une requête en échec lors d'une campagne.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CampaignFailure {
@@ -407,7 +617,7 @@ pub struct ActiveRun {
 
 /// Résultat conservé pour une requête, issu d'un rapport valide — que le
 /// verdict de la requête soit un succès ou un échec.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RequestOutcome {
     pub result: runner::report::RequestResult,
     pub exit_code: Option<i32>,
@@ -420,6 +630,9 @@ pub struct RequestOutcome {
     pub is_global_console: bool,
     /// Mention d'itération (N, M) quand il y a plusieurs itérations.
     pub iteration: Option<(u32, u32)>,
+    /// Environnement de l'exécution, renseigné pour une série
+    /// multi-environnements (affiché sur la bordure du panneau Réponse).
+    pub environment: Option<String>,
 }
 
 impl RequestOutcome {
@@ -430,6 +643,7 @@ impl RequestOutcome {
             console: std::sync::Arc::from(""),
             is_global_console: false,
             iteration: None,
+            environment: None,
         }
     }
 
@@ -445,7 +659,13 @@ impl RequestOutcome {
             console,
             is_global_console,
             iteration: None,
+            environment: None,
         }
+    }
+
+    pub fn with_environment(mut self, environment: Option<String>) -> Self {
+        self.environment = environment;
+        self
     }
 
     pub fn with_iteration(mut self, current: u32, total: u32) -> Self {
@@ -1109,6 +1329,14 @@ pub struct Model {
     pub last_saved_stamps: HashMap<PathBuf, FileStamp>,
     /// Un rechargement de collection est en attente de la fermeture de la session d'édition.
     pub pending_reload: bool,
+    /// Série multi-environnements en cours d'enchaînement.
+    pub series: Option<EnvSeries>,
+    /// Tableau comparatif de la dernière campagne multi-environnements.
+    pub comparison: Option<CampaignComparison>,
+    /// Vue active du panneau Campagne (`t`).
+    pub campaign_view: CampaignView,
+    /// Colonne (environnement) sélectionnée dans le tableau comparatif.
+    pub comparison_column: usize,
     /// Indique si la collection racine est sélectionnée pour affichage dans
     /// le panneau Détail (`collection.bru` / `opencollection.yml`).
     pub selected_collection: bool,
@@ -1141,6 +1369,12 @@ pub struct SecretsState {
     pub pending_run: Option<(PathBuf, bool)>,
     /// Environnements pour lesquels la proposition a déjà été traitée.
     pub acknowledged: HashSet<String>,
+    /// Environnement dont le panneau propose les secrets, à la place de
+    /// l'environnement courant : un environnement d'une série en attente.
+    pub prompt_env: Option<String>,
+    /// Environnements de la série retenue avec `pending_run`, vide pour une
+    /// exécution sur l'environnement courant.
+    pub pending_envs: Vec<String>,
 }
 
 /// Saisie en cours dans le panneau des variables secrètes.
@@ -1240,11 +1474,67 @@ pub enum StatusMessage {
     ResponseExported(PathBuf),
     /// Échec de l'export du corps de réponse.
     ExportError(String),
+    /// Cellule du tableau comparatif sans résultat pour cet environnement.
+    NoEnvironmentResult(String),
+}
+
+/// Série de campagnes multi-environnements : un `bru run` par
+/// environnement, lancés l'un après l'autre, jamais en parallèle.
+#[derive(Debug)]
+pub struct EnvSeries {
+    /// Cible commune à toutes les exécutions de la série.
+    pub target: PathBuf,
+    /// Environnements de la série, dans l'ordre d'exécution.
+    pub environments: Vec<String>,
+    /// Indice, dans `environments`, de l'exécution en cours.
+    pub current: usize,
+    /// Issues déjà reçues, dans l'ordre de `environments`.
+    pub runs: Vec<EnvRun>,
+    /// Annulation demandée (`Ctrl+X`) : la série n'enchaîne plus.
+    pub cancelled: bool,
+}
+
+impl EnvSeries {
+    pub fn new(target: PathBuf, environments: Vec<String>) -> Self {
+        Self {
+            target,
+            environments,
+            current: 0,
+            runs: Vec::new(),
+            cancelled: false,
+        }
+    }
+
+    /// Environnement de l'exécution en cours.
+    pub fn current_environment(&self) -> Option<&str> {
+        self.environments.get(self.current).map(String::as_str)
+    }
+}
+
+/// Issue de l'exécution d'une série sur un environnement.
+#[derive(Debug, Clone)]
+pub struct EnvRun {
+    pub environment: String,
+    pub outcome: EnvRunOutcome,
+}
+
+/// Rapport reçu, ou motif de l'absence de rapport.
+#[derive(Debug, Clone)]
+pub enum EnvRunOutcome {
+    Completed {
+        report: runner::Report,
+        exit_code: Option<i32>,
+        console: std::sync::Arc<str>,
+    },
+    /// `bru` n'a produit aucun rapport exploitable (message d'erreur).
+    Failed(String),
 }
 
 /// Champ interactif dans le popup d'options de campagne.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerOptionsField {
+    /// Case à cocher d'un environnement de la collection.
+    Environment(usize),
     Tags,
     ExcludeTags,
     Delay,
@@ -1265,14 +1555,21 @@ pub enum RunnerOptionsField {
     ReporterJunit,
     ReporterHtml,
     SkipHeaders,
+    /// Fichier d'environnement (`--env-file`), après les cases d'environnement.
+    EnvFile,
+    GlobalEnv,
+    WorkspacePath,
     SaveButton,
     RunButton,
 }
 
 impl RunnerOptionsField {
-    pub const COUNT: usize = 22;
+    pub const STATIC_COUNT: usize = 25;
+    /// Indice fixe avant lequel s'insèrent les cases d'environnement.
+    pub const ENVIRONMENTS_AT: usize = 20;
 
-    pub fn from_index(index: usize) -> Self {
+    /// Champ fixe d'indice `index`, après les cases d'environnement.
+    pub fn from_static_index(index: usize) -> Self {
         match index {
             0 => Self::Tags,
             1 => Self::ExcludeTags,
@@ -1294,7 +1591,10 @@ impl RunnerOptionsField {
             17 => Self::ReporterJunit,
             18 => Self::ReporterHtml,
             19 => Self::SkipHeaders,
-            20 => Self::SaveButton,
+            20 => Self::EnvFile,
+            21 => Self::GlobalEnv,
+            22 => Self::WorkspacePath,
+            23 => Self::SaveButton,
             _ => Self::RunButton,
         }
     }
@@ -1310,13 +1610,17 @@ impl RunnerOptionsField {
                 | Self::CsvFilePath
                 | Self::JsonFilePath
                 | Self::IterationCount
+                | Self::EnvFile
+                | Self::GlobalEnv
+                | Self::WorkspacePath
         )
     }
 
     pub fn is_toggle(&self) -> bool {
         matches!(
             self,
-            Self::Bail
+            Self::Environment(_)
+                | Self::Bail
                 | Self::TestsOnly
                 | Self::Insecure
                 | Self::IgnoreTruststore
@@ -1335,6 +1639,13 @@ impl RunnerOptionsField {
 /// État du popup d'options de campagne (TNR).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerOptionsPopup {
+    /// Environnements valides de la collection, dans son ordre.
+    pub available_environments: Vec<String>,
+    /// Environnements cochés pour la campagne.
+    pub selected_environments: Vec<String>,
+    pub env_file_input: TextInput,
+    pub global_env_input: TextInput,
+    pub workspace_path_input: TextInput,
     pub tags_input: TextInput,
     pub exclude_tags_input: TextInput,
     pub delay_input: TextInput,
@@ -1361,9 +1672,40 @@ pub struct RunnerOptionsPopup {
 }
 
 impl RunnerOptionsPopup {
-    /// Construit le popup à partir de la configuration actuelle.
-    pub fn from_config(config: &RunnerOptionsConfig) -> Self {
+    /// Construit le popup à partir de la configuration actuelle et de la collection chargée.
+    pub fn from_config(config: &RunnerOptionsConfig, collection: Option<&Collection>) -> Self {
+        let available_environments = collection
+            .map(|c| {
+                c.environments
+                    .iter()
+                    .flatten()
+                    .map(|e| e.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
+            available_environments,
+            selected_environments: config.environments.clone(),
+            env_file_input: TextInput::new(
+                &config
+                    .env_file
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
+            global_env_input: TextInput::new(
+                config.global_env.as_deref().unwrap_or_default(),
+                false,
+            ),
+            workspace_path_input: TextInput::new(
+                &config
+                    .workspace_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                false,
+            ),
             tags_input: TextInput::new(&config.tags.join(", "), false),
             exclude_tags_input: TextInput::new(&config.exclude_tags.join(", "), false),
             delay_input: TextInput::new(
@@ -1427,6 +1769,26 @@ impl RunnerOptionsPopup {
         }
     }
 
+    /// Nombre de champs navigables : une case par environnement, puis les champs fixes.
+    pub fn total_fields(&self) -> usize {
+        self.available_environments.len() + RunnerOptionsField::STATIC_COUNT
+    }
+
+    /// Champ d'indice `index` dans l'ordre de navigation.
+    /// Les cases d'environnement s'insèrent avant le champ fixe
+    /// [`RunnerOptionsField::ENVIRONMENTS_AT`], en fin de popup.
+    pub fn field_at(&self, index: usize) -> RunnerOptionsField {
+        let at = RunnerOptionsField::ENVIRONMENTS_AT;
+        let count = self.available_environments.len();
+        if index < at {
+            RunnerOptionsField::from_static_index(index)
+        } else if index < at + count {
+            RunnerOptionsField::Environment(index - at)
+        } else {
+            RunnerOptionsField::from_static_index(index - count)
+        }
+    }
+
     /// Valide et convertit la saisie du popup en [`RunnerOptionsConfig`].
     pub fn to_config(&self) -> Result<RunnerOptionsConfig, RunnerOptionsError> {
         let tags = crate::runner::parse_tags(self.tags_input.text())?;
@@ -1450,7 +1812,24 @@ impl RunnerOptionsPopup {
         if self.parallel && csv_file_path.is_none() && json_file_path.is_none() {
             return Err(RunnerOptionsError::ParallelWithoutDataFile);
         }
+        // Ordre de la collection, quel que soit l'ordre des coches.
+        let environments: Vec<String> = self
+            .available_environments
+            .iter()
+            .filter(|name| self.selected_environments.contains(name))
+            .cloned()
+            .collect();
+        let env_file = crate::runner::parse_env_file_path(self.env_file_input.text())?;
+        if env_file.is_some() && !environments.is_empty() {
+            return Err(RunnerOptionsError::EnvFileWithEnvironments);
+        }
+        let global_env = crate::runner::parse_global_env(self.global_env_input.text());
+        let workspace_path = crate::runner::parse_workspace_path(self.workspace_path_input.text())?;
         Ok(RunnerOptionsConfig {
+            environments,
+            env_file,
+            global_env,
+            workspace_path,
             tags,
             exclude_tags,
             delay_ms,
@@ -1475,12 +1854,25 @@ impl RunnerOptionsPopup {
     }
 
     pub fn current_field(&self) -> RunnerOptionsField {
-        RunnerOptionsField::from_index(self.cursor)
+        self.field_at(self.cursor)
     }
 
     /// Bascule la valeur du champ booléen courant s'il s'agit d'un toggle.
     pub fn toggle_current(&mut self) {
         match self.current_field() {
+            RunnerOptionsField::Environment(idx) => {
+                if let Some(env_name) = self.available_environments.get(idx) {
+                    if let Some(pos) = self
+                        .selected_environments
+                        .iter()
+                        .position(|e| e == env_name)
+                    {
+                        self.selected_environments.remove(pos);
+                    } else {
+                        self.selected_environments.push(env_name.clone());
+                    }
+                }
+            }
             RunnerOptionsField::Bail => self.bail = !self.bail,
             RunnerOptionsField::TestsOnly => self.tests_only = !self.tests_only,
             RunnerOptionsField::Insecure => self.insecure = !self.insecure,
@@ -1510,13 +1902,17 @@ impl RunnerOptionsPopup {
             RunnerOptionsField::CsvFilePath => Some(&mut self.csv_file_path_input),
             RunnerOptionsField::JsonFilePath => Some(&mut self.json_file_path_input),
             RunnerOptionsField::IterationCount => Some(&mut self.iteration_count_input),
+            RunnerOptionsField::EnvFile => Some(&mut self.env_file_input),
+            RunnerOptionsField::GlobalEnv => Some(&mut self.global_env_input),
+            RunnerOptionsField::WorkspacePath => Some(&mut self.workspace_path_input),
             _ => None,
         }
     }
 
     pub fn prev_field(&mut self) {
+        let total = self.total_fields();
         self.cursor = if self.cursor == 0 {
-            RunnerOptionsField::COUNT - 1
+            total.saturating_sub(1)
         } else {
             self.cursor - 1
         };
@@ -1525,7 +1921,10 @@ impl RunnerOptionsPopup {
     }
 
     pub fn next_field(&mut self) {
-        self.cursor = (self.cursor + 1) % RunnerOptionsField::COUNT;
+        let total = self.total_fields();
+        if total > 0 {
+            self.cursor = (self.cursor + 1) % total;
+        }
         self.editing_text = false;
         self.error = None;
     }
@@ -1577,6 +1976,10 @@ impl Model {
             last_reports: Vec::new(),
             last_saved_stamps: HashMap::new(),
             pending_reload: false,
+            series: None,
+            comparison: None,
+            campaign_view: CampaignView::List,
+            comparison_column: 0,
             selected_collection: false,
             export_input: None,
             history_enabled: false,
@@ -1828,20 +2231,30 @@ pub fn environment_name_at(collection: &Collection, index: usize) -> Option<Opti
     }
 }
 
-/// Noms `vars:secret` de l'environnement courant, vide sans environnement
-/// ou si l'environnement courant n'existe plus.
-pub fn current_secret_names(model: &Model) -> &[String] {
-    let (Some(collection), Some(current)) = (model.loaded(), &model.current_environment) else {
+/// Noms `vars:secret` de l'environnement donné, vide sans environnement
+/// ou si l'environnement donné n'existe plus.
+pub fn secret_names_for_env<'a>(model: &'a Model, env_name: Option<&str>) -> &'a [String] {
+    let (Some(collection), Some(target_env)) = (model.loaded(), env_name) else {
         return &[];
     };
     collection
         .environments
         .iter()
         .find_map(|entry| match entry {
-            Ok(env) if &env.name == current => Some(env.secret_names.as_slice()),
+            Ok(env) if env.name == target_env => Some(env.secret_names.as_slice()),
             _ => None,
         })
         .unwrap_or(&[])
+}
+
+/// Environnement dont le panneau des secrets montre les lignes :
+/// l'environnement d'une série en attente, sinon l'environnement courant.
+pub fn secrets_panel_environment(model: &Model) -> Option<&str> {
+    model
+        .secrets
+        .prompt_env
+        .as_deref()
+        .or(model.current_environment.as_deref())
 }
 
 /// Recherche d'un nom : la clé explicite de son `--secret` s'il en a une,
@@ -1872,12 +2285,12 @@ pub fn secret_lookups(mappings: &[SecretMapping], collection: &Collection) -> Ve
         .collect()
 }
 
-/// Lignes du panneau des variables secrètes : mappings `--secret`, puis
-/// `vars:secret` de l'environnement courant, puis ajouts, sans doublon.
-/// Une valeur saisie prime sur la résolution `.env`/shell.
-pub fn secret_rows(model: &Model) -> Vec<SecretRow> {
+/// Lignes des variables secrètes pour un environnement donné : mappings
+/// `--secret`, puis `vars:secret` de cet environnement, puis ajouts, sans
+/// doublon. Une valeur saisie prime sur la résolution `.env`/shell.
+pub fn secret_rows_for_env(model: &Model, env_name: Option<&str>) -> Vec<SecretRow> {
     let state = &model.secrets;
-    let declared = current_secret_names(model);
+    let declared = secret_names_for_env(model, env_name);
     let mut names: Vec<&str> = Vec::new();
     let candidates = state
         .mappings
@@ -1926,12 +2339,28 @@ pub fn secret_rows(model: &Model) -> Vec<SecretRow> {
         .collect()
 }
 
-/// Surcharges `--env-var` à transmettre : chaque ligne ayant une valeur.
-pub fn secret_env_vars(model: &Model) -> Vec<(String, SecretString)> {
-    secret_rows(model)
+/// Lignes du panneau des variables secrètes : mappings `--secret`, puis
+/// `vars:secret` de l'environnement du panneau
+/// ([`secrets_panel_environment`]), puis ajouts, sans doublon.
+/// Une valeur saisie prime sur la résolution `.env`/shell.
+pub fn secret_rows(model: &Model) -> Vec<SecretRow> {
+    secret_rows_for_env(model, secrets_panel_environment(model))
+}
+
+/// Surcharges `--env-var` à transmettre pour un environnement donné : chaque ligne ayant une valeur.
+pub fn secret_env_vars_for_env(
+    model: &Model,
+    env_name: Option<&str>,
+) -> Vec<(String, SecretString)> {
+    secret_rows_for_env(model, env_name)
         .into_iter()
         .filter_map(|row| row.value.map(|value| (row.name, value)))
         .collect()
+}
+
+/// Surcharges `--env-var` à transmettre : chaque ligne ayant une valeur.
+pub fn secret_env_vars(model: &Model) -> Vec<(String, SecretString)> {
+    secret_env_vars_for_env(model, model.current_environment.as_deref())
 }
 
 /// Nœud désigné par une adresse, dans un arbre donné. Partagé par
@@ -2811,5 +3240,181 @@ mod tests {
         assert_eq!(filtered[0].path, PathBuf::from("legacy.bru"));
         assert_eq!(filtered[0].status, CampaignItemStatus::Failed);
         assert_eq!(filtered[0].reason, Some("bad gateway".into()));
+    }
+
+    fn fixture_report(json: &str) -> runner::Report {
+        serde_json::from_str(json).expect("rapport de fixture")
+    }
+
+    fn env_run(environment: &str, report: runner::Report) -> EnvRun {
+        EnvRun {
+            environment: environment.into(),
+            outcome: EnvRunOutcome::Completed {
+                report,
+                exit_code: Some(0),
+                console: std::sync::Arc::from("console"),
+            },
+        }
+    }
+
+    fn multi_env_comparison() -> CampaignComparison {
+        CampaignComparison::build(
+            PathBuf::new(),
+            vec![
+                env_run(
+                    "up",
+                    fixture_report(include_str!(
+                        "../../tests/fixtures/reports/multi-env-up.json"
+                    )),
+                ),
+                env_run(
+                    "down",
+                    fixture_report(include_str!(
+                        "../../tests/fixtures/reports/multi-env-down.json"
+                    )),
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn comparison_is_built_from_real_reports() {
+        use ComparisonCell::*;
+        let comparison = multi_env_comparison();
+        assert_eq!(comparison.environments, ["up", "down"]);
+        assert_eq!(comparison.errors, [None, None]);
+        let rows: Vec<(&Path, &[ComparisonCell])> = comparison
+            .rows
+            .iter()
+            .map(|row| (row.path.as_path(), row.cells.as_slice()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Path::new("data.bru"), &[Passed, Failed][..]),
+                (Path::new("static.bru"), &[Passed, Passed][..]),
+                (Path::new("skip.bru"), &[Skipped, Skipped][..]),
+            ]
+        );
+        assert_eq!(comparison.divergent_count(), 1);
+        // Résultats par environnement conservés pour le panneau Réponse.
+        let down = &comparison.outcomes[1][Path::new("data.bru")];
+        assert_eq!(down.environment.as_deref(), Some("down"));
+        assert!(down.result.is_failure());
+        assert!(
+            !comparison.outcomes[0][Path::new("data.bru")]
+                .result
+                .is_failure()
+        );
+    }
+
+    #[test]
+    fn comparison_filters_cycle_and_select_rows() {
+        let mut comparison = multi_env_comparison();
+        let paths = |c: &CampaignComparison| -> Vec<String> {
+            c.filtered_rows()
+                .iter()
+                .map(|row| row.path.display().to_string())
+                .collect()
+        };
+        assert_eq!(comparison.filter, ComparisonFilter::All);
+        assert_eq!(paths(&comparison).len(), 3);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter.label(), "Divergences");
+        assert_eq!(paths(&comparison), ["data.bru"]);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter, ComparisonFilter::Failed);
+        assert_eq!(paths(&comparison), ["data.bru"]);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter, ComparisonFilter::Passed);
+        assert_eq!(paths(&comparison), ["data.bru", "static.bru"]);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter, ComparisonFilter::Skipped);
+        assert_eq!(paths(&comparison), ["skip.bru"]);
+        comparison.filter = comparison.filter.next();
+        assert_eq!(comparison.filter, ComparisonFilter::All);
+    }
+
+    #[test]
+    fn a_request_missing_from_an_environment_is_absent_and_diverges() {
+        let comparison = CampaignComparison::build(
+            PathBuf::new(),
+            vec![
+                env_run(
+                    "up",
+                    fixture_report(include_str!(
+                        "../../tests/fixtures/reports/multi-env-up.json"
+                    )),
+                ),
+                env_run(
+                    "csv",
+                    fixture_report(include_str!(
+                        "../../tests/fixtures/reports/csv-iterations.json"
+                    )),
+                ),
+                EnvRun {
+                    environment: "cassé".into(),
+                    outcome: EnvRunOutcome::Failed("bru introuvable".into()),
+                },
+            ],
+        );
+        assert_eq!(comparison.errors[2].as_deref(), Some("bru introuvable"));
+        let req = comparison
+            .rows
+            .iter()
+            .find(|row| row.path == Path::new("req.bru"))
+            .expect("req.bru");
+        assert_eq!(
+            req.cells,
+            [
+                ComparisonCell::Absent,
+                ComparisonCell::Passed,
+                ComparisonCell::Absent
+            ]
+        );
+        assert!(req.diverges());
+        assert!(comparison.outcomes[2].is_empty());
+    }
+
+    /// Avec des itérations CSV, une cellule résume toutes les itérations :
+    /// ✗ dès qu'une seule échoue.
+    #[test]
+    fn a_cell_summarises_all_iterations() {
+        let report = || {
+            fixture_report(include_str!(
+                "../../tests/fixtures/reports/csv-iterations.json"
+            ))
+        };
+        let mut failing = report();
+        assert_eq!(failing.0.len(), 2);
+        // Seule la seconde itération échoue sur cet environnement.
+        failing.0[1].results[0].error = Some("échec simulé".into());
+        let comparison = CampaignComparison::build(
+            PathBuf::new(),
+            vec![env_run("a", report()), env_run("b", failing)],
+        );
+        assert_eq!(comparison.rows.len(), 1);
+        assert_eq!(
+            comparison.rows[0].cells,
+            [ComparisonCell::Passed, ComparisonCell::Failed]
+        );
+        // Le résultat conservé est celui de la dernière itération.
+        assert_eq!(
+            comparison.outcomes[1][Path::new("req.bru")].iteration,
+            Some((2, 2))
+        );
+    }
+
+    #[test]
+    fn cell_merge_prefers_failure_then_success() {
+        use ComparisonCell::*;
+        assert_eq!(Passed.merge(Failed), Failed);
+        assert_eq!(Skipped.merge(Passed), Passed);
+        assert_eq!(Absent.merge(Skipped), Skipped);
+        assert_eq!(Absent.merge(Absent), Absent);
+        assert_eq!(
+            [Passed, Failed, Skipped, Absent].map(ComparisonCell::symbol),
+            ["✓", "✗", "–", "·"]
+        );
     }
 }

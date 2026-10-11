@@ -414,6 +414,43 @@ fn csv_iterations_report() {
     assert_eq!(report.iterations()[1].results[0].test.filename, "req.bru");
 }
 
+const MULTI_ENV_UP: &str = include_str!("fixtures/reports/multi-env-up.json");
+const MULTI_ENV_DOWN: &str = include_str!("fixtures/reports/multi-env-down.json");
+
+/// Même campagne sur deux environnements : `data` diverge, `static` et
+/// `skip` ont le même verdict partout.
+#[test]
+fn multi_env_reports_diverge_on_data_only() {
+    let up: Report = serde_json::from_str(MULTI_ENV_UP).expect("multi-env-up.json");
+    let down: Report = serde_json::from_str(MULTI_ENV_DOWN).expect("multi-env-down.json");
+    for report in [&up, &down] {
+        assert_eq!(report.iterations().len(), 1);
+        assert_eq!(report.iterations()[0].summary.total_requests, 3);
+        assert_eq!(report.iterations()[0].summary.skipped_requests, 1);
+        let skip = result(report, "skip");
+        assert!(skip.skipped);
+        assert_eq!(skip.status, ResultStatus::Skipped);
+        let fixed = result(report, "static");
+        assert_eq!(fixed.response.status, ResponseStatus::Http(200));
+        assert!(!fixed.is_failure());
+    }
+
+    let data_up = result(&up, "data");
+    assert_eq!(data_up.test.filename, "data.bru");
+    assert_eq!(data_up.response.status, ResponseStatus::Http(200));
+    assert!(!data_up.is_failure());
+
+    let data_down = result(&down, "data");
+    assert_eq!(data_down.status, ResultStatus::Error);
+    assert_eq!(data_down.response.status, ResponseStatus::Error);
+    assert_eq!(
+        data_down.error.as_deref(),
+        Some("connect ECONNREFUSED 127.0.0.1:18799")
+    );
+    assert!(data_down.is_failure());
+    assert_eq!(down.iterations()[0].summary.error_requests, 1);
+}
+
 /// Requêtes gRPC et WebSocket : `bru run` 4.2.1 les traite comme des
 /// requêtes HTTP et échoue sur le schéma de l'URL, sans lancer leurs
 /// tests ; la requête HTTP voisine s'exécute normalement.

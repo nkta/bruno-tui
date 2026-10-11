@@ -9,6 +9,10 @@
 # Produit aussi `opencollection.json` depuis
 # `tests/fixtures/collections/oc-probe` (collection OpenCollection YAML).
 #
+# Produit aussi `multi-env-up.json` et `multi-env-down.json` depuis
+# `tests/fixtures/collections/multi-env-probe` : même collection lancée sur
+# deux environnements, `down` pointant vers le port fermé 18799.
+#
 # Produit aussi `grpc-ws.json` et `oc-grpc-ws.json` depuis
 # `tests/fixtures/collections/grpc-ws-probe` (`.bru`) et `oc-grpc-ws-probe`
 # (YAML) : requêtes gRPC et WebSocket, que `bru run` 4.2.1 n'exécute pas.
@@ -29,6 +33,9 @@ YML_COLLECTION="$ROOT/tests/fixtures/collections/oc-probe"
 YML_OUT="$ROOT/tests/fixtures/reports/opencollection.json"
 CSV_COLLECTION="$ROOT/tests/fixtures/collections/csv-probe"
 CSV_OUT="$ROOT/tests/fixtures/reports/csv-iterations.json"
+MULTI_ENV_COLLECTION="$ROOT/tests/fixtures/collections/multi-env-probe"
+MULTI_ENV_UP_OUT="$ROOT/tests/fixtures/reports/multi-env-up.json"
+MULTI_ENV_DOWN_OUT="$ROOT/tests/fixtures/reports/multi-env-down.json"
 GRPC_WS_COLLECTION="$ROOT/tests/fixtures/collections/grpc-ws-probe"
 GRPC_WS_OUT="$ROOT/tests/fixtures/reports/grpc-ws.json"
 OC_GRPC_WS_COLLECTION="$ROOT/tests/fixtures/collections/oc-grpc-ws-probe"
@@ -107,3 +114,14 @@ set -e
 
 echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $CSV_OUT"
 
+
+# Campagne multi-environnements : une exécution par environnement.
+cd "$MULTI_ENV_COLLECTION"
+for ENV_NAME in up down; do
+  if [ "$ENV_NAME" = up ]; then ENV_OUT="$MULTI_ENV_UP_OUT"; else ENV_OUT="$MULTI_ENV_DOWN_OUT"; fi
+  set +e
+  bru run -r --env "$ENV_NAME" --reporter-json /dev/fd/3 3>"$ENV_OUT" >/dev/null 2>&1
+  CODE=$?
+  set -e
+  echo "bru $(bru --version) : code de sortie $CODE, rapport écrit dans $ENV_OUT"
+done

@@ -81,7 +81,8 @@ d'édition non enregistrée demande confirmation.
 | `S` | panneau Variables secrètes |
 | `?` | aide des raccourcis (popup centré) |
 | `C` | panneau Campagne (bilan TNR de la dernière exécution récursive) |
-| `O` | options de campagne (tags, TLS, données, sandbox, verbose, rapports JUnit/HTML) |
+| `O` | options de campagne (environnements, tags, TLS, données, sandbox, verbose, rapports JUnit/HTML) |
+| `t` | panneau Campagne : liste / tableau comparatif multi-environnements |
 | `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
 | `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
 
@@ -294,6 +295,20 @@ sélectionnée a un résultat avec un corps non vide.
   `Entrée` ou `→` sélectionne la requête dans l'arbre et donne le focus au Détail ;
   `R` relance uniquement les requêtes en échec avec les options courantes ;
   `r` relance l'ensemble de la campagne.
+  Après une campagne sur plusieurs environnements (voir **Environnements** dans les
+  options `O`), le panneau s'ouvre sur la vue **Comparaison** ; `t` bascule entre la
+  liste (dernier environnement exécuté) et ce tableau. Une ligne par requête, une
+  colonne par environnement : `✓` réussi, `✗` échec, `–` ignoré, `·` absente du rapport
+  de cet environnement. Avec des itérations CSV/JSON, une cellule résume toutes les
+  itérations (`✗` dès qu'une échoue). Les requêtes dont le verdict diffère entre
+  environnements sont marquées `≠` et mises en évidence ; `f` fait tourner le filtre
+  (`Tous` / `Divergences` / `Échecs` / `Réussis` / `Ignorés`). `↑`/`↓` choisit la requête,
+  `←`/`→` l'environnement (défilement horizontal quand les colonnes ne tiennent pas,
+  signalé par `‹` / `›` ; noms d'environnement tronqués à 8 caractères), `Entrée`
+  sélectionne la requête et affiche le résultat de cet environnement dans le panneau
+  Réponse, dont la bordure rappelle l'environnement (`[staging]`). Les résultats par
+  environnement restent en mémoire uniquement ; une nouvelle campagne sur un seul
+  environnement efface le tableau.
 - **Options du runner** (`O`) : popup de configuration des options d'exécution
   récursive mémorisées en session :
   - **Tags inclus** (`--tags`) et **tags exclus** (`--exclude-tags`) sous forme
@@ -318,6 +333,24 @@ sélectionnée a un résultat avec un corps non vide.
     `~/.local/state/bruno-tui/reports/`, repli vers `./reports`), horodatés avec le nom
     du dossier cible. Le masquage des en-têtes sensibles (`--reporter-skip-all-headers`)
     est activé par défaut et peut être basculé.
+  - **Environnements** : une case par environnement de la collection (`Espace` ou
+    `Entrée` coche/décoche). Aucun coché : la campagne tourne sur l'environnement actif,
+    comme avant. Un seul coché : il remplace l'environnement actif pour la campagne.
+    Deux ou plus : la campagne lance un `bru run` par environnement coché, l'un après
+    l'autre (jamais en parallèle), dans l'ordre de la collection et avec les mêmes
+    options. La barre d'état suit la progression (`env 2/3 : staging`). `Ctrl+X` arrête
+    l'exécution en cours et n'enchaîne pas les suivantes. Avant de démarrer la série,
+    le panneau Secrets propose, environnement par environnement, les `vars:secret`
+    manquants (`r` passe à l'environnement suivant puis lance, `Échap` abandonne toute
+    la série). Une requête seule (`r` sur une requête) reste sur l'environnement actif.
+    La même section porte les options d'environnement de `bru` :
+    - **Fichier d'environnement** (`--env-file`) : fichier `.bru` ou `.json`, vérifié à la
+      saisie et transmis en chemin absolu. Exclusif avec les cases cochées ; il remplace
+      l'environnement actif (`--env` n'est plus transmis à la campagne).
+    - **Environnement global** (`--global-env <nom>`) : exige que la collection soit dans
+      un workspace Bruno, détecté automatiquement ou indiqué par le champ suivant.
+    - **Workspace** (`--workspace-path`) : dossier contenant `workspace.yml`, vérifié à la
+      saisie et transmis en chemin absolu.
   - `Entrée` édite ou bascule un champ, `r` (hors saisie) lance directement la
     campagne avec les options configurées, `Échap` enregistre et referme le popup.
 - **Recherche globale** (`Ctrl+K`) : popup centré de recherche en direct dans l'ensemble
