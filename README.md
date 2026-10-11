@@ -40,6 +40,7 @@ d'édition non enregistrée demande confirmation.
 | `PageUp`/`PageDown` | page précédente/suivante |
 | `r` | lancer la requête (ou récursivement un dossier) ; `Ctrl+X` annule |
 | `f` | filtrer l'arbre de la collection (en direct ; Entrée valide, Échap annule ou efface) |
+| `Ctrl+K` | recherche globale par nom, méthode, chemin et URL (popup centré en direct ; ↑↓ choisir, Entrée valide, Échap ferme) |
 | `M` | activer/désactiver la capture souris |
 | `D` | panneau Diagnostics (erreurs de chargement) |
 | `H` | panneau Historique des exécutions |
@@ -173,6 +174,12 @@ sélectionnée a un résultat avec un corps non vide.
     est activé par défaut et peut être basculé.
   - `Entrée` édite ou bascule un champ, `Ctrl+R` ou `Ctrl+Enter` lance directement
     la campagne avec les options configurées, `Échap` enregistre et referme le popup.
+- **Recherche globale** (`Ctrl+K`) : popup centré de recherche en direct dans l'ensemble
+  des requêtes de la collection chargée (nom affiché, méthode HTTP, chemin relatif et URL brute
+  telle qu'écrite avec ses variables non résolues). `↑`/`↓` choisit dans la liste ordonnée
+  par pertinence (correspondance mise en évidence, URL tronquée proprement), `Entrée` sélectionne
+  la requête dans l'arbre en dépliant automatiquement ses dossiers parents et donne le focus
+  au panneau Détail, `Échap` referme.
 
 Aucun de ces panneaux ne prend le clic pour l'instant — seul le
 clavier y navigue.
