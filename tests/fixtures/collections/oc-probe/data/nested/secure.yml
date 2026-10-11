@@ -1,0 +1,69 @@
+info:
+  name: secure
+  type: http
+  seq: 1
+  tags:
+    - data
+
+http:
+  method: GET
+  url: "{{baseUrl}}/data.json?page=1"
+  headers:
+    - name: Accept
+      value: application/json
+    - name: X-Debug
+      value: "1"
+      disabled: true
+  params:
+    - name: page
+      value: "1"
+      type: query
+    - name: verbose
+      value: "true"
+      type: query
+      disabled: true
+  auth:
+    type: bearer
+    token: "{{token}}"
+
+runtime:
+  variables:
+    - name: reqVar
+      value: abc
+    - name: offVar
+      value: off
+      disabled: true
+  scripts:
+    - type: before-request
+      code: bru.setVar("start", Date.now());
+    - type: after-response
+      code: bru.setVar("status", res.getStatus());
+    - type: tests
+      code: |-
+        test("status 200", function() {
+          expect(res.getStatus()).to.equal(200);
+        });
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "200"
+    - expression: res.body
+      operator: isJson
+  actions:
+    - type: set-variable
+      phase: after-response
+      selector:
+        expression: res.body.name
+        method: jsonq
+      variable:
+        name: itemName
+        scope: runtime
+
+settings:
+  encodeUrl: true
+  timeout: 5000
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: true
+
+docs: Requête de démonstration avec auth bearer.

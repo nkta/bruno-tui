@@ -1,0 +1,20 @@
+opencollection: 1.0.0
+
+info:
+  name: oc-probe
+  version: "1"
+
+request:
+  headers:
+    - name: X-Collection
+      value: oc-probe
+
+docs:
+  content: Collection de fixture OpenCollection.
+  type: text/markdown
+bundled: false
+extensions:
+  bruno:
+    ignore:
+      - node_modules
+      - .git

@@ -1,0 +1,231 @@
+[
+  {
+    "iterationIndex": 0,
+    "results": [
+      {
+        "test": {
+          "filename": "data/nested/secure.yml"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/data.json?page=1",
+          "headers": {
+            "X-Collection": "oc-probe",
+            "X-Folder": "nested",
+            "Accept": "application/json",
+            "Authorization": "Bearer ********",
+            "content-type": null
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.12.3",
+            "date": "Sun, 11 Oct 2026 12:43:00 GMT",
+            "content-type": "application/json",
+            "content-length": "21",
+            "last-modified": "Sun, 11 Oct 2026 12:39:08 GMT"
+          },
+          "data": {
+            "a": [
+              1,
+              2
+            ],
+            "b": null
+          },
+          "url": "http://127.0.0.1/data.json?page=1",
+          "responseTime": 10,
+          "duration": 10,
+          "size": 21
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [
+          {
+            "uid": "BMdKapsY9C047-Q8of3Mv",
+            "lhsExpr": "res.status",
+            "rhsExpr": "eq 200",
+            "rhsOperand": "200",
+            "operator": "eq",
+            "status": "pass"
+          },
+          {
+            "uid": "bZbUvd5C-642iAJQI1S1T",
+            "lhsExpr": "res.body",
+            "rhsExpr": "isJson",
+            "rhsOperand": "",
+            "operator": "isJson",
+            "status": "pass"
+          }
+        ],
+        "testResults": [
+          {
+            "description": "status 200",
+            "status": "pass",
+            "uid": "DUFRtC_bMGNo59xFcONq3"
+          }
+        ],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.397480113,
+        "name": "secure",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-opencollection-loader/tests/fixtures/collections/oc-probe/data/nested/secure",
+        "path": "data/nested/secure.yml",
+        "iterationIndex": 0
+      },
+      {
+        "test": {
+          "filename": "data/data.yml"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/data.json",
+          "headers": {
+            "X-Collection": "oc-probe",
+            "content-type": null
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.12.3",
+            "date": "Sun, 11 Oct 2026 12:43:00 GMT",
+            "content-type": "application/json",
+            "content-length": "21",
+            "last-modified": "Sun, 11 Oct 2026 12:39:08 GMT"
+          },
+          "data": {
+            "a": [
+              1,
+              2
+            ],
+            "b": null
+          },
+          "url": "http://127.0.0.1/data.json",
+          "responseTime": 2,
+          "duration": 2,
+          "size": 21
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [],
+        "testResults": [],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.003646326,
+        "name": "data",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-opencollection-loader/tests/fixtures/collections/oc-probe/data/data",
+        "path": "data/data.yml",
+        "iterationIndex": 0
+      },
+      {
+        "test": {
+          "filename": "data/create data.yml"
+        },
+        "request": {
+          "method": "POST",
+          "url": "http://127.0.0.1:18765/data.json",
+          "headers": {
+            "X-Collection": "oc-probe",
+            "content-type": "application/json"
+          },
+          "data": "{\n  \"name\": \"probe\"\n}"
+        },
+        "response": {
+          "status": 501,
+          "statusText": "Unsupported method ('POST')",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.12.3",
+            "date": "Sun, 11 Oct 2026 12:43:00 GMT",
+            "connection": "close",
+            "content-type": "text/html;charset=utf-8",
+            "content-length": "357"
+          },
+          "data": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 501</p>\n        <p>Message: Unsupported method ('POST').</p>\n        <p>Error code explanation: 501 - Server does not support this operation.</p>\n    </body>\n</html>\n",
+          "url": "http://127.0.0.1/data.json",
+          "responseTime": 1,
+          "duration": 1,
+          "size": 357
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [],
+        "testResults": [],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.00374723,
+        "name": "create data",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-opencollection-loader/tests/fixtures/collections/oc-probe/data/create data",
+        "path": "data/create data.yml",
+        "iterationIndex": 0
+      },
+      {
+        "test": {
+          "filename": "pages/index.yml"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/index.html",
+          "headers": {
+            "X-Collection": "oc-probe",
+            "X-Trace": "abc",
+            "content-type": null
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.12.3",
+            "date": "Sun, 11 Oct 2026 12:43:00 GMT",
+            "content-type": "text/html",
+            "content-length": "32",
+            "last-modified": "Sun, 11 Oct 2026 12:39:08 GMT"
+          },
+          "data": "<html><body>probe</body></html>\n",
+          "url": "http://127.0.0.1/index.html",
+          "responseTime": 1,
+          "duration": 1,
+          "size": 32
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [],
+        "testResults": [],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.00229138,
+        "name": "index",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-opencollection-loader/tests/fixtures/collections/oc-probe/pages/index",
+        "path": "pages/index.yml",
+        "iterationIndex": 0
+      }
+    ],
+    "summary": {
+      "totalRequests": 4,
+      "passedRequests": 4,
+      "failedRequests": 0,
+      "errorRequests": 0,
+      "skippedRequests": 0,
+      "skippedByBail": 0,
+      "totalAssertions": 2,
+      "passedAssertions": 2,
+      "failedAssertions": 0,
+      "totalTests": 1,
+      "passedTests": 1,
+      "failedTests": 0,
+      "totalPreRequestTests": 0,
+      "passedPreRequestTests": 0,
+      "failedPreRequestTests": 0,
+      "totalPostResponseTests": 0,
+      "passedPostResponseTests": 0,
+      "failedPostResponseTests": 0
+    }
+  }
+]

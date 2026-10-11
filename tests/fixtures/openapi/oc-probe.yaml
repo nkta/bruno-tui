@@ -1,0 +1,50 @@
+openapi: 3.0.3
+info:
+  title: oc-probe
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:18765
+paths:
+  /index.html:
+    get:
+      tags: [pages]
+      operationId: getIndex
+      summary: index
+      parameters:
+        - name: lang
+          in: query
+          schema:
+            type: string
+            example: fr
+        - name: X-Trace
+          in: header
+          schema:
+            type: string
+            example: abc
+      responses:
+        '200':
+          description: OK
+  /data.json:
+    get:
+      tags: [data]
+      operationId: getData
+      summary: data
+      responses:
+        '200':
+          description: OK
+    post:
+      tags: [data]
+      operationId: postData
+      summary: create data
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: probe
+      responses:
+        '201':
+          description: Created

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::error::LoadError;
+use super::opencollection::COLLECTION_FILE as OPENCOLLECTION_FILE;
+use super::tree::CollectionFormat;
 
 /// Nom du fichier qui marque la racine d'une collection Bruno.
 pub const CONFIG_FILE: &str = "bruno.json";
@@ -23,6 +25,31 @@ pub struct BrunoConfig {
 /// Remonte depuis `path` (fichier ou répertoire) jusqu'au premier
 /// répertoire contenant `bruno.json`.
 pub fn find_root(path: &Path) -> Result<PathBuf, LoadError> {
+    find_ancestor(path, |dir| dir.join(CONFIG_FILE).is_file())
+}
+
+/// Remonte depuis `path` jusqu'au premier répertoire contenant
+/// `opencollection.yml`.
+pub fn find_opencollection_root(path: &Path) -> Result<PathBuf, LoadError> {
+    find_ancestor(path, |dir| dir.join(OPENCOLLECTION_FILE).is_file())
+}
+
+/// Remonte depuis `path` jusqu'au premier répertoire qui marque une
+/// collection, et en détecte le format comme Bruno 4
+/// (`getCollectionFormat`) : `opencollection.yml` prime sur `bruno.json`.
+pub fn detect_format(path: &Path) -> Result<(PathBuf, CollectionFormat), LoadError> {
+    let root = find_ancestor(path, |dir| {
+        dir.join(OPENCOLLECTION_FILE).is_file() || dir.join(CONFIG_FILE).is_file()
+    })?;
+    let format = if root.join(OPENCOLLECTION_FILE).is_file() {
+        CollectionFormat::OpenCollection
+    } else {
+        CollectionFormat::Bru
+    };
+    Ok((root, format))
+}
+
+fn find_ancestor(path: &Path, is_root: impl Fn(&Path) -> bool) -> Result<PathBuf, LoadError> {
     let canonical = fs::canonicalize(path).map_err(|source| LoadError::Io {
         path: path.to_path_buf(),
         source,
@@ -34,7 +61,7 @@ pub fn find_root(path: &Path) -> Result<PathBuf, LoadError> {
     };
     start
         .ancestors()
-        .find(|dir| dir.join(CONFIG_FILE).is_file())
+        .find(|dir| is_root(dir))
         .map(Path::to_path_buf)
         .ok_or_else(|| LoadError::NotACollection {
             path: path.to_path_buf(),

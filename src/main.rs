@@ -13,7 +13,7 @@ use bruno_tui::app::event::{EVENT_BUFFER, spawn_terminal_reader};
 use bruno_tui::app::model::Exit;
 use bruno_tui::app::mouse::{MouseCapture, MouseSetup, TerminalMouseCapture};
 use bruno_tui::app::run;
-use bruno_tui::collection::BruLoader;
+use bruno_tui::collection::AutoLoader;
 use tokio::sync::mpsc;
 
 /// Code de sortie d'une erreur d'usage.
@@ -89,7 +89,7 @@ fn main() -> ExitCode {
     let result = match spawn_terminal_reader(sender.clone(), Arc::clone(&suspended)) {
         Ok(()) => runtime.block_on(run(
             &mut terminal,
-            Arc::new(BruLoader),
+            Arc::new(AutoLoader),
             path,
             sender,
             events,

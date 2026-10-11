@@ -129,7 +129,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Entrée / e",
-                effect: "ouvrir une session d'édition",
+                effect: "ouvrir une session d'édition (refusée pour une collection YAML)",
             },
             HelpEntry {
                 key: "/",
@@ -186,7 +186,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Ctrl+S",
-                effect: "enregistrer les modifications",
+                effect: "enregistrer les modifications (collection .bru uniquement)",
             },
             HelpEntry {
                 key: "Échap",
@@ -276,7 +276,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "e",
-                effect: "ouvrir le popup d'édition de ses variables",
+                effect: "ouvrir le popup d'édition de ses variables (pas en YAML)",
             },
             HelpEntry {
                 key: "Entrée (popup)",

@@ -776,6 +776,12 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::SaveEdit => {
+            if read_only_collection(model)
+                && matches!(model.focus, Focus::Detail | Focus::EnvironmentPicker)
+            {
+                model.last_status = Some(StatusMessage::ReadOnlyCollection);
+                return Command::None;
+            }
             if model.focus == Focus::EnvironmentPicker
                 || (model.environment_editing.is_some() && model.editing.is_none())
             {
@@ -1966,6 +1972,14 @@ fn clear_detail_view_state(model: &mut Model) {
     model.editing = None;
 }
 
+/// Vrai si la collection chargée est dans un format que le writer ne sait
+/// pas écrire (OpenCollection YAML) : toute édition est alors refusée.
+fn read_only_collection(model: &Model) -> bool {
+    model
+        .loaded()
+        .is_some_and(|collection| !collection.format.is_editable())
+}
+
 /// Ouvre une session d'édition sur la requête sélectionnée, dans l'état
 /// Sélection de champ.
 fn start_edit(model: &mut Model) {
@@ -1975,6 +1989,10 @@ fn start_edit(model: &mut Model) {
     let Some(TreeNode::Request(request)) = model.selected_node() else {
         return;
     };
+    if read_only_collection(model) {
+        model.last_status = Some(StatusMessage::ReadOnlyCollection);
+        return;
+    }
     let Some(root) = model.loaded().map(|c| &c.root) else {
         return;
     };
@@ -3224,6 +3242,10 @@ fn open_environment_editing(model: &mut Model, index: usize) {
     let Some(Ok(env)) = collection.environments.get(index - 1) else {
         return;
     };
+    if !collection.format.is_editable() {
+        model.last_status = Some(StatusMessage::ReadOnlyCollection);
+        return;
+    }
     let full_path = collection.root.join(&env.path);
     let Ok(stamp) = FileStamp::capture(&full_path) else {
         return;

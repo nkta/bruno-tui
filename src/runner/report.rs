@@ -68,7 +68,8 @@ pub struct Summary {
 pub struct RequestResult {
     /// Nom déclaré dans le bloc `meta`.
     pub name: String,
-    /// Chemin relatif à la racine, sans extension `.bru`.
+    /// Chemin relatif à la racine : sans extension pour un `.bru`, avec
+    /// l'extension `.yml` pour une collection OpenCollection.
     pub path: String,
     pub test: RequestFile,
     pub request: RequestInfo,
@@ -113,7 +114,7 @@ impl RequestResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RequestFile {
-    /// Fichier `.bru` relatif à la racine de la collection.
+    /// Fichier `.bru` ou `.yml` relatif à la racine de la collection.
     pub filename: String,
 }
 

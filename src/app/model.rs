@@ -352,7 +352,7 @@ pub struct RunState {
     pub active: Option<ActiveRun>,
     /// Dernier résultat connu par requête. Clé : chemin relatif à la racine
     /// de la collection, identique à `RequestNode::path` et à
-    /// `RequestResult::test.filename` (avec l'extension `.bru`) — aucune
+    /// `RequestResult::test.filename` (avec l'extension `.bru` ou `.yml`) — aucune
     /// conversion n'est nécessaire pour indexer ou pour retrouver un nœud de
     /// l'arbre à partir d'une clé.
     pub outcomes: HashMap<PathBuf, RequestOutcome>,
@@ -1128,6 +1128,9 @@ pub enum StatusMessage {
     CollectionReloaded,
     /// Le rechargement automatique a échoué ; l'ancienne collection reste affichée.
     ReloadFailed(String),
+    /// Édition ou enregistrement refusé : la collection est au format
+    /// OpenCollection (YAML), que le writer ne sait pas écrire.
+    ReadOnlyCollection,
 }
 
 /// Champ interactif dans le popup d'options de campagne.

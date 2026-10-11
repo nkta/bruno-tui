@@ -1,0 +1,6 @@
+info:
+  name: pages
+  type: folder
+
+request:
+  auth: inherit

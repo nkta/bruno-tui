@@ -1,6 +1,8 @@
 //! Parcours du disque et construction de l'arbre ordonné d'une collection.
 //!
 //! Lecture seule : seules des fonctions `std::fs` de lecture sont appelées.
+//! Le parcours est commun aux deux formats ; la lecture de chaque fichier
+//! est confiée à un [`SourceFormat`] (`.bru` ou OpenCollection YAML).
 
 use std::cmp::Ordering;
 use std::ffi::OsString;
@@ -9,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use super::ast::BruFile;
 use super::error::{LoadError, ParseError};
+use super::opencollection;
 use super::view::{Environment, FileMeta, RequestView};
 
 /// Profondeur maximale de dossiers sous la racine.
@@ -20,19 +23,51 @@ const ENVIRONMENTS_DIR: &str = "environments";
 /// Toujours ignorés, à toute profondeur.
 const ALWAYS_IGNORED: [&str; 2] = ["node_modules", ".git"];
 
+/// Format source d'une collection, détecté comme Bruno 4 :
+/// `opencollection.yml` à la racine, sinon `bruno.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CollectionFormat {
+    /// Fichiers `.bru` (bru-lang), éditables.
+    #[default]
+    Bru,
+    /// Fichiers `.yml` OpenCollection, en lecture seule : le writer ne
+    /// connaît que bru-lang.
+    OpenCollection,
+}
+
+impl CollectionFormat {
+    /// Vrai si le TUI sait écrire les fichiers de ce format.
+    pub fn is_editable(self) -> bool {
+        self == Self::Bru
+    }
+}
+
+/// Avis non bloquant émis au chargement : champ ignoré parce que le TUI ne
+/// sait pas l'afficher. Le message cite une clé, jamais une valeur.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadNotice {
+    /// Fichier concerné, relatif à la racine.
+    pub path: PathBuf,
+    pub message: String,
+}
+
 /// Collection chargée, indépendante du format source.
 #[derive(Debug)]
 pub struct Collection {
-    /// Racine absolue (répertoire contenant `bruno.json`).
+    /// Racine absolue (répertoire contenant `bruno.json` ou
+    /// `opencollection.yml`).
     pub root: PathBuf,
     pub name: String,
-    /// `collection.bru`, s'il existe.
+    pub format: CollectionFormat,
+    /// `collection.bru` ou `opencollection.yml`, s'il existe.
     pub settings: Option<Result<FileMeta, ParseError>>,
     /// Enfants de la racine, triés.
     pub tree: Vec<TreeNode>,
     /// Environnements triés par nom de fichier ; un fichier invalide donne
     /// une erreur à sa place.
     pub environments: Environments,
+    /// Avis non bloquants (champs ignorés), dans l'ordre du parcours.
+    pub notices: Vec<LoadNotice>,
 }
 
 /// Environnements d'une collection ; un fichier invalide donne une erreur
@@ -51,6 +86,7 @@ pub struct RequestNode {
     /// Chemin relatif à la racine, utilisable comme cible de `bru run`.
     pub path: PathBuf,
     pub view: RequestView,
+    /// AST source ; absent pour un format autre que `.bru`.
     pub ast: Option<BruFile>,
 }
 
@@ -58,10 +94,10 @@ pub struct RequestNode {
 pub struct FolderNode {
     /// Chemin relatif à la racine.
     pub path: PathBuf,
-    /// Nom déclaré dans `folder.bru`, sinon nom du répertoire.
+    /// Nom déclaré dans `folder.bru`/`folder.yml`, sinon nom du répertoire.
     pub name: String,
     pub seq: Option<u32>,
-    /// `folder.bru` : absent, valide ou en erreur.
+    /// `folder.bru`/`folder.yml` : absent, valide ou en erreur.
     pub meta: Option<Result<FileMeta, ParseError>>,
     pub children: Vec<TreeNode>,
 }
@@ -154,15 +190,197 @@ impl Ignore {
     }
 }
 
+/// Lecture des fichiers d'un format de collection ; le parcours du disque
+/// est commun.
+pub(crate) trait SourceFormat {
+    /// Extension des requêtes et des environnements, sans point.
+    fn extension(&self) -> &'static str;
+    fn collection_file(&self) -> &'static str;
+    fn folder_file(&self) -> &'static str;
+    /// Requête ; `absolute` est le fichier, `relative` son chemin dans la
+    /// collection.
+    fn request(
+        &self,
+        absolute: &Path,
+        relative: PathBuf,
+        notices: &mut Vec<LoadNotice>,
+    ) -> TreeNode;
+    /// Métadonnées d'un dossier (`folder.*`) ou de la collection.
+    fn meta(
+        &self,
+        absolute: &Path,
+        relative: &Path,
+        notices: &mut Vec<LoadNotice>,
+    ) -> Result<FileMeta, ParseError>;
+    fn environment(
+        &self,
+        absolute: &Path,
+        name: String,
+        relative: PathBuf,
+        notices: &mut Vec<LoadNotice>,
+    ) -> Result<Environment, ErrorNode>;
+}
+
+/// Format `.bru`.
+pub(crate) struct BruFormat;
+
+impl SourceFormat for BruFormat {
+    fn extension(&self) -> &'static str {
+        "bru"
+    }
+
+    fn collection_file(&self) -> &'static str {
+        COLLECTION_FILE
+    }
+
+    fn folder_file(&self) -> &'static str {
+        FOLDER_FILE
+    }
+
+    fn request(&self, absolute: &Path, relative: PathBuf, _: &mut Vec<LoadNotice>) -> TreeNode {
+        let parsed =
+            read_bru(absolute).and_then(|ast| RequestView::from_ast(&ast).map(|view| (view, ast)));
+        match parsed {
+            Ok((view, ast)) => TreeNode::Request(RequestNode {
+                path: relative,
+                view,
+                ast: Some(ast),
+            }),
+            Err(error) => TreeNode::Error(ErrorNode {
+                path: relative,
+                error,
+            }),
+        }
+    }
+
+    fn meta(
+        &self,
+        absolute: &Path,
+        _: &Path,
+        _: &mut Vec<LoadNotice>,
+    ) -> Result<FileMeta, ParseError> {
+        read_bru(absolute).map(FileMeta::from_ast)
+    }
+
+    fn environment(
+        &self,
+        absolute: &Path,
+        name: String,
+        relative: PathBuf,
+        _: &mut Vec<LoadNotice>,
+    ) -> Result<Environment, ErrorNode> {
+        match read_env_bru(absolute) {
+            Ok(ast) => Ok(Environment::from_ast(name, relative, ast)),
+            Err(error) => Err(ErrorNode {
+                path: relative,
+                error,
+            }),
+        }
+    }
+}
+
+/// Format OpenCollection (YAML).
+pub(crate) struct YmlFormat;
+
+/// Rattache les avis d'un fichier à son chemin relatif.
+fn attach(notices: &mut Vec<LoadNotice>, relative: &Path, messages: Vec<String>) {
+    notices.extend(messages.into_iter().map(|message| LoadNotice {
+        path: relative.to_path_buf(),
+        message,
+    }));
+}
+
+impl SourceFormat for YmlFormat {
+    fn extension(&self) -> &'static str {
+        opencollection::EXTENSION
+    }
+
+    fn collection_file(&self) -> &'static str {
+        opencollection::COLLECTION_FILE
+    }
+
+    fn folder_file(&self) -> &'static str {
+        opencollection::FOLDER_FILE
+    }
+
+    fn request(
+        &self,
+        absolute: &Path,
+        relative: PathBuf,
+        notices: &mut Vec<LoadNotice>,
+    ) -> TreeNode {
+        match read_text(absolute).and_then(|source| opencollection::parse_item(&source)) {
+            Ok(parsed) => {
+                attach(notices, &relative, parsed.notices);
+                TreeNode::Request(RequestNode {
+                    path: relative,
+                    view: parsed.value,
+                    ast: None,
+                })
+            }
+            Err(error) => TreeNode::Error(ErrorNode {
+                path: relative,
+                error,
+            }),
+        }
+    }
+
+    fn meta(
+        &self,
+        absolute: &Path,
+        relative: &Path,
+        notices: &mut Vec<LoadNotice>,
+    ) -> Result<FileMeta, ParseError> {
+        let parsed = opencollection::parse_folder(&read_text(absolute)?)?;
+        attach(notices, relative, parsed.notices);
+        Ok(parsed.value)
+    }
+
+    fn environment(
+        &self,
+        absolute: &Path,
+        name: String,
+        relative: PathBuf,
+        notices: &mut Vec<LoadNotice>,
+    ) -> Result<Environment, ErrorNode> {
+        let parsed = read_text(absolute)
+            .and_then(|source| opencollection::parse_environment(name, relative.clone(), &source));
+        match parsed {
+            Ok(parsed) => {
+                attach(notices, &relative, parsed.notices);
+                Ok(parsed.value)
+            }
+            Err(error) => Err(ErrorNode {
+                path: relative,
+                error,
+            }),
+        }
+    }
+}
+
+/// Arbre, environnements et avis produits par un parcours.
+pub(crate) struct Walk {
+    pub tree: Vec<TreeNode>,
+    pub environments: Environments,
+    pub notices: Vec<LoadNotice>,
+}
+
 /// Parcourt la racine et construit l'arbre et les environnements.
 pub(crate) fn load_tree(
     root: &Path,
     ignore: &Ignore,
-) -> Result<(Vec<TreeNode>, Environments), LoadError> {
+    format: &dyn SourceFormat,
+) -> Result<Walk, LoadError> {
     let entries = sorted_entries(root).map_err(|source| LoadError::Io {
         path: root.to_path_buf(),
         source,
     })?;
+    let mut walker = Walker {
+        root,
+        ignore,
+        format,
+        notices: Vec::new(),
+    };
     let mut children = Vec::new();
     let mut environments = Vec::new();
     for (name, kind) in entries {
@@ -172,123 +390,144 @@ pub(crate) fn load_tree(
         }
         match kind {
             EntryKind::Dir if name == ENVIRONMENTS_DIR => {
-                environments = load_environments(root, &relative);
+                environments = walker.environments(&relative);
             }
-            EntryKind::Dir => children.push(load_folder(root, relative, ignore, 1)),
-            EntryKind::File if name == COLLECTION_FILE || name == FOLDER_FILE => {}
-            EntryKind::File if is_bru(&relative) => children.push(load_request(root, relative)),
+            EntryKind::Dir => children.push(walker.folder(relative, 1)),
+            EntryKind::File if walker.is_meta_file(&name) => {}
+            EntryKind::File if walker.is_source(&relative) => {
+                children.push(walker.request(relative));
+            }
             EntryKind::File => {}
         }
     }
     children.sort_by(compare);
-    Ok((children, environments))
-}
-
-/// Charge `collection.bru` à la racine, s'il existe.
-pub(crate) fn load_settings(root: &Path) -> Option<Result<FileMeta, ParseError>> {
-    let path = root.join(COLLECTION_FILE);
-    path.is_file()
-        .then(|| read_bru(&path).map(FileMeta::from_ast))
-}
-
-fn load_folder(root: &Path, relative: PathBuf, ignore: &Ignore, depth: usize) -> TreeNode {
-    if depth > MAX_DEPTH {
-        return TreeNode::Error(ErrorNode {
-            path: relative,
-            error: ParseError::TooDeep { max: MAX_DEPTH },
-        });
-    }
-    let absolute = root.join(&relative);
-    let entries = match sorted_entries(&absolute) {
-        Ok(entries) => entries,
-        Err(source) => {
-            return TreeNode::Error(ErrorNode {
-                path: relative,
-                error: ParseError::Io(source),
-            });
-        }
-    };
-
-    let mut meta = None;
-    let mut children = Vec::new();
-    for (name, kind) in entries {
-        let child = relative.join(&name);
-        if ignore.matches(&child) {
-            continue;
-        }
-        match kind {
-            EntryKind::Dir => children.push(load_folder(root, child, ignore, depth + 1)),
-            EntryKind::File if name == FOLDER_FILE => {
-                meta = Some(read_bru(&root.join(&child)).map(FileMeta::from_ast));
-            }
-            EntryKind::File if name == COLLECTION_FILE => {}
-            EntryKind::File if is_bru(&child) => children.push(load_request(root, child)),
-            EntryKind::File => {}
-        }
-    }
-    children.sort_by(compare);
-
-    let declared = match &meta {
-        Some(Ok(meta)) => (meta.name.clone(), meta.seq),
-        _ => (None, None),
-    };
-    let name = declared.0.unwrap_or_else(|| {
-        relative
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
-    TreeNode::Folder(FolderNode {
-        path: relative,
-        name,
-        seq: declared.1,
-        meta,
-        children,
+    Ok(Walk {
+        tree: children,
+        environments,
+        notices: walker.notices,
     })
 }
 
-fn load_request(root: &Path, relative: PathBuf) -> TreeNode {
-    let parsed = read_bru(&root.join(&relative))
-        .and_then(|ast| RequestView::from_ast(&ast).map(|view| (view, ast)));
-    match parsed {
-        Ok((view, ast)) => TreeNode::Request(RequestNode {
-            path: relative,
-            view,
-            ast: Some(ast),
-        }),
-        Err(error) => TreeNode::Error(ErrorNode {
-            path: relative,
-            error,
-        }),
-    }
+/// Charge le fichier de collection (`collection.bru`, `opencollection.yml`)
+/// à la racine, s'il existe.
+pub(crate) fn load_settings(
+    root: &Path,
+    format: &dyn SourceFormat,
+    notices: &mut Vec<LoadNotice>,
+) -> Option<Result<FileMeta, ParseError>> {
+    let relative = Path::new(format.collection_file());
+    let path = root.join(relative);
+    path.is_file()
+        .then(|| format.meta(&path, relative, notices))
 }
 
-fn load_environments(root: &Path, relative: &Path) -> Environments {
-    let entries = match sorted_entries(&root.join(relative)) {
-        Ok(entries) => entries,
-        Err(source) => {
-            return vec![Err(ErrorNode {
-                path: relative.to_path_buf(),
-                error: ParseError::Io(source),
-            })];
+struct Walker<'a> {
+    root: &'a Path,
+    ignore: &'a Ignore,
+    format: &'a dyn SourceFormat,
+    notices: Vec<LoadNotice>,
+}
+
+impl Walker<'_> {
+    fn is_meta_file(&self, name: &OsString) -> bool {
+        name == self.format.collection_file() || name == self.format.folder_file()
+    }
+
+    fn is_source(&self, path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|ext| ext == self.format.extension())
+    }
+
+    fn request(&mut self, relative: PathBuf) -> TreeNode {
+        let absolute = self.root.join(&relative);
+        self.format.request(&absolute, relative, &mut self.notices)
+    }
+
+    fn folder(&mut self, relative: PathBuf, depth: usize) -> TreeNode {
+        if depth > MAX_DEPTH {
+            return TreeNode::Error(ErrorNode {
+                path: relative,
+                error: ParseError::TooDeep { max: MAX_DEPTH },
+            });
         }
-    };
-    entries
-        .into_iter()
-        .filter(|(_, kind)| *kind == EntryKind::File)
-        .map(|(name, _)| relative.join(name))
-        .filter(|path| is_bru(path))
-        .map(|path| {
+        let absolute = self.root.join(&relative);
+        let entries = match sorted_entries(&absolute) {
+            Ok(entries) => entries,
+            Err(source) => {
+                return TreeNode::Error(ErrorNode {
+                    path: relative,
+                    error: ParseError::Io(source),
+                });
+            }
+        };
+
+        let mut meta = None;
+        let mut children = Vec::new();
+        for (name, kind) in entries {
+            let child = relative.join(&name);
+            if self.ignore.matches(&child) {
+                continue;
+            }
+            match kind {
+                EntryKind::Dir => children.push(self.folder(child, depth + 1)),
+                EntryKind::File if name == self.format.folder_file() => {
+                    let absolute = self.root.join(&child);
+                    meta = Some(self.format.meta(&absolute, &child, &mut self.notices));
+                }
+                EntryKind::File if name == self.format.collection_file() => {}
+                EntryKind::File if self.is_source(&child) => children.push(self.request(child)),
+                EntryKind::File => {}
+            }
+        }
+        children.sort_by(compare);
+
+        let declared = match &meta {
+            Some(Ok(meta)) => (meta.name.clone(), meta.seq),
+            _ => (None, None),
+        };
+        let name = declared.0.unwrap_or_else(|| {
+            relative
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        TreeNode::Folder(FolderNode {
+            path: relative,
+            name,
+            seq: declared.1,
+            meta,
+            children,
+        })
+    }
+
+    fn environments(&mut self, relative: &Path) -> Environments {
+        let entries = match sorted_entries(&self.root.join(relative)) {
+            Ok(entries) => entries,
+            Err(source) => {
+                return vec![Err(ErrorNode {
+                    path: relative.to_path_buf(),
+                    error: ParseError::Io(source),
+                })];
+            }
+        };
+        let mut environments = Vec::new();
+        for (name, kind) in entries {
+            let path = relative.join(name);
+            if kind != EntryKind::File || !self.is_source(&path) {
+                continue;
+            }
             let name = path
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            match read_env_bru(&root.join(&path)) {
-                Ok(ast) => Ok(Environment::from_ast(name, path, ast)),
-                Err(error) => Err(ErrorNode { path, error }),
-            }
-        })
-        .collect()
+            let absolute = self.root.join(&path);
+            environments.push(
+                self.format
+                    .environment(&absolute, name, path, &mut self.notices),
+            );
+        }
+        environments
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,20 +561,17 @@ fn sorted_entries(dir: &Path) -> std::io::Result<Vec<(OsString, EntryKind)>> {
     Ok(entries)
 }
 
-fn is_bru(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext == "bru")
+fn read_text(path: &Path) -> Result<String, ParseError> {
+    let bytes = fs::read(path).map_err(ParseError::Io)?;
+    String::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)
 }
 
 fn read_bru(path: &Path) -> Result<BruFile, ParseError> {
-    let bytes = fs::read(path).map_err(ParseError::Io)?;
-    let source = String::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)?;
-    BruFile::parse(source)
+    BruFile::parse(read_text(path)?)
 }
 
 fn read_env_bru(path: &Path) -> Result<BruFile, ParseError> {
-    let bytes = fs::read(path).map_err(ParseError::Io)?;
-    let source = String::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)?;
-    BruFile::parse_environment(source)
+    BruFile::parse_environment(read_text(path)?)
 }
 
 #[cfg(test)]

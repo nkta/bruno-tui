@@ -55,7 +55,11 @@ pub fn render_diagnostics(model: &Model, frame: &mut Frame, area: Rect) {
                     Style::new().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
-                Span::styled(entry.reason.clone(), theme::LOAD_ERROR),
+                if entry.notice {
+                    Span::styled(format!("avis : {}", entry.reason), theme::LABEL)
+                } else {
+                    Span::styled(entry.reason.clone(), theme::LOAD_ERROR)
+                },
             ]);
             ListItem::new(line)
         })

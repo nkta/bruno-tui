@@ -641,6 +641,12 @@ fn title_line(model: &Model) -> Line<'static> {
                 Span::raw(" · "),
                 Span::raw(collection.name.clone()),
             ];
+            if !collection.format.is_editable() {
+                spans.push(Span::styled(
+                    "  OpenCollection YAML · lecture seule",
+                    theme::LABEL,
+                ));
+            }
             let error_count = crate::app::diagnostics::diagnostics(collection).len();
             if error_count > 0 {
                 spans.push(Span::raw("  "));
@@ -759,6 +765,10 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::CollectionReloaded => "Collection rechargée".to_owned(),
         StatusMessage::ReloadFailed(reason) => {
             format!("Échec du rechargement automatique : {reason}")
+        }
+        StatusMessage::ReadOnlyCollection => {
+            "Collection OpenCollection (YAML) en lecture seule : édition et enregistrement désactivés"
+                .to_owned()
         }
     }
 }
@@ -1253,6 +1263,8 @@ mod tests {
                 root: "/vide".into(),
                 name: "vide".into(),
                 settings: None,
+                format: Default::default(),
+                notices: Vec::new(),
                 tree: Vec::new(),
                 environments: Vec::new(),
             })),
@@ -1775,6 +1787,8 @@ mod tests {
                 root: "/clean".into(),
                 name: "clean".into(),
                 settings: None,
+                format: Default::default(),
+                notices: Vec::new(),
                 tree: Vec::new(),
                 environments: Vec::new(),
             })),
@@ -1929,6 +1943,8 @@ mod tests {
                 root: "/clean".into(),
                 name: "clean".into(),
                 settings: None,
+                format: Default::default(),
+                notices: Vec::new(),
                 tree: Vec::new(),
                 environments: Vec::new(),
             })),
@@ -1973,6 +1989,8 @@ mod tests {
                 root: "/clean".into(),
                 name: "clean".into(),
                 settings: None,
+                format: Default::default(),
+                notices: Vec::new(),
                 tree: Vec::new(),
                 environments: Vec::new(),
             })),
