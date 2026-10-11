@@ -13,6 +13,7 @@ pub mod theme;
 pub mod tree;
 
 pub use help::{help_max_scroll, help_popup_area};
+pub use panels::runner_options_popup_area;
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -363,6 +364,13 @@ pub fn view(model: &Model, frame: &mut Frame) {
         frame.render_widget(Clear, popup_area);
         frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
         help::render_help_popup(help, frame, popup_area);
+    }
+
+    if let Some(popup) = &model.runner_options_popup {
+        let popup_area = panels::runner_options_popup_area(frame.area());
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
+        panels::render_runner_options_popup(popup, frame, popup_area);
     }
 
     frame.render_widget(
@@ -728,6 +736,9 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::EditorError(reason) => format!("Échec de l'éditeur : {reason}"),
         StatusMessage::CampaignFinished(text) => text.clone(),
         StatusMessage::NoFailedRequests => "Aucune requête en échec".to_owned(),
+        StatusMessage::RunnerOptionsSaved => {
+            "Options de campagne enregistrées pour la session".to_owned()
+        }
     }
 }
 
@@ -824,6 +835,14 @@ fn status_line(model: &Model) -> String {
     if model.help.is_some() {
         return "↑↓ défiler  Début/Fin  ? / Échap / q fermer".to_owned();
     }
+    if let Some(popup) = &model.runner_options_popup {
+        if popup.editing_text {
+            return "Saisie d'option — Entrée/Tab valider  Échap annuler".to_owned();
+        } else {
+            return "↑↓ naviguer  Espace basculer  Entrée modifier / valider  Échap fermer"
+                .to_owned();
+        }
+    }
     if let Some(line) = tree_filter_input_line(model) {
         return line;
     }
@@ -873,7 +892,7 @@ fn status_line(model: &Model) -> String {
             "↑↓ naviguer  Entrée activer  e éditer  Échap arbre".to_owned()
         }
         (CollectionState::Loaded(_), Focus::Campaign) => {
-            "↑↓ naviguer  Entrée/→ aller au détail  Échap arbre".to_owned()
+            "↑↓ naviguer  Entrée/→ aller au détail  Échap arbre  r relancer  O options".to_owned()
         }
         (CollectionState::Loaded(_), Focus::Secrets) => secrets_hint(model).to_owned(),
         _ => "q quitter".to_owned(),

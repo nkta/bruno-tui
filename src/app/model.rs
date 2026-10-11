@@ -13,7 +13,9 @@ use std::time::SystemTime;
 use crate::collection::{
     BodyContent, BodyKind, Collection, KeyValue, LoadError, RequestView, TreeNode,
 };
-use crate::runner::{self, SecretString};
+use crate::runner::{
+    self, RunnerOptionsConfig, RunnerOptionsError, SecretString, default_reports_dir,
+};
 use crate::secrets::{Resolved, SecretLookup, SecretMapping, SecretSource, is_valid_name};
 use crate::writer::{EntrySection, EnvironmentVarEdit, FieldEdit, FileStamp};
 
@@ -889,6 +891,14 @@ pub struct Model {
     pub campaign_selected: usize,
     /// Mode plein écran actif sur le panneau focalisé (`feat/panel-zoom`).
     pub zoom: bool,
+    /// Options de campagne mémorisées pour la session (`feat-runner-options`).
+    pub runner_options: RunnerOptionsConfig,
+    /// Popup de configuration des options de campagne.
+    pub runner_options_popup: Option<RunnerOptionsPopup>,
+    /// Répertoire par défaut de destination des rapports JUnit et HTML.
+    pub reports_dir: PathBuf,
+    /// Chemins des rapports exportés lors de la dernière exécution récursive.
+    pub last_reports: Vec<PathBuf>,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -950,7 +960,7 @@ pub struct SecretRow {
 }
 
 /// Message affiché temporairement dans la barre d'état.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusMessage {
     Copied,
     ClipboardError(String),
@@ -976,6 +986,154 @@ pub enum StatusMessage {
     CampaignFinished(String),
     /// Aucune requête en échec dans la collection.
     NoFailedRequests,
+    /// Options de campagne enregistrées pour la session.
+    RunnerOptionsSaved,
+}
+
+/// Champ interactif dans le popup d'options de campagne.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerOptionsField {
+    Tags,
+    ExcludeTags,
+    Delay,
+    Bail,
+    TestsOnly,
+    ReporterJunit,
+    ReporterHtml,
+    SkipHeaders,
+    SaveButton,
+    RunButton,
+}
+
+impl RunnerOptionsField {
+    pub const COUNT: usize = 10;
+
+    pub fn from_index(index: usize) -> Self {
+        match index {
+            0 => Self::Tags,
+            1 => Self::ExcludeTags,
+            2 => Self::Delay,
+            3 => Self::Bail,
+            4 => Self::TestsOnly,
+            5 => Self::ReporterJunit,
+            6 => Self::ReporterHtml,
+            7 => Self::SkipHeaders,
+            8 => Self::SaveButton,
+            _ => Self::RunButton,
+        }
+    }
+
+    pub fn is_text(&self) -> bool {
+        matches!(self, Self::Tags | Self::ExcludeTags | Self::Delay)
+    }
+
+    pub fn is_toggle(&self) -> bool {
+        matches!(
+            self,
+            Self::Bail
+                | Self::TestsOnly
+                | Self::ReporterJunit
+                | Self::ReporterHtml
+                | Self::SkipHeaders
+        )
+    }
+}
+
+/// État du popup d'options de campagne (TNR).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerOptionsPopup {
+    pub tags_input: TextInput,
+    pub exclude_tags_input: TextInput,
+    pub delay_input: TextInput,
+    pub bail: bool,
+    pub tests_only: bool,
+    pub reporter_junit: bool,
+    pub reporter_html: bool,
+    pub skip_headers: bool,
+    pub cursor: usize,
+    pub editing_text: bool,
+    pub error: Option<String>,
+}
+
+impl RunnerOptionsPopup {
+    /// Construit le popup à partir de la configuration actuelle.
+    pub fn from_config(config: &RunnerOptionsConfig) -> Self {
+        Self {
+            tags_input: TextInput::new(&config.tags.join(", "), false),
+            exclude_tags_input: TextInput::new(&config.exclude_tags.join(", "), false),
+            delay_input: TextInput::new(
+                &config.delay_ms.map(|d| d.to_string()).unwrap_or_default(),
+                false,
+            ),
+            bail: config.bail,
+            tests_only: config.tests_only,
+            reporter_junit: config.export_junit,
+            reporter_html: config.export_html,
+            skip_headers: config.skip_headers,
+            cursor: 0,
+            editing_text: false,
+            error: None,
+        }
+    }
+
+    /// Valide et convertit la saisie du popup en [`RunnerOptionsConfig`].
+    pub fn to_config(&self) -> Result<RunnerOptionsConfig, RunnerOptionsError> {
+        let tags = crate::runner::parse_tags(self.tags_input.text())?;
+        let exclude_tags = crate::runner::parse_tags(self.exclude_tags_input.text())?;
+        let delay_ms = crate::runner::parse_delay(self.delay_input.text())?;
+        Ok(RunnerOptionsConfig {
+            tags,
+            exclude_tags,
+            delay_ms,
+            bail: self.bail,
+            tests_only: self.tests_only,
+            export_junit: self.reporter_junit,
+            export_html: self.reporter_html,
+            skip_headers: self.skip_headers,
+        })
+    }
+
+    pub fn current_field(&self) -> RunnerOptionsField {
+        RunnerOptionsField::from_index(self.cursor)
+    }
+
+    /// Bascule la valeur du champ booléen courant s'il s'agit d'un toggle.
+    pub fn toggle_current(&mut self) {
+        match self.current_field() {
+            RunnerOptionsField::Bail => self.bail = !self.bail,
+            RunnerOptionsField::TestsOnly => self.tests_only = !self.tests_only,
+            RunnerOptionsField::ReporterJunit => self.reporter_junit = !self.reporter_junit,
+            RunnerOptionsField::ReporterHtml => self.reporter_html = !self.reporter_html,
+            RunnerOptionsField::SkipHeaders => self.skip_headers = !self.skip_headers,
+            _ => {}
+        }
+    }
+
+    /// Référence mutable vers le tampon de saisie du champ actif si textuel.
+    pub fn active_text_input_mut(&mut self) -> Option<&mut TextInput> {
+        match self.current_field() {
+            RunnerOptionsField::Tags => Some(&mut self.tags_input),
+            RunnerOptionsField::ExcludeTags => Some(&mut self.exclude_tags_input),
+            RunnerOptionsField::Delay => Some(&mut self.delay_input),
+            _ => None,
+        }
+    }
+
+    pub fn prev_field(&mut self) {
+        self.cursor = if self.cursor == 0 {
+            RunnerOptionsField::COUNT - 1
+        } else {
+            self.cursor - 1
+        };
+        self.editing_text = false;
+        self.error = None;
+    }
+
+    pub fn next_field(&mut self) {
+        self.cursor = (self.cursor + 1) % RunnerOptionsField::COUNT;
+        self.editing_text = false;
+        self.error = None;
+    }
 }
 
 impl Model {
@@ -1017,6 +1175,10 @@ impl Model {
             campaign: None,
             campaign_selected: 0,
             zoom: false,
+            runner_options: RunnerOptionsConfig::default(),
+            runner_options_popup: None,
+            reports_dir: default_reports_dir(),
+            last_reports: Vec::new(),
         }
     }
 
@@ -1082,6 +1244,10 @@ impl Model {
                         | EnvironmentEditState::AddingValue { .. }
                 )
             })
+            || self
+                .runner_options_popup
+                .as_ref()
+                .is_some_and(|p| p.editing_text)
         {
             return Some(TextCapture::Input);
         }

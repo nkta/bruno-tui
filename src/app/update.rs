@@ -11,10 +11,11 @@ use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
     CampaignFailure, CampaignSummary, CollectionState, DetailSelection, Drag, DragPanel,
     EditSession, EditState, EditableField, EnvironmentEditSession, EnvironmentEditState, Exit,
-    Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, RequestTab, ResponseTab, SecretError,
-    SecretInput, StatusMessage, all_rows, environment_name_at, field_enabled, field_value,
-    field_value_committed, secret_env_vars, secret_lookups, secret_rows, section_entries,
-    selected_response_body, tree_node_at, visible_rows,
+    Focus, HistoryEntry, HistoryOutcome, InputTarget, Model, RequestTab, ResponseTab,
+    RunnerOptionsField, RunnerOptionsPopup, SecretError, SecretInput, StatusMessage, all_rows,
+    environment_name_at, field_enabled, field_value, field_value_committed, secret_env_vars,
+    secret_lookups, secret_rows, section_entries, selected_response_body, tree_node_at,
+    visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::text_input::TextInput;
@@ -217,6 +218,10 @@ fn apply(model: &mut Model, message: Message) -> Command {
             }
             _ => Command::None,
         };
+    }
+
+    if model.runner_options_popup.is_some() && !is_background_result(&message) {
+        return apply_runner_options_popup(model, message);
     }
 
     match message {
@@ -460,6 +465,15 @@ fn apply(model: &mut Model, message: Message) -> Command {
         }
         Message::ToggleEnvironmentPicker => {
             toggle_environment_picker(model);
+            Command::None
+        }
+        Message::ToggleRunnerOptions => {
+            if model.loaded().is_some() {
+                model.runner_options_popup = match model.runner_options_popup.take() {
+                    Some(_) => None,
+                    None => Some(RunnerOptionsPopup::from_config(&model.runner_options)),
+                };
+            }
             Command::None
         }
         Message::RunSelected if model.focus == Focus::Secrets => launch_pending_run(model),
@@ -765,7 +779,19 @@ fn run_selected(model: &mut Model) -> Command {
             Some(TreeNode::Folder(folder)) => Some((folder.path.clone(), true)),
             Some(TreeNode::Error(_)) | None => None,
         },
-        Focus::Diagnostics | Focus::EnvironmentPicker | Focus::Secrets | Focus::Campaign => None,
+        Focus::Campaign => {
+            let target = model
+                .campaign
+                .as_ref()
+                .map(|camp| camp.target.clone())
+                .or_else(|| match model.selected_node() {
+                    Some(TreeNode::Folder(folder)) => Some(folder.path.clone()),
+                    _ => Some(std::path::PathBuf::new()),
+                })
+                .unwrap_or_default();
+            Some((target, true))
+        }
+        Focus::Diagnostics | Focus::EnvironmentPicker | Focus::Secrets => None,
     };
     let Some((target, recursive)) = target else {
         return Command::None;
@@ -785,20 +811,295 @@ fn run_selected(model: &mut Model) -> Command {
     start_run(model, target, recursive)
 }
 
-/// Construit l'exécution sur la cible, avec l'environnement et les
-/// variables secrètes en vigueur à cet instant.
+/// Déclenche une campagne récursive depuis le popup d'options.
+fn run_campaign_from_popup(model: &mut Model) -> Command {
+    if model.run.active.is_some() || model.loaded().is_none() {
+        return Command::None;
+    }
+    let target = match model.focus {
+        Focus::Campaign => model.campaign.as_ref().map(|camp| camp.target.clone()),
+        _ => match model.selected_node() {
+            Some(TreeNode::Folder(folder)) => Some(folder.path.clone()),
+            Some(TreeNode::Request(request)) => request
+                .path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .or_else(|| Some(std::path::PathBuf::new())),
+            _ => Some(std::path::PathBuf::new()),
+        },
+    }
+    .unwrap_or_default();
+
+    if should_propose_secrets(model) {
+        let missing = first_missing_declared_secret(model);
+        model.secrets.pending_run = Some((target, true));
+        model.secrets.selected = missing;
+        model.secrets.input = None;
+        model.secrets.error = None;
+        model.focus = Focus::Secrets;
+        return Command::None;
+    }
+    start_run(model, target, true)
+}
+
+/// Traite les messages lorsque le popup d'options de campagne est ouvert.
+fn apply_runner_options_popup(model: &mut Model, message: Message) -> Command {
+    match message {
+        Message::ForceQuit => {
+            model.runner_options_popup = None;
+            if model.editing.as_ref().is_some_and(EditSession::has_unsaved) {
+                model.confirm = Some(super::model::PendingConfirm::QuitWithUnsavedEdit);
+            } else {
+                model.exit = Some(Exit::Normal);
+            }
+            Command::None
+        }
+        Message::TerminalClosed(error) => {
+            model.exit = Some(Exit::TerminalError(error));
+            Command::None
+        }
+        Message::Resize { width, height } => {
+            model.size = (width, height);
+            scroll_tree_into_view(model);
+            model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
+            Command::None
+        }
+        Message::ToggleRunnerOptions | Message::Quit => {
+            if let Some(popup) = &mut model.runner_options_popup
+                && let Ok(config) = popup.to_config()
+            {
+                model.runner_options = config;
+            }
+            model.runner_options_popup = None;
+            Command::None
+        }
+        Message::FocusTree | Message::CancelInput => {
+            if let Some(popup) = &mut model.runner_options_popup {
+                if popup.editing_text {
+                    popup.editing_text = false;
+                    popup.error = None;
+                } else {
+                    if let Ok(config) = popup.to_config() {
+                        model.runner_options = config;
+                    }
+                    model.runner_options_popup = None;
+                }
+            }
+            Command::None
+        }
+        Message::ValidateInput | Message::NextFocus => {
+            if let Some(popup) = &mut model.runner_options_popup {
+                if let Err(err) = popup.to_config() {
+                    popup.error = Some(err.to_string());
+                } else {
+                    popup.error = None;
+                    popup.editing_text = false;
+                    popup.next_field();
+                }
+            }
+            Command::None
+        }
+        Message::InputKey(key) => {
+            if let Some(popup) = &mut model.runner_options_popup
+                && popup.editing_text
+            {
+                match key {
+                    InputKey::Char(c) => {
+                        if let Some(input) = popup.active_text_input_mut() {
+                            input.insert(c);
+                        }
+                    }
+                    InputKey::Backspace => {
+                        if let Some(input) = popup.active_text_input_mut() {
+                            input.backspace();
+                        }
+                    }
+                    InputKey::Delete => {
+                        if let Some(input) = popup.active_text_input_mut() {
+                            input.delete();
+                        }
+                    }
+                    InputKey::Left => {
+                        if let Some(input) = popup.active_text_input_mut() {
+                            input.left();
+                        }
+                    }
+                    InputKey::Right => {
+                        if let Some(input) = popup.active_text_input_mut() {
+                            input.right();
+                        }
+                    }
+                    InputKey::Home => {
+                        if let Some(input) = popup.active_text_input_mut() {
+                            input.home();
+                        }
+                    }
+                    InputKey::End => {
+                        if let Some(input) = popup.active_text_input_mut() {
+                            input.end();
+                        }
+                    }
+                    InputKey::Up => {
+                        popup.editing_text = false;
+                        popup.prev_field();
+                    }
+                    InputKey::Down => {
+                        popup.editing_text = false;
+                        popup.next_field();
+                    }
+                    InputKey::Enter => {
+                        if let Err(err) = popup.to_config() {
+                            popup.error = Some(err.to_string());
+                        } else {
+                            popup.error = None;
+                            popup.editing_text = false;
+                        }
+                    }
+                }
+            }
+            Command::None
+        }
+        Message::Up => {
+            if let Some(popup) = &mut model.runner_options_popup {
+                popup.prev_field();
+            }
+            Command::None
+        }
+        Message::Down => {
+            if let Some(popup) = &mut model.runner_options_popup {
+                popup.next_field();
+            }
+            Command::None
+        }
+        Message::ToggleField => {
+            if let Some(popup) = &mut model.runner_options_popup
+                && popup.current_field().is_toggle()
+            {
+                popup.toggle_current();
+            }
+            Command::None
+        }
+        Message::Enter => {
+            let Some(popup) = &mut model.runner_options_popup else {
+                return Command::None;
+            };
+            match popup.current_field() {
+                RunnerOptionsField::Tags
+                | RunnerOptionsField::ExcludeTags
+                | RunnerOptionsField::Delay => {
+                    if popup.editing_text {
+                        if let Err(err) = popup.to_config() {
+                            popup.error = Some(err.to_string());
+                        } else {
+                            popup.error = None;
+                            popup.editing_text = false;
+                        }
+                    } else {
+                        popup.editing_text = true;
+                    }
+                    Command::None
+                }
+                RunnerOptionsField::Bail
+                | RunnerOptionsField::TestsOnly
+                | RunnerOptionsField::ReporterJunit
+                | RunnerOptionsField::ReporterHtml
+                | RunnerOptionsField::SkipHeaders => {
+                    popup.toggle_current();
+                    Command::None
+                }
+                RunnerOptionsField::SaveButton => match popup.to_config() {
+                    Ok(config) => {
+                        model.runner_options = config;
+                        model.runner_options_popup = None;
+                        model.last_status = Some(StatusMessage::RunnerOptionsSaved);
+                        Command::None
+                    }
+                    Err(err) => {
+                        popup.error = Some(err.to_string());
+                        Command::None
+                    }
+                },
+                RunnerOptionsField::RunButton => match popup.to_config() {
+                    Ok(config) => {
+                        model.runner_options = config;
+                        model.runner_options_popup = None;
+                        run_campaign_from_popup(model)
+                    }
+                    Err(err) => {
+                        popup.error = Some(err.to_string());
+                        Command::None
+                    }
+                },
+            }
+        }
+        Message::RunSelected => {
+            let Some(popup) = &mut model.runner_options_popup else {
+                return Command::None;
+            };
+            match popup.to_config() {
+                Ok(config) => {
+                    model.runner_options = config;
+                    model.runner_options_popup = None;
+                    run_campaign_from_popup(model)
+                }
+                Err(err) => {
+                    popup.error = Some(err.to_string());
+                    Command::None
+                }
+            }
+        }
+        Message::Mouse(input) => {
+            if input.kind == MouseKind::Press {
+                let popup_area = super::view::runner_options_popup_area(Rect::new(
+                    0,
+                    0,
+                    model.size.0,
+                    model.size.1,
+                ));
+                let position = Position::new(input.column, input.row);
+                if !popup_area.contains(position) {
+                    if let Some(popup) = &mut model.runner_options_popup
+                        && let Ok(config) = popup.to_config()
+                    {
+                        model.runner_options = config;
+                    }
+                    model.runner_options_popup = None;
+                }
+            }
+            Command::None
+        }
+        _ => Command::None,
+    }
+}
+
+/// Construit l'exécution sur la cible, avec l'environnement, les options de campagne
+/// et les variables secrètes en vigueur à cet instant.
 fn start_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> Command {
     let Some(root) = model.loaded().map(|collection| collection.root.clone()) else {
         return Command::None;
     };
     model.run.last_failure = None;
+    let (options, reports) = if recursive {
+        model
+            .runner_options
+            .build_runner_options(&model.reports_dir)
+    } else {
+        (crate::runner::RunnerOptions::default(), Vec::new())
+    };
+    model.last_reports = reports;
+    let targets = if target.as_os_str().is_empty() {
+        Vec::new()
+    } else {
+        vec![target.clone()]
+    };
     Command::StartRun {
         request: RunRequest {
             collection_root: root,
-            targets: vec![target.clone()],
+            targets,
             recursive,
             env: model.current_environment.clone(),
             env_vars: secret_env_vars(model),
+            options,
         },
         target,
     }
@@ -1081,8 +1382,18 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
         } else {
             format!("{failed} échecs")
         };
+        let reports_text = if !model.last_reports.is_empty() {
+            let paths: Vec<_> = model
+                .last_reports
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            format!(" · Rapports : {}", paths.join(", "))
+        } else {
+            String::new()
+        };
         let status_text = format!(
-            "Campagne {} : {passed}/{total} réussis · {failures_text} — C pour le détail",
+            "Campagne {} : {passed}/{total} réussis · {failures_text}{reports_text} — C pour le détail",
             active.target.display()
         );
         model.last_status = Some(StatusMessage::CampaignFinished(status_text));
@@ -4823,6 +5134,7 @@ mod tests {
             recursive: false,
             env: None,
             env_vars: Vec::new(),
+            options: crate::runner::RunnerOptions::default(),
         });
         model.run.active = Some(ActiveRun {
             id: handle.id(),
@@ -4887,6 +5199,7 @@ mod tests {
             recursive: false,
             env: None,
             env_vars: Vec::new(),
+            options: crate::runner::RunnerOptions::default(),
         });
         model.run.active = Some(ActiveRun {
             id: handle.id(),
@@ -4925,6 +5238,7 @@ mod tests {
             recursive: false,
             env: None,
             env_vars: Vec::new(),
+            options: crate::runner::RunnerOptions::default(),
         });
         let id = handle.id();
         model.run.active = Some(ActiveRun {
@@ -4957,6 +5271,7 @@ mod tests {
             recursive: false,
             env: None,
             env_vars: Vec::new(),
+            options: crate::runner::RunnerOptions::default(),
         });
         model.run.active = Some(ActiveRun {
             id: handle.id(),
@@ -9676,5 +9991,228 @@ mod mouse_tests {
         // Le clic tombe soit hors hit soit sur le panneau zoomé selon coordonnées,
         // mais ne peut pas sélectionner l'arbre masqué
         assert_ne!(model.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn test_runner_options_popup_toggle_and_close() {
+        let mut model = loaded_model((100, 30));
+        assert!(model.runner_options_popup.is_none());
+
+        // Ouverture via ToggleRunnerOptions
+        update(&mut model, Message::ToggleRunnerOptions);
+        assert!(model.runner_options_popup.is_some());
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::Tags
+        );
+
+        // Fermeture via ToggleRunnerOptions
+        update(&mut model, Message::ToggleRunnerOptions);
+        assert!(model.runner_options_popup.is_none());
+
+        // Réouverture puis fermeture via FocusTree (Échap)
+        update(&mut model, Message::ToggleRunnerOptions);
+        assert!(model.runner_options_popup.is_some());
+        update(&mut model, Message::FocusTree);
+        assert!(model.runner_options_popup.is_none());
+    }
+
+    #[test]
+    fn test_runner_options_popup_navigation_and_boolean_toggles() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleRunnerOptions);
+        let popup = model.runner_options_popup.as_mut().unwrap();
+        assert!(!popup.bail);
+        assert!(!popup.tests_only);
+        assert!(!popup.reporter_junit);
+        assert!(!popup.reporter_html);
+        assert!(popup.skip_headers);
+
+        // Navigation vers Bail (3x Down)
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::Bail
+        );
+        update(&mut model, Message::ToggleField);
+        assert!(model.runner_options_popup.as_ref().unwrap().bail);
+
+        // TestsOnly
+        update(&mut model, Message::Down);
+        update(&mut model, Message::ToggleField);
+        assert!(model.runner_options_popup.as_ref().unwrap().tests_only);
+
+        // ReporterJunit
+        update(&mut model, Message::Down);
+        update(&mut model, Message::ToggleField);
+        assert!(model.runner_options_popup.as_ref().unwrap().reporter_junit);
+
+        // ReporterHtml
+        update(&mut model, Message::Down);
+        update(&mut model, Message::ToggleField);
+        assert!(model.runner_options_popup.as_ref().unwrap().reporter_html);
+
+        // SkipHeaders (actif par défaut, on le bascule à false)
+        update(&mut model, Message::Down);
+        update(&mut model, Message::ToggleField);
+        assert!(!model.runner_options_popup.as_ref().unwrap().skip_headers);
+
+        // Fermeture avec FocusTree (sauvegarde auto car valide)
+        update(&mut model, Message::FocusTree);
+        assert!(model.runner_options_popup.is_none());
+        assert!(model.runner_options.bail);
+        assert!(model.runner_options.tests_only);
+        assert!(model.runner_options.export_junit);
+        assert!(model.runner_options.export_html);
+        assert!(!model.runner_options.skip_headers);
+    }
+
+    #[test]
+    fn test_runner_options_popup_text_inputs_and_validation() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleRunnerOptions);
+
+        // Champ Tags : saisie valide "smoke,unit"
+        update(&mut model, Message::Enter);
+        assert!(model.runner_options_popup.as_ref().unwrap().editing_text);
+
+        for c in "smoke,unit".chars() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char(c)),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
+
+        // Erreur de validation avec un tag contenant un espace
+        update(&mut model, Message::Enter);
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Char(' ')),
+        );
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Char('x')),
+        );
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(model.runner_options_popup.as_ref().unwrap().error.is_some());
+
+        // Correction de l'erreur
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Backspace),
+        );
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Backspace),
+        );
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
+
+        // Champ Delay (champ d'indice 2)
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Down);
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::Delay
+        );
+        update(&mut model, Message::Enter);
+        // Saisie invalide "abc"
+        for c in "abc".chars() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char(c)),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(model.runner_options_popup.as_ref().unwrap().error.is_some());
+
+        // Effacement et saisie valide "150"
+        for _ in 0..3 {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Backspace),
+            );
+        }
+        for c in "150".chars() {
+            update(
+                &mut model,
+                Message::InputKey(crate::app::message::InputKey::Char(c)),
+            );
+        }
+        update(
+            &mut model,
+            Message::InputKey(crate::app::message::InputKey::Enter),
+        );
+        assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
+        assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
+
+        // Naviguer jusqu'au bouton Enregistrer (champ 8) et presser Entrée
+        for _ in 0..6 {
+            update(&mut model, Message::Down);
+        }
+        assert_eq!(
+            model.runner_options_popup.as_ref().unwrap().current_field(),
+            crate::app::model::RunnerOptionsField::SaveButton
+        );
+        update(&mut model, Message::Enter);
+
+        assert!(model.runner_options_popup.is_none());
+        assert_eq!(model.last_status, Some(StatusMessage::RunnerOptionsSaved));
+        assert_eq!(model.runner_options.tags, vec!["smoke", "unit"]);
+        assert_eq!(model.runner_options.delay_ms, Some(150));
+    }
+
+    #[test]
+    fn test_run_selected_from_campaign_panel_uses_runner_options() {
+        let mut model = runner_probe_model();
+        model.runner_options = crate::runner::RunnerOptionsConfig {
+            tags: vec!["smoke".into()],
+            exclude_tags: vec!["skip".into()],
+            delay_ms: Some(50),
+            bail: true,
+            tests_only: true,
+            export_junit: true,
+            export_html: true,
+            skip_headers: true,
+        };
+
+        model.focus = Focus::Campaign;
+        let cmd = update(&mut model, Message::RunSelected);
+
+        match cmd {
+            Command::StartRun { request, .. } => {
+                assert!(request.recursive);
+                assert_eq!(request.options.tags, vec!["smoke"]);
+                assert_eq!(request.options.exclude_tags, vec!["skip"]);
+                assert_eq!(request.options.delay_ms, Some(50));
+                assert!(request.options.bail);
+                assert!(request.options.tests_only);
+                assert!(request.options.reporter_junit.is_some());
+                assert!(request.options.reporter_html.is_some());
+                assert!(request.options.reporter_skip_all_headers);
+                assert_eq!(model.last_reports.len(), 2);
+            }
+            other => panic!("attendu StartRun, reçu {other:?}"),
+        }
     }
 }

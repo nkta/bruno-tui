@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 
+use super::options::RunnerOptions;
+
 /// Chemin passé à `--reporter-json` : le fd 3 de l'enfant est l'extrémité
 /// écriture d'un pipe anonyme, le rapport ne touche jamais le disque.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -75,6 +77,8 @@ pub struct RunRequest {
     pub env: Option<String>,
     /// Surcharges de variables (`--env-var nom=valeur`).
     pub env_vars: Vec<(String, SecretString)>,
+    /// Options avancées de campagne (tags, délai, bail, tests-only, exports).
+    pub options: RunnerOptions,
 }
 
 impl RunRequest {
@@ -86,6 +90,7 @@ impl RunRequest {
             recursive: true,
             env: None,
             env_vars: Vec::new(),
+            options: RunnerOptions::default(),
         }
     }
 
@@ -105,6 +110,37 @@ impl RunRequest {
         for (name, value) in &self.env_vars {
             args.push("--env-var".into());
             args.push(format!("{name}={}", value.expose()).into());
+        }
+        if !self.options.tags.is_empty() {
+            args.push("--tags".into());
+            args.push(self.options.tags.join(",").into());
+        }
+        if !self.options.exclude_tags.is_empty() {
+            args.push("--exclude-tags".into());
+            args.push(self.options.exclude_tags.join(",").into());
+        }
+        if let Some(delay) = self.options.delay_ms {
+            args.push("--delay".into());
+            args.push(delay.to_string().into());
+        }
+        if self.options.bail {
+            args.push("--bail".into());
+        }
+        if self.options.tests_only {
+            args.push("--tests-only".into());
+        }
+        if let Some(junit_path) = &self.options.reporter_junit {
+            args.push("--reporter-junit".into());
+            args.push(junit_path.into());
+        }
+        if let Some(html_path) = &self.options.reporter_html {
+            args.push("--reporter-html".into());
+            args.push(html_path.into());
+        }
+        if self.options.reporter_skip_all_headers
+            && (self.options.reporter_junit.is_some() || self.options.reporter_html.is_some())
+        {
+            args.push("--reporter-skip-all-headers".into());
         }
         args.push("--reporter-json".into());
         args.push(REPORT_PATH.into());
@@ -206,5 +242,67 @@ mod tests {
         assert!(!format!("{request:?}").contains("s3cr3t"));
         assert!(!format!("{secret}").contains("s3cr3t"));
         assert!(!format!("{secret:?}").contains("s3cr3t"));
+    }
+
+    #[test]
+    fn bru_args_with_runner_options() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                tags: vec!["smoke".into(), "fast".into()],
+                exclude_tags: vec!["slow".into()],
+                delay_ms: Some(150),
+                bail: true,
+                tests_only: true,
+                reporter_junit: Some(PathBuf::from("/tmp/report.xml")),
+                reporter_html: Some(PathBuf::from("/tmp/report.html")),
+                reporter_skip_all_headers: true,
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--tags",
+                "smoke,fast",
+                "--exclude-tags",
+                "slow",
+                "--delay",
+                "150",
+                "--bail",
+                "--tests-only",
+                "--reporter-junit",
+                "/tmp/report.xml",
+                "--reporter-html",
+                "/tmp/report.html",
+                "--reporter-skip-all-headers",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+    }
+
+    #[test]
+    fn bru_args_with_reports_without_skip_headers() {
+        let request = RunRequest {
+            options: RunnerOptions {
+                reporter_junit: Some(PathBuf::from("/tmp/report.xml")),
+                reporter_skip_all_headers: false,
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "-r",
+                "--reporter-junit",
+                "/tmp/report.xml",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
     }
 }
