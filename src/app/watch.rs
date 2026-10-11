@@ -52,7 +52,7 @@ pub fn is_ignored_path(path: &Path) -> bool {
 /// Vérifie si une modification de ce chemin justifie un rechargement de collection.
 ///
 /// Déclenche pour :
-/// - Les fichiers `.bru`
+/// - Les fichiers `.bru` et `.yml` (OpenCollection)
 /// - Les fichiers `bruno.json`, `collection.bru`, `folder.bru`
 /// - N'importe quel fichier sous le dossier `environments/`
 pub fn is_watched_path(path: &Path) -> bool {
@@ -72,7 +72,12 @@ pub fn is_watched_path(path: &Path) -> bool {
         return true;
     }
 
-    if path.extension().is_some_and(|ext| ext == "bru") {
+    // `.yml` : requêtes, `folder.yml` et `opencollection.yml` d'une
+    // collection OpenCollection.
+    if path
+        .extension()
+        .is_some_and(|ext| ext == "bru" || ext == crate::collection::opencollection::EXTENSION)
+    {
         return true;
     }
 
@@ -198,6 +203,9 @@ mod tests {
         assert!(is_watched_path(Path::new("environments/local.bru")));
         assert!(is_watched_path(Path::new("environments/custom.env")));
         assert!(is_watched_path(Path::new("sub/environments/vars.json")));
+        assert!(is_watched_path(Path::new("opencollection.yml")));
+        assert!(is_watched_path(Path::new("data/folder.yml")));
+        assert!(is_watched_path(Path::new("data/nested/secure.yml")));
 
         // Non déclencheurs
         assert!(!is_watched_path(Path::new("README.md")));

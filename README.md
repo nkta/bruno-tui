@@ -83,7 +83,7 @@ d'édition non enregistrée demande confirmation.
 | `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
 
 La racine de la collection est surveillée en continu : dès qu'un fichier
-`.bru`, `bruno.json`, `collection.bru`, `folder.bru` ou un fichier du dossier
+`.bru` ou `.yml` (OpenCollection), `bruno.json`, `collection.bru`, `folder.bru` ou un fichier du dossier
 `environments/` est créé, modifié, supprimé ou renommé, la collection est
 automatiquement rechargée en préservant la sélection (par chemin), les dossiers
 dépliés, le focus et l'environnement actif (l'option `--no-watch` permet de
