@@ -1786,13 +1786,23 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
     }
 
     match event.outcome {
-        crate::runner::RunOutcome::Completed { report, exit_code } => {
+        crate::runner::RunOutcome::Completed {
+            report,
+            exit_code,
+            output,
+        } => {
+            let is_global_console = active.recursive;
             for result in report.0.into_iter().flat_map(|iteration| iteration.results) {
                 let key = std::path::PathBuf::from(&result.test.filename);
-                model
-                    .run
-                    .outcomes
-                    .insert(key, super::model::RequestOutcome { result, exit_code });
+                model.run.outcomes.insert(
+                    key,
+                    super::model::RequestOutcome::with_console(
+                        result,
+                        exit_code,
+                        output.clone(),
+                        is_global_console,
+                    ),
+                );
             }
             model.run.last_failure = None;
         }
@@ -5534,6 +5544,7 @@ mod tests {
                 outcome: runner::RunOutcome::Completed {
                     report: new_report,
                     exit_code: Some(0),
+                    output: String::new(),
                 },
             }),
         );
@@ -5573,6 +5584,7 @@ mod tests {
                 outcome: runner::RunOutcome::Completed {
                     report,
                     exit_code: Some(0),
+                    output: String::new(),
                 },
             }),
         );
@@ -6670,7 +6682,9 @@ mod tests {
         assert_eq!(model.response_tab, ResponseTab::Tests);
         update(&mut model, Message::Right);
         assert_eq!(model.response_tab, ResponseTab::Timeline);
-        // Cycle circulaire : un quatrième Right revient à Corps.
+        update(&mut model, Message::Right);
+        assert_eq!(model.response_tab, ResponseTab::Console);
+        // Cycle circulaire : un cinquième Right revient à Corps.
         update(&mut model, Message::Right);
         assert_eq!(model.response_tab, ResponseTab::Body);
     }
@@ -6685,7 +6699,9 @@ mod tests {
         update(&mut model, Message::NextFocus); // Réponse
         assert_eq!(model.response_tab, ResponseTab::Body);
 
-        // Cycle circulaire vers l'arrière : depuis Corps, Left va à Timeline.
+        // Cycle circulaire vers l'arrière : depuis Corps, Left va à Console.
+        update(&mut model, Message::Left);
+        assert_eq!(model.response_tab, ResponseTab::Console);
         update(&mut model, Message::Left);
         assert_eq!(model.response_tab, ResponseTab::Timeline);
         update(&mut model, Message::Left);
@@ -6744,6 +6760,39 @@ mod tests {
         assert_eq!(model.response_scroll, 0);
         assert!(model.response_match.is_none());
         assert!(model.response_selection.is_none());
+    }
+
+    #[test]
+    fn console_tab_supports_search_visual_selection_and_yank() {
+        use crate::app::test_support::runner_probe_model;
+
+        let mut model = runner_probe_model();
+        select(&mut model, "green.bru");
+        if let Some(outcome) = model.run.outcomes.get_mut(Path::new("green.bru")) {
+            outcome.console = "première ligne\nlog_console_cible\ntroisième ligne\n".into();
+        }
+
+        update(&mut model, Message::NextFocus); // Détail
+        update(&mut model, Message::NextFocus); // Réponse
+        model.response_tab = ResponseTab::Console;
+
+        // 1. Recherche '/'
+        update(&mut model, Message::StartSearch);
+        for c in "log_console_cible".chars() {
+            update(&mut model, Message::SearchInput(c));
+        }
+        update(&mut model, Message::ConfirmSearch);
+        assert!(model.response_match.is_some());
+        let (matched_line, _) = model.response_match.as_ref().unwrap();
+        assert_eq!(*matched_line, 1);
+
+        // 2. Sélection visuelle 'v' et copie 'y'
+        update(&mut model, Message::ToggleVisual);
+        assert!(model.response_selection.is_some());
+        let Command::CopyToClipboard { text, .. } = update(&mut model, Message::Yank) else {
+            panic!("copie attendue");
+        };
+        assert!(text.contains("log_console_cible"));
     }
 
     #[test]
@@ -8857,6 +8906,7 @@ mod tests {
                 outcome: runner::RunOutcome::Completed {
                     report,
                     exit_code: Some(1),
+                    output: String::new(),
                 },
             }),
         );
@@ -8918,6 +8968,7 @@ mod tests {
                 outcome: runner::RunOutcome::Completed {
                     report: single_report,
                     exit_code: Some(0),
+                    output: String::new(),
                 },
             }),
         );
@@ -9033,10 +9084,7 @@ mod tests {
         res_fail1.status = runner::report::ResultStatus::Error;
         model.run.outcomes.insert(
             PathBuf::from("grp/x.bru"),
-            super::super::model::RequestOutcome {
-                result: res_fail1,
-                exit_code: Some(1),
-            },
+            super::super::model::RequestOutcome::new(res_fail1, Some(1)),
         );
 
         let mut res_fail2 = sample_request_result("grp/sub/deep.bru");
@@ -9044,10 +9092,7 @@ mod tests {
         res_fail2.status = runner::report::ResultStatus::Error;
         model.run.outcomes.insert(
             PathBuf::from("grp/sub/deep.bru"),
-            super::super::model::RequestOutcome {
-                result: res_fail2,
-                exit_code: Some(1),
-            },
+            super::super::model::RequestOutcome::new(res_fail2, Some(1)),
         );
 
         // Positionné au début de l'arbre (dossier grp)

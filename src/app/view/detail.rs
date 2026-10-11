@@ -143,6 +143,7 @@ fn response_text_and_body_start(model: &Model) -> (Text<'static>, Option<usize>)
         ResponseTab::Headers => lines.extend(headers_tab_lines(outcome)),
         ResponseTab::Tests => lines.extend(tests_tab_lines(outcome)),
         ResponseTab::Timeline => lines.extend(timeline_tab_lines(outcome)),
+        ResponseTab::Console => lines.extend(console_tab_lines(outcome)),
     }
     (Text::from(lines), body_start)
 }
@@ -1564,6 +1565,24 @@ fn timeline_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
     lines
 }
 
+/// Contenu de l'onglet Console : sortie standard et d'erreur de `bru`,
+/// débarrassée des codes ANSI. Indique s'il s'agit d'une console globale
+/// (issue d'une exécution récursive).
+fn console_tab_lines(outcome: &RequestOutcome) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if outcome.is_global_console {
+        lines.push(section("Console globale (exécution récursive)"));
+    }
+    if outcome.console.trim().is_empty() {
+        lines.push(Line::raw("  aucune sortie console"));
+    } else {
+        for line in outcome.console.lines() {
+            lines.push(Line::raw(line.to_string()));
+        }
+    }
+    lines
+}
+
 /// Barre d'onglets du panneau Réponse : l'onglet actif en clair, gras et
 /// souligné comme dans Bruno bureau, les autres en gris.
 pub fn tab_bar(active: ResponseTab) -> Line<'static> {
@@ -1572,6 +1591,7 @@ pub fn tab_bar(active: ResponseTab) -> Line<'static> {
         (ResponseTab::Headers, "En-têtes"),
         (ResponseTab::Tests, "Tests"),
         (ResponseTab::Timeline, "Timeline"),
+        (ResponseTab::Console, "Console"),
     ];
     let mut spans = Vec::new();
     for (index, (tab, label)) in tabs.into_iter().enumerate() {
@@ -2481,10 +2501,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         model.run.outcomes.insert(
             "simple-get.bru".into(),
-            RequestOutcome {
-                result,
-                exit_code: Some(0),
-            },
+            RequestOutcome::new(result, Some(0)),
         );
         select(&mut model, "simple-get.bru");
         model.response_tab = tab;
@@ -2585,6 +2602,7 @@ mod tests {
             ResponseTab::Headers,
             ResponseTab::Tests,
             ResponseTab::Timeline,
+            ResponseTab::Console,
         ] {
             let text = result_detail_on_tab(pre_request_error_result(), tab);
             assert!(
@@ -2642,10 +2660,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         model.run.outcomes.insert(
             "simple-get.bru".into(),
-            RequestOutcome {
-                result: base_result(),
-                exit_code: Some(0),
-            },
+            RequestOutcome::new(base_result(), Some(0)),
         );
         select(&mut model, "simple-get.bru");
         let detail = plain(&detail_text(&model));
@@ -3208,5 +3223,45 @@ mod tests {
         // `bru` rapporte `response.url` sans le port : ce n'est pas une
         // redirection, aucune « URL finale » n'est affichée.
         assert!(!text.contains("URL finale"), "{text}");
+    }
+
+    #[test]
+    fn console_tab_renders_raw_output_and_handles_global_run() {
+        let mut model = loaded_model((100, 30));
+        let mut outcome = RequestOutcome::new(base_result(), Some(0));
+        outcome.console = "ligne 1 de log\nligne 2 de log\n".to_string();
+        outcome.is_global_console = true;
+        model.run.outcomes.insert("simple-get.bru".into(), outcome);
+        select(&mut model, "simple-get.bru");
+        model.response_tab = ResponseTab::Console;
+
+        let text = plain(&response_text(&model));
+        assert!(
+            text.contains("Console globale (exécution récursive)"),
+            "{text}"
+        );
+        assert!(text.contains("ligne 1 de log"), "{text}");
+        assert!(text.contains("ligne 2 de log"), "{text}");
+    }
+
+    #[test]
+    fn console_tab_renders_fallback_when_empty() {
+        let mut model = loaded_model((100, 30));
+        let outcome = RequestOutcome::new(base_result(), Some(0));
+        model.run.outcomes.insert("simple-get.bru".into(), outcome);
+        select(&mut model, "simple-get.bru");
+        model.response_tab = ResponseTab::Console;
+
+        let text = plain(&response_text(&model));
+        assert!(!text.contains("Console globale"), "{text}");
+        assert!(text.contains("aucune sortie console"), "{text}");
+    }
+
+    #[test]
+    fn tab_bar_includes_console_tab() {
+        let bar = tab_bar(ResponseTab::Console);
+        let labels: Vec<&str> = bar.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(labels.contains(&"Console"));
+        assert!(labels.contains(&"Timeline"));
     }
 }

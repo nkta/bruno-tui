@@ -363,13 +363,10 @@ pub(crate) mod test_support {
                 .expect("mixed.json doit se désérialiser");
         for result in mixed_report.0.into_iter().flat_map(|it| it.results) {
             let key = std::path::PathBuf::from(&result.test.filename);
-            model.run.outcomes.insert(
-                key,
-                super::model::RequestOutcome {
-                    result,
-                    exit_code: Some(0),
-                },
-            );
+            model
+                .run
+                .outcomes
+                .insert(key, super::model::RequestOutcome::new(result, Some(0)));
         }
         model
     }

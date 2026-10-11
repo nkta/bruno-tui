@@ -55,6 +55,7 @@ pub enum ResponseTab {
     Headers,
     Tests,
     Timeline,
+    Console,
 }
 
 impl ResponseTab {
@@ -63,16 +64,18 @@ impl ResponseTab {
             ResponseTab::Body => ResponseTab::Headers,
             ResponseTab::Headers => ResponseTab::Tests,
             ResponseTab::Tests => ResponseTab::Timeline,
-            ResponseTab::Timeline => ResponseTab::Body,
+            ResponseTab::Timeline => ResponseTab::Console,
+            ResponseTab::Console => ResponseTab::Body,
         }
     }
 
     pub fn previous(self) -> Self {
         match self {
-            ResponseTab::Body => ResponseTab::Timeline,
+            ResponseTab::Body => ResponseTab::Console,
             ResponseTab::Headers => ResponseTab::Body,
             ResponseTab::Tests => ResponseTab::Headers,
             ResponseTab::Timeline => ResponseTab::Tests,
+            ResponseTab::Console => ResponseTab::Timeline,
         }
     }
 }
@@ -380,6 +383,36 @@ pub struct ActiveRun {
 pub struct RequestOutcome {
     pub result: runner::report::RequestResult,
     pub exit_code: Option<i32>,
+    /// Sortie stdout + stderr de `bru`, débarrassée des codes ANSI.
+    /// Conservée en mémoire vive uniquement (jamais sur disque ni dans l'historique).
+    pub console: String,
+    /// Indique si la console provient d'une exécution récursive (globale à la campagne).
+    pub is_global_console: bool,
+}
+
+impl RequestOutcome {
+    pub fn new(result: runner::report::RequestResult, exit_code: Option<i32>) -> Self {
+        Self {
+            result,
+            exit_code,
+            console: String::new(),
+            is_global_console: false,
+        }
+    }
+
+    pub fn with_console(
+        result: runner::report::RequestResult,
+        exit_code: Option<i32>,
+        console: String,
+        is_global_console: bool,
+    ) -> Self {
+        Self {
+            result,
+            exit_code,
+            console,
+            is_global_console,
+        }
+    }
 }
 
 /// Exécution n'ayant pas produit de résultat exploitable.

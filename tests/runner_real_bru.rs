@@ -101,7 +101,10 @@ async fn real_bru_run_on_fixture_collection() {
         .expect("canal ouvert");
     assert_eq!(event.id, handle.id());
 
-    let RunOutcome::Completed { report, exit_code } = event.outcome else {
+    let RunOutcome::Completed {
+        report, exit_code, ..
+    } = event.outcome
+    else {
         panic!("issue inattendue : {:?}", event.outcome);
     };
     assert_eq!(exit_code, Some(1));
@@ -141,7 +144,10 @@ async fn real_bru_run_with_request_failed_before_sending() {
     assert_eq!(event.id, handle.id());
 
     // Le rapport doit rester lisible malgré la requête jamais envoyée.
-    let RunOutcome::Completed { report, exit_code } = event.outcome else {
+    let RunOutcome::Completed {
+        report, exit_code, ..
+    } = event.outcome
+    else {
         panic!("issue inattendue : {:?}", event.outcome);
     };
     assert_eq!(exit_code, Some(1));

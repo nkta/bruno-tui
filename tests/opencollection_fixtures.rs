@@ -552,6 +552,7 @@ fn real_report_results_match_tree_nodes() {
             outcome: RunOutcome::Completed {
                 report,
                 exit_code: Some(0),
+                output: String::new(),
             },
         }),
     );
