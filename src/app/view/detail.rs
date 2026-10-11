@@ -3229,7 +3229,7 @@ mod tests {
     fn console_tab_renders_raw_output_and_handles_global_run() {
         let mut model = loaded_model((100, 30));
         let mut outcome = RequestOutcome::new(base_result(), Some(0));
-        outcome.console = "ligne 1 de log\nligne 2 de log\n".to_string();
+        outcome.console = std::sync::Arc::from("ligne 1 de log\nligne 2 de log\n");
         outcome.is_global_console = true;
         model.run.outcomes.insert("simple-get.bru".into(), outcome);
         select(&mut model, "simple-get.bru");

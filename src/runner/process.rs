@@ -132,7 +132,8 @@ fn classify(exit_code: Option<i32>, report: Vec<u8>, output: String) -> RunOutco
     }
 }
 
-/// Supprime les séquences d'échappement ANSI d'une chaîne.
+/// Supprime les séquences d'échappement ANSI et les caractères de contrôle
+/// d'une chaîne, sauf le saut de ligne et la tabulation.
 pub fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -161,9 +162,11 @@ pub fn strip_ansi(input: &str) -> String {
                     chars.next();
                 }
             }
-        } else {
+        } else if c == '\n' || c == '\t' || !c.is_control() {
             out.push(c);
         }
+        // Autres caractères de contrôle (`\r`, retour arrière, ...) : retirés,
+        // ils brouilleraient l'affichage du terminal.
     }
     out
 }
@@ -364,5 +367,6 @@ mod tests {
         assert_eq!(strip_ansi("\x1b[2J\x1b[?25hEcran"), "Ecran");
         assert_eq!(strip_ansi("\x1b]0;Titre\x07Corps"), "Corps");
         assert_eq!(strip_ansi("\x1b]0;Titre\x1b\\Corps"), "Corps");
+        assert_eq!(strip_ansi("a\r\nb\x08c\td"), "a\nbc\td");
     }
 }

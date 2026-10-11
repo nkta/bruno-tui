@@ -385,7 +385,9 @@ pub struct RequestOutcome {
     pub exit_code: Option<i32>,
     /// Sortie stdout + stderr de `bru`, débarrassée des codes ANSI.
     /// Conservée en mémoire vive uniquement (jamais sur disque ni dans l'historique).
-    pub console: String,
+    /// Partagée entre toutes les requêtes d'une même exécution : une seule
+    /// copie, même pour une campagne de plusieurs centaines de requêtes.
+    pub console: std::sync::Arc<str>,
     /// Indique si la console provient d'une exécution récursive (globale à la campagne).
     pub is_global_console: bool,
 }
@@ -395,7 +397,7 @@ impl RequestOutcome {
         Self {
             result,
             exit_code,
-            console: String::new(),
+            console: std::sync::Arc::from(""),
             is_global_console: false,
         }
     }
@@ -403,7 +405,7 @@ impl RequestOutcome {
     pub fn with_console(
         result: runner::report::RequestResult,
         exit_code: Option<i32>,
-        console: String,
+        console: std::sync::Arc<str>,
         is_global_console: bool,
     ) -> Self {
         Self {

@@ -1791,7 +1791,10 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
             exit_code,
             output,
         } => {
-            let is_global_console = active.recursive;
+            // Console de toute l'exécution : récursive, ou relance de
+            // plusieurs requêtes en échec (`R`).
+            let is_global_console = active.recursive || active.is_campaign;
+            let output: std::sync::Arc<str> = std::sync::Arc::from(output);
             for result in report.0.into_iter().flat_map(|iteration| iteration.results) {
                 let key = std::path::PathBuf::from(&result.test.filename);
                 model.run.outcomes.insert(
@@ -1799,7 +1802,7 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
                     super::model::RequestOutcome::with_console(
                         result,
                         exit_code,
-                        output.clone(),
+                        std::sync::Arc::clone(&output),
                         is_global_console,
                     ),
                 );
@@ -6769,7 +6772,8 @@ mod tests {
         let mut model = runner_probe_model();
         select(&mut model, "green.bru");
         if let Some(outcome) = model.run.outcomes.get_mut(Path::new("green.bru")) {
-            outcome.console = "première ligne\nlog_console_cible\ntroisième ligne\n".into();
+            outcome.console =
+                std::sync::Arc::from("première ligne\nlog_console_cible\ntroisième ligne\n");
         }
 
         update(&mut model, Message::NextFocus); // Détail
