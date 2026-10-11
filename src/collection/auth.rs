@@ -11,25 +11,44 @@ use super::view::KeyValue;
 /// Placeholder appliqué sur les valeurs sensibles en clair.
 pub const MASKED_SECRET: &str = "********";
 
-/// Vérifie si une valeur a la forme d'une variable interpolée `{{variable}}`.
+/// Vrai si `value` est exactement UNE référence de variable `{{nom}}`.
+///
+/// Stricte : `{{a}}secret{{b}}` ou `Bearer {{tok}}` ne sont pas des
+/// références seules et restent donc masqués s'ils sont sensibles.
 pub fn is_variable_reference(value: &str) -> bool {
     let trimmed = value.trim();
-    trimmed.starts_with("{{") && trimmed.ends_with("}}") && trimmed.len() >= 4
+    let Some(inner) = trimmed
+        .strip_prefix("{{")
+        .and_then(|rest| rest.strip_suffix("}}"))
+    else {
+        return false;
+    };
+    !inner.trim().is_empty() && !inner.contains(['{', '}', '\n', '\r'])
 }
 
-/// Détermine si un nom de clé de paramètre d'authentification correspond à un secret.
+/// Vrai si le nom d'un paramètre d'auth désigne une valeur sensible.
 pub fn is_sensitive_auth_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    let cleaned = lower.replace(['-', '_', ' '], "");
-    cleaned.contains("password")
-        || cleaned.contains("passwd")
-        || cleaned.contains("motdepasse")
-        || cleaned.contains("token")
-        || cleaned.contains("secret")
-        || cleaned.contains("apikey")
-        || cleaned.contains("privatekey")
-        || (cleaned.contains("key") && cleaned != "key")
-        || cleaned == "value"
+    let lower = key.to_lowercase();
+    // Séparateurs retirés : `client_secret`, `client-secret`, `clientSecret`.
+    let norm: String = lower.chars().filter(|c| c.is_alphanumeric()).collect();
+    norm.contains("password")
+        || norm.contains("passwd")
+        || norm.contains("motdepasse")
+        || norm == "pass"
+        || norm.contains("token")
+        || norm.contains("secret")
+        || norm.contains("apikey")
+        || norm.contains("privatekey")
+        || norm.contains("authkey")
+        // `key` seul est le nom de l'en-tête d'`auth:apikey`, pas un secret ;
+        // `accessKeyId`, `clientKey`... en sont.
+        || (norm.contains("key") && norm != "key")
+        || norm.starts_with("cle")
+        || norm.ends_with("cle")
+        || norm.contains("clé")
+        || norm.contains("clef")
+        // Valeur de la clé dans `auth:apikey`.
+        || norm == "value"
 }
 
 /// Masque une valeur de paramètre d'authentification si sa clé est sensible et
@@ -66,7 +85,8 @@ mod tests {
         assert!(is_variable_reference("{{tok}}"));
         assert!(is_variable_reference("{{ token }}"));
         assert!(is_variable_reference("  {{secret_var}}  "));
-        assert!(is_variable_reference("{{}}"));
+        assert!(!is_variable_reference("{{}}"));
+        assert!(!is_variable_reference("{{a}}secret{{b}}"));
 
         assert!(!is_variable_reference("s3cr3t"));
         assert!(!is_variable_reference("Bearer {{tok}}"));

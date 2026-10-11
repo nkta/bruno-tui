@@ -11,91 +11,10 @@ use super::detail::DISABLED_ENTRY_VALUE;
 use super::theme;
 use crate::collection::KeyValue;
 
-/// Détermine si une chaîne est strictement une référence de variable unique
-/// de la forme `{{variable}}`.
-pub fn is_variable_reference(value: &str) -> bool {
-    let trimmed = value.trim();
-    if !trimmed.starts_with("{{") || !trimmed.ends_with("}}") {
-        return false;
-    }
-    if trimmed.len() < 5 {
-        // Au moins "{{x}}" (5 caractères)
-        return false;
-    }
-    let inner = &trimmed[2..trimmed.len() - 2];
-    let inner_trimmed = inner.trim();
-    if inner_trimmed.is_empty() {
-        return false;
-    }
-    // Pas d'accolades dans le nom de variable (ex. {{{var}}}, {{a}}{{b}}, etc.)
-    if inner.contains('{') || inner.contains('}') {
-        return false;
-    }
-    // Pas de saut de ligne dans le nom de variable
-    if inner.contains('\n') || inner.contains('\r') {
-        return false;
-    }
-    true
-}
-
-/// Détermine si un nom de clé de paramètre d'auth est considéré sensible.
-pub fn is_sensitive_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    // Normalisation en retirant les séparateurs usuels (_, -, espaces)
-    let norm: String = lower
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == 'é' || *c == 'è')
-        .collect();
-
-    // Mots de passe
-    if norm.contains("password") || norm.contains("passwd") || norm == "pass" {
-        return true;
-    }
-    // Tokens
-    if norm.contains("token") {
-        return true;
-    }
-    // Secrets
-    if norm.contains("secret") {
-        return true;
-    }
-    // Clés / API keys / Clé privée
-    if norm.contains("apikey")
-        || norm.contains("privatekey")
-        || norm.contains("authkey")
-        || norm == "cle"
-        || norm.starts_with("cle")
-        || norm.ends_with("cle")
-        || lower.contains("clé")
-        || lower.contains("clef")
-    {
-        return true;
-    }
-    // Valeur de clé API dans auth:apikey ("value")
-    if lower == "value" {
-        return true;
-    }
-
-    false
-}
-
-/// Masque une valeur de paramètre d'authentification si la clé est sensible.
-///
-/// Si la valeur est de la forme `{{variable}}`, elle reste affichée en clair.
-/// Si la valeur est littérale et que la clé est sensible, elle est masquée
-/// par `********`.
-pub fn mask_auth_value(key: &str, value: &str) -> String {
-    if !is_sensitive_key(key) {
-        return value.to_string();
-    }
-    if value.is_empty() {
-        return String::new();
-    }
-    if is_variable_reference(value) {
-        return value.to_string();
-    }
-    "********".to_string()
-}
+// Règles de masquage partagées avec l'affichage des dossiers.
+pub use crate::collection::auth::{
+    is_sensitive_auth_key as is_sensitive_key, is_variable_reference, mask_auth_value,
+};
 
 /// Rend les lignes de paramètres d'authentification avec masquage.
 pub fn render_auth_entries(lines: &mut Vec<Line<'static>>, params: &[KeyValue]) {
