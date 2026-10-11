@@ -264,7 +264,23 @@ impl RequestView {
     }
 }
 
-/// Méta-données de `collection.bru` ou `folder.bru`.
+/// Contenu détaillé des onglets de `folder.bru` ou `collection.bru`,
+/// regroupé dans une indirection sur le tas pour préserver la taille de
+/// [`FileMeta`] et éviter le gonflement des variantes d'énumérations.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FileMetaContent {
+    pub headers: Vec<KeyValue>,
+    pub auth: Option<AuthMode>,
+    pub auth_params: Vec<KeyValue>,
+    pub vars_pre_request: Vec<KeyValue>,
+    pub vars_post_response: Vec<KeyValue>,
+    pub script_pre_request: Option<String>,
+    pub script_post_response: Option<String>,
+    pub tests: Option<String>,
+    pub docs: Option<String>,
+}
+
+/// Méta-données et contenu de `collection.bru` ou `folder.bru`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileMeta {
     pub name: Option<String>,
@@ -275,17 +291,91 @@ pub struct FileMeta {
     pub has_pre_request_script: bool,
     pub has_post_response_script: bool,
     pub has_tests: bool,
-    /// Présence d'un bloc `vars:pre-request` ou `vars:post-response`.
+    /// Présence d'un bloc `vars:pre-request`, `vars:post-response` ou `vars`.
     pub has_vars: bool,
     /// AST source ; absent pour un format de collection autre que `.bru`.
     pub ast: Option<BruFile>,
+    pub content: Box<FileMetaContent>,
 }
 
 impl FileMeta {
+    pub fn headers(&self) -> &[KeyValue] {
+        &self.content.headers
+    }
+
+    pub fn auth(&self) -> Option<&AuthMode> {
+        self.content.auth.as_ref()
+    }
+
+    pub fn auth_params(&self) -> &[KeyValue] {
+        &self.content.auth_params
+    }
+
+    pub fn vars_pre_request(&self) -> &[KeyValue] {
+        &self.content.vars_pre_request
+    }
+
+    pub fn vars_post_response(&self) -> &[KeyValue] {
+        &self.content.vars_post_response
+    }
+
+    pub fn script_pre_request(&self) -> Option<&str> {
+        self.content.script_pre_request.as_deref()
+    }
+
+    pub fn script_post_response(&self) -> Option<&str> {
+        self.content.script_post_response.as_deref()
+    }
+
+    pub fn tests(&self) -> Option<&str> {
+        self.content.tests.as_deref()
+    }
+
+    pub fn docs(&self) -> Option<&str> {
+        self.content.docs.as_deref()
+    }
+
     pub fn from_ast(file: BruFile) -> Self {
-        let has_auth = file
-            .blocks()
-            .any(|b| b.name == "auth" || b.name.starts_with("auth:"));
+        let headers = key_values(&file, "headers");
+
+        let auth_entry = file.entry("auth", "mode").map(AuthMode::parse);
+        let auth = auth_entry.or_else(|| {
+            file.blocks()
+                .find(|b| b.name.starts_with("auth:"))
+                .map(|b| AuthMode::parse(&b.name[5..]))
+        });
+
+        let auth_params = match &auth {
+            Some(AuthMode::Basic) => key_values(&file, "auth:basic"),
+            Some(AuthMode::Bearer) => key_values(&file, "auth:bearer"),
+            Some(AuthMode::Digest) => key_values(&file, "auth:digest"),
+            Some(AuthMode::Ntlm) => key_values(&file, "auth:ntlm"),
+            Some(AuthMode::OAuth2) => key_values(&file, "auth:oauth2"),
+            Some(AuthMode::AwsV4) => key_values(&file, "auth:awsv4"),
+            Some(AuthMode::Wsse) => key_values(&file, "auth:wsse"),
+            Some(AuthMode::ApiKey) => key_values(&file, "auth:apikey"),
+            Some(AuthMode::Other(name)) => key_values(&file, &format!("auth:{name}")),
+            _ => Vec::new(),
+        };
+
+        let mut vars_pre_request = key_values(&file, "vars:pre-request");
+        if vars_pre_request.is_empty() {
+            vars_pre_request = key_values(&file, "vars");
+        }
+        let vars_post_response = key_values(&file, "vars:post-response");
+        let script_pre_request = file.text("script:pre-request");
+        let script_post_response = file.text("script:post-response");
+        let tests = file.text("tests");
+        let docs = file.text("docs");
+
+        let has_auth = auth
+            .as_ref()
+            .is_some_and(|a| !matches!(a, AuthMode::NoAuth | AuthMode::Inherit))
+            || !auth_params.is_empty()
+            || file
+                .blocks()
+                .any(|b| b.name == "auth" || b.name.starts_with("auth:"));
+
         Self {
             name: meta_name(&file),
             seq: meta_seq(&file),
@@ -294,8 +384,21 @@ impl FileMeta {
             has_pre_request_script: file.has_block("script:pre-request"),
             has_post_response_script: file.has_block("script:post-response"),
             has_tests: file.has_block("tests"),
-            has_vars: file.has_block("vars:pre-request") || file.has_block("vars:post-response"),
+            has_vars: file.has_block("vars:pre-request")
+                || file.has_block("vars:post-response")
+                || file.has_block("vars"),
             ast: Some(file),
+            content: Box::new(FileMetaContent {
+                headers,
+                auth,
+                auth_params,
+                vars_pre_request,
+                vars_post_response,
+                script_pre_request,
+                script_post_response,
+                tests,
+                docs,
+            }),
         }
     }
 }
@@ -575,9 +678,93 @@ mod tests {
         assert_eq!(meta.name.as_deref(), Some("Groupe"));
         assert_eq!(meta.seq, Some(3));
         assert!(meta.has_auth);
+        assert_eq!(meta.auth(), Some(&AuthMode::Bearer));
+        assert_eq!(meta.auth_params().len(), 1);
+        assert_eq!(meta.auth_params()[0].key, "token");
+        assert_eq!(meta.auth_params()[0].value, "{{tok}}");
         assert!(!meta.has_headers);
         assert!(!meta.has_tests);
         assert!(meta.ast.is_some());
+    }
+
+    #[test]
+    fn folder_meta_full_content_parsed() {
+        let source = r#"meta {
+  name: MonDossier
+  seq: 2
+}
+
+headers {
+  X-Custom: 123
+  ~X-Disabled: true
+}
+
+auth {
+  mode: basic
+}
+
+auth:basic {
+  username: user
+  password: pwd
+}
+
+vars:pre-request {
+  a: 1
+}
+
+vars:post-response {
+  b: 2
+}
+
+script:pre-request {
+  console.log("pre");
+}
+
+script:post-response {
+  console.log("post");
+}
+
+tests {
+  test("ok", () => {});
+}
+
+docs {
+  Documentation du dossier.
+}
+"#;
+        let file = parse(source);
+        let meta = FileMeta::from_ast(file);
+        assert_eq!(meta.name.as_deref(), Some("MonDossier"));
+        assert_eq!(meta.seq, Some(2));
+        assert_eq!(meta.headers().len(), 2);
+        assert_eq!(meta.headers()[0].key, "X-Custom");
+        assert!(meta.headers()[0].enabled);
+        assert_eq!(meta.headers()[1].key, "X-Disabled");
+        assert!(!meta.headers()[1].enabled);
+
+        assert_eq!(meta.auth(), Some(&AuthMode::Basic));
+        assert_eq!(meta.auth_params().len(), 2);
+        assert_eq!(meta.auth_params()[0].key, "username");
+        assert_eq!(meta.auth_params()[0].value, "user");
+        assert_eq!(meta.auth_params()[1].key, "password");
+        assert_eq!(meta.auth_params()[1].value, "pwd");
+
+        assert_eq!(meta.vars_pre_request().len(), 1);
+        assert_eq!(meta.vars_pre_request()[0].key, "a");
+        assert_eq!(meta.vars_post_response().len(), 1);
+        assert_eq!(meta.vars_post_response()[0].key, "b");
+
+        assert_eq!(meta.script_pre_request(), Some("console.log(\"pre\");"));
+        assert_eq!(meta.script_post_response(), Some("console.log(\"post\");"));
+        assert_eq!(meta.tests(), Some("test(\"ok\", () => {});"));
+        assert_eq!(meta.docs(), Some("Documentation du dossier."));
+
+        assert!(meta.has_headers);
+        assert!(meta.has_auth);
+        assert!(meta.has_pre_request_script);
+        assert!(meta.has_post_response_script);
+        assert!(meta.has_tests);
+        assert!(meta.has_vars);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use serde_norway::{Mapping, Value};
 use super::error::{LoadError, ParseError};
 use super::view::{
     AuthMode, BodyContent, BodyKind, BodyView, Environment, EnvironmentExtends, ExtraTabs,
-    FileMeta, KeyValue, RequestView, valid_environment_name,
+    FileMeta, FileMetaContent, KeyValue, RequestView, valid_environment_name,
 };
 
 /// Fichier racine d'une collection OpenCollection.
@@ -572,34 +572,86 @@ pub fn parse_item(source: &str) -> Result<Parsed<RequestView>, ParseError> {
     })
 }
 
+/// Paramètres du bloc `auth` d'un objet requête ou de valeurs par défaut.
+fn auth_parameters(map: &Mapping) -> Vec<KeyValue> {
+    let Some(auth_val) = get(map, "auth") else {
+        return Vec::new();
+    };
+    let Some(auth_map) = auth_val.as_mapping() else {
+        return Vec::new();
+    };
+    let mut params = Vec::new();
+    for (key, val) in auth_map {
+        let key_str = key_label(key);
+        if key_str == "type" {
+            continue;
+        }
+        let (val_str, is_enabled) = match untagged(val) {
+            Value::Mapping(inner) => {
+                let v = string_of(inner, "value").unwrap_or_default();
+                let e = enabled(inner);
+                (v, e)
+            }
+            other => (ensure_string(Some(other)).unwrap_or_default(), true),
+        };
+        params.push(KeyValue {
+            key: key_str,
+            value: val_str,
+            enabled: is_enabled,
+        });
+    }
+    params.sort_by(|a, b| a.key.cmp(&b.key));
+    params
+}
+
 /// Méta-données d'un bloc de valeurs par défaut (`request` de `folder.yml`
 /// ou de `opencollection.yml`).
 fn defaults_meta(
     name: Option<String>,
     seq: Option<u32>,
     request: Option<&Mapping>,
+    docs_value: Option<&Value>,
     notices: &mut Notices,
 ) -> FileMeta {
     let empty = Mapping::new();
     let request = request.unwrap_or(&empty);
     notices.unknown_keys(request, &DEFAULTS_KEYS, "request.");
     let found = scripts(request, notices, "request.");
-    let has_auth = !matches!(
-        auth(request, notices, "request."),
-        None | Some(AuthMode::Inherit)
-    );
-    let has_vars = !variables(request).is_empty()
-        || !post_response_variables(request, notices, "request.").is_empty();
+    let auth_mode = auth(request, notices, "request.");
+    let auth_params = auth_parameters(request);
+    let hdrs = headers(request);
+    let vars_pre = variables(request);
+    let vars_post = post_response_variables(request, notices, "request.");
+    let docs = content_of(docs_value);
+
+    let has_auth = !matches!(auth_mode, None | Some(AuthMode::Inherit));
+    let has_vars = !vars_pre.is_empty() || !vars_post.is_empty();
+    let has_headers = !hdrs.is_empty();
+    let has_pre_request_script = found.pre_request.is_some();
+    let has_post_response_script = found.post_response.is_some();
+    let has_tests = found.tests.is_some();
+
     FileMeta {
         name,
         seq,
-        has_headers: !headers(request).is_empty(),
+        has_headers,
         has_auth,
-        has_pre_request_script: found.pre_request.is_some(),
-        has_post_response_script: found.post_response.is_some(),
-        has_tests: found.tests.is_some(),
+        has_pre_request_script,
+        has_post_response_script,
+        has_tests,
         has_vars,
         ast: None,
+        content: Box::new(FileMetaContent {
+            headers: hdrs,
+            auth: auth_mode,
+            auth_params,
+            vars_pre_request: vars_pre,
+            vars_post_response: vars_post,
+            script_pre_request: found.pre_request,
+            script_post_response: found.post_response,
+            tests: found.tests,
+            docs,
+        }),
     }
 }
 
@@ -614,6 +666,7 @@ pub fn parse_folder(source: &str) -> Result<Parsed<FileMeta>, ParseError> {
         name,
         seq_of(info),
         mapping(&folder, "request"),
+        folder.get("docs"),
         &mut notices,
     );
     Ok(Parsed {
@@ -657,6 +710,7 @@ pub fn parse_collection(path: PathBuf, source: &str) -> Result<Parsed<Collection
         name.clone(),
         None,
         mapping(&collection, "request"),
+        collection.get("docs"),
         &mut notices,
     );
     Ok(Parsed {
