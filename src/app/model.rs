@@ -20,6 +20,7 @@ use crate::secrets::{Resolved, SecretLookup, SecretMapping, SecretSource, is_val
 use crate::writer::{EntrySection, EnvironmentVarEdit, FieldEdit, FileStamp};
 
 use super::filter::FilterState;
+use super::global_search::GlobalSearchPopup;
 use super::message::TextCapture;
 use super::search::SearchState;
 use super::text_input::TextInput;
@@ -899,6 +900,8 @@ pub struct Model {
     pub runner_options: RunnerOptionsConfig,
     /// Popup de configuration des options de campagne.
     pub runner_options_popup: Option<RunnerOptionsPopup>,
+    /// Popup de recherche globale par nom, méthode, chemin et URL (`Ctrl+K`).
+    pub global_search: Option<GlobalSearchPopup>,
     /// Répertoire par défaut de destination des rapports JUnit et HTML.
     pub reports_dir: PathBuf,
     /// Chemins des rapports exportés lors de la dernière exécution récursive.
@@ -1196,6 +1199,7 @@ impl Model {
             zoom: false,
             runner_options: RunnerOptionsConfig::default(),
             runner_options_popup: None,
+            global_search: None,
             reports_dir: default_reports_dir(),
             last_reports: Vec::new(),
         }
@@ -1245,6 +1249,9 @@ impl Model {
         // texte de saisie.
         if self.confirm.is_some() {
             return None;
+        }
+        if self.global_search.is_some() {
+            return Some(TextCapture::GlobalSearch);
         }
         match &self.secrets.input {
             Some(SecretInput::Name(_)) => return Some(TextCapture::SecretName),
