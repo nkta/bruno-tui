@@ -149,7 +149,7 @@ mod tests {
                 has_post_response_script: false,
                 has_tests: false,
                 has_assert: false,
-                assertions: Vec::new(),
+                extra: Box::default(),
             },
         })
     }

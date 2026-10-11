@@ -884,6 +884,26 @@ pub fn request_text_and_fields(
                 .map_or("non déclarée", auth_label)
                 .to_owned(),
         )),
+        RequestTab::Vars => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Variables pré-requête".to_owned(),
+                |lines, _| {
+                    entries(lines, view.vars_pre_request());
+                },
+            );
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Variables post-réponse".to_owned(),
+                |lines, _| {
+                    entries(lines, view.vars_post_response());
+                },
+            );
+        }
         RequestTab::Script => {
             lines.push(field(
                 "Script pré-requête",
@@ -896,11 +916,38 @@ pub fn request_text_and_fields(
         }
         RequestTab::Assert => {
             lines.push(field("Assertions", yes_no(view.has_assert)));
-            if !view.assertions.is_empty() {
-                entries(&mut lines, &view.assertions);
+            if !view.assertions().is_empty() {
+                entries(&mut lines, view.assertions());
             }
         }
         RequestTab::Tests => lines.push(field("Tests", yes_no(view.has_tests))),
+        RequestTab::Docs => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Documentation".to_owned(),
+                |lines, _| match view.docs() {
+                    Some(docs) if !docs.trim().is_empty() => {
+                        for l in docs.lines() {
+                            lines.push(Line::raw(format!("  {l}")));
+                        }
+                    }
+                    _ => lines.push(Line::raw("  aucune")),
+                },
+            );
+        }
+        RequestTab::Settings => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Settings".to_owned(),
+                |lines, _| {
+                    entries(lines, view.settings());
+                },
+            );
+        }
     }
     (Text::from(lines), field_lines, boxes)
 }
@@ -913,9 +960,14 @@ pub fn request_tab_is_empty(view: &crate::collection::RequestView, tab: RequestT
         RequestTab::Body => view.body.is_none(),
         RequestTab::Headers => view.headers.is_empty(),
         RequestTab::Auth => view.auth.is_none(),
+        RequestTab::Vars => {
+            view.vars_pre_request().is_empty() && view.vars_post_response().is_empty()
+        }
         RequestTab::Script => !view.has_pre_request_script && !view.has_post_response_script,
-        RequestTab::Assert => !view.has_assert && view.assertions.is_empty(),
+        RequestTab::Assert => !view.has_assert && view.assertions().is_empty(),
         RequestTab::Tests => !view.has_tests,
+        RequestTab::Docs => view.docs().is_none_or(|d| d.trim().is_empty()),
+        RequestTab::Settings => view.settings().is_empty(),
     }
 }
 
@@ -1963,6 +2015,12 @@ mod tests {
         assert!(!headers.contains("Paramètres"), "{headers}");
         model.request_tab = RequestTab::Auth;
         assert_eq!(detail_text(&model).lines.len(), 1);
+        model.request_tab = RequestTab::Vars;
+        assert_eq!(detail_text(&model).lines.len(), 6);
+        model.request_tab = RequestTab::Docs;
+        assert_eq!(detail_text(&model).lines.len(), 3);
+        model.request_tab = RequestTab::Settings;
+        assert_eq!(detail_text(&model).lines.len(), 3);
     }
 
     /// Barre d'onglets : onglet affiché en `ACTIVE_TAB`, onglets vides
@@ -1984,6 +2042,13 @@ mod tests {
         };
         assert_eq!(style_of("Auth"), theme::ACTIVE_TAB);
         assert_eq!(style_of("Corps"), theme::BORDER, "pas de corps : atténué");
+        assert_eq!(style_of("Vars"), theme::BORDER, "pas de vars : atténué");
+        assert_eq!(style_of("Docs"), theme::BORDER, "pas de docs : atténué");
+        assert_eq!(
+            style_of("Settings"),
+            theme::BORDER,
+            "pas de settings : atténué"
+        );
         assert_eq!(
             request_tab_at(RequestTab::Auth, 80, 1),
             Some(RequestTab::Params)
@@ -2065,6 +2130,57 @@ mod tests {
         ] {
             assert!(text.contains(expected), "`{expected}` absent :\n{text}");
         }
+    }
+
+    #[test]
+    fn extra_tabs_request() {
+        let source = "meta {\n  name: extra-tabs\n  type: http\n  seq: 15\n}\n\nget {\n  url: https://{{host}}/extra-tabs\n}\n\nvars:pre-request {\n  departingDate: 2020-01-01\n  ~returningDate: 2020-01-02\n}\n\nvars:post-response {\n  token: $res.body.token\n  @orderNumber: $res.body.orderNumber\n  ~petId: $res.body.id\n  ~@transactionId: $res.body.transactionId\n}\n\nsettings {\n  encodeUrl: true\n  followRedirects: false\n  maxRedirects: 0\n  timeout: 60000\n}\n\ndocs {\n  This request needs auth token to be set in the headers.\n}\n";
+        let file = crate::collection::BruFile::parse(source.to_owned()).expect("parse");
+        let view = crate::collection::RequestView::from_ast(&file).expect("vue");
+        let request = crate::collection::RequestNode {
+            path: "extra-tabs.bru".into(),
+            ast: Some(file),
+            view,
+        };
+
+        // Onglet Vars
+        let (vars_text, _, _) = request_text_and_fields(&request, None, RequestTab::Vars);
+        let vars_plain = plain(&vars_text);
+        assert!(vars_plain.contains("Variables pré-requête"));
+        assert!(vars_plain.contains("departingDate: 2020-01-01"));
+        assert!(vars_plain.contains("returningDate: 2020-01-02 (désactivé)"));
+        assert!(vars_plain.contains("Variables post-réponse"));
+        assert!(vars_plain.contains("token: $res.body.token"));
+        assert!(vars_plain.contains("@orderNumber: $res.body.orderNumber"));
+        assert!(vars_plain.contains("petId: $res.body.id (désactivé)"));
+        assert!(vars_plain.contains("@transactionId: $res.body.transactionId (désactivé)"));
+
+        // Onglet Docs
+        let (docs_text, _, _) = request_text_and_fields(&request, None, RequestTab::Docs);
+        let docs_plain = plain(&docs_text);
+        assert!(docs_plain.contains("Documentation"));
+        assert!(docs_plain.contains("This request needs auth token to be set in the headers."));
+
+        // Onglet Settings
+        let (settings_text, _, _) = request_text_and_fields(&request, None, RequestTab::Settings);
+        let settings_plain = plain(&settings_text);
+        assert!(settings_plain.contains("Settings"));
+        assert!(settings_plain.contains("encodeUrl: true"));
+        assert!(settings_plain.contains("followRedirects: false"));
+        assert!(settings_plain.contains("maxRedirects: 0"));
+        assert!(settings_plain.contains("timeout: 60000"));
+
+        // Vérification que les onglets ne sont pas vides
+        assert!(!request_tab_is_empty(&request.view, RequestTab::Vars));
+        assert!(!request_tab_is_empty(&request.view, RequestTab::Docs));
+        assert!(!request_tab_is_empty(&request.view, RequestTab::Settings));
+        assert!(request_tab_is_empty(&request.view, RequestTab::Params));
+        assert!(request_tab_is_empty(&request.view, RequestTab::Body));
+        assert!(request_tab_is_empty(&request.view, RequestTab::Headers));
+        assert!(request_tab_is_empty(&request.view, RequestTab::Auth));
+        assert!(request_tab_is_empty(&request.view, RequestTab::Script));
+        assert!(request_tab_is_empty(&request.view, RequestTab::Assert));
+        assert!(request_tab_is_empty(&request.view, RequestTab::Tests));
     }
 
     #[test]

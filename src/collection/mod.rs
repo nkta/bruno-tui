@@ -20,5 +20,6 @@ pub use error::{LoadError, ParseError};
 pub use loader::{BruLoader, CollectionLoader};
 pub use tree::{Collection, ErrorNode, FolderNode, RequestNode, TreeNode};
 pub use view::{
-    AuthMode, BodyContent, BodyKind, BodyView, Environment, FileMeta, KeyValue, RequestView,
+    AuthMode, BodyContent, BodyKind, BodyView, Environment, ExtraTabs, FileMeta, KeyValue,
+    RequestView,
 };

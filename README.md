@@ -50,6 +50,28 @@ d'édition non enregistrée demande confirmation.
 | `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
 | `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
 
+## Panneau Détail
+
+Affiche la requête sélectionnée selon dix onglets, comme Bruno bureau :
+**Params**, **Corps**, **En-têtes**, **Auth**, **Vars**, **Script**,
+**Assert**, **Tests**, **Docs** et **Settings**. Les onglets vides sont
+atténués ; une barre d'onglets adaptative fait défiler les onglets sur les
+écrans étroits.
+
+| Touche | Effet |
+|---|---|
+| `↑`/`k`, `↓`/`j` | défiler dans le détail |
+| `Début`/`g`, `Fin`/`G` | début, fin du détail |
+| `←`/`h`, `→`/`l` | onglet précédent/suivant de la requête (hors édition) |
+| `Entrée` / `e` | ouvrir une session d'édition |
+| `/` | chercher dans l'onglet affiché ; `n`/`N` : occurrence suivante/précédente |
+| `v` | sélection visuelle de lignes ; `y` copie dans le presse-papiers |
+| `Clic` | cliquer sur un onglet pour l'afficher |
+
+Les onglets Vars, Docs et Settings sont en lecture seule : pendant une
+session d'édition, ils ne sont pas des cibles éditables et la navigation
+entre champs reste inchangée.
+
 ## Édition d'une requête
 
 Dans le panneau Détail, `Entrée` (ou `e`) ouvre une session d'édition de la
