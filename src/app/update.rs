@@ -4364,6 +4364,32 @@ mod tests {
         StatusMessage,
     };
     use crate::app::test_support::{loaded_model, runner_probe_model, select, selected_name};
+
+    /// Le popup `O` reste utilisable sur un terminal de 80×24 : le champ
+    /// sous le curseur est toujours visible, du premier au dernier.
+    #[test]
+    fn runner_options_popup_scrolls_on_80x24() {
+        let mut model = loaded_model((80, 24));
+        update(&mut model, Message::ToggleRunnerOptions);
+        let screen = crate::app::test_support::render(&model, 80, 24);
+        assert!(
+            screen.iter().any(|l| l.contains("▶ Tags inclus")),
+            "{screen:#?}"
+        );
+        // Jusqu'au bout de la liste des champs : la sélection défile.
+        for _ in 0..40 {
+            update(&mut model, Message::Down);
+        }
+        let screen = crate::app::test_support::render(&model, 80, 24);
+        assert!(
+            screen.iter().any(|l| l.contains("▶")),
+            "champ sélectionné hors écran : {screen:#?}"
+        );
+        assert!(
+            !screen.iter().any(|l| l.contains("▶ Tags inclus")),
+            "{screen:#?}"
+        );
+    }
     use crate::collection::{LoadError, RequestView};
     use crate::runner;
 

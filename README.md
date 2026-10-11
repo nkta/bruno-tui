@@ -264,8 +264,8 @@ sélectionnée a un résultat avec un corps non vide.
     `~/.local/state/bruno-tui/reports/`, repli vers `./reports`), horodatés avec le nom
     du dossier cible. Le masquage des en-têtes sensibles (`--reporter-skip-all-headers`)
     est activé par défaut et peut être basculé.
-  - `Entrée` édite ou bascule un champ, `Ctrl+R` ou `Ctrl+Enter` lance directement
-    la campagne avec les options configurées, `Échap` enregistre et referme le popup.
+  - `Entrée` édite ou bascule un champ, `r` (hors saisie) lance directement la
+    campagne avec les options configurées, `Échap` enregistre et referme le popup.
 - **Recherche globale** (`Ctrl+K`) : popup centré de recherche en direct dans l'ensemble
   des requêtes de la collection chargée (nom affiché, méthode HTTP, chemin relatif et URL brute
   telle qu'écrite avec ses variables non résolues). `↑`/`↓` choisit dans la liste ordonnée
