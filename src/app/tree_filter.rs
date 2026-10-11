@@ -51,7 +51,7 @@ impl TreeFilterState {
 
 /// Supprime les accents, développe les ligatures et convertit en minuscules
 /// pour une comparaison insensible à la casse et aux diacritiques.
-fn normalize_str(s: &str) -> String {
+pub fn normalize_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

@@ -11,6 +11,7 @@ pub mod diagnostics;
 pub mod editor;
 pub mod event;
 pub mod filter;
+pub mod global_search;
 pub mod message;
 pub mod model;
 pub mod mouse;
