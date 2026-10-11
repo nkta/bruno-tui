@@ -136,6 +136,8 @@ URL finale si redirigée).
 | `/` | chercher dans l'onglet courant ; `n`/`N` : occurrence suivante/précédente |
 | `\|` | filtrer le corps avec une expression `jq` |
 | `v` | sélection visuelle ; `y` copie |
+| `c` | copier en commande `curl` (en-têtes d'auth masqués) |
+| `u` | copier en commande `curl` complète (confirmation si des secrets sont présents) |
 | `Ctrl+E` | ouvrir le corps brut de la réponse (non filtré) dans `$VISUAL`, `$EDITOR`, ou `nano` — consultation seule, rien n'est relu |
 
 `Ctrl+E` fonctionne quel que soit le focus courant, tant qu'une requête

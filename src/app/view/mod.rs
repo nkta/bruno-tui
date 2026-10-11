@@ -708,6 +708,11 @@ fn search_input_line(model: &Model) -> Option<String> {
 fn status_message_text(message: &StatusMessage) -> String {
     match message {
         StatusMessage::Copied => "Copié dans le presse-papiers".to_owned(),
+        StatusMessage::CopiedCurl { masked: true } => {
+            "Commande curl copiée (en-têtes d'auth masqués)".to_owned()
+        }
+        StatusMessage::CopiedCurl { masked: false } => "Commande curl copiée (complète)".to_owned(),
+        StatusMessage::NoCurlResult => "Aucun résultat d'exécution à copier en curl".to_owned(),
         StatusMessage::ClipboardError(reason) => format!("Échec de la copie : {reason}"),
         StatusMessage::NoMatch => "Aucune correspondance".to_owned(),
         StatusMessage::SaveError(reason) => format!("Échec de sauvegarde : {reason}"),
@@ -818,6 +823,9 @@ fn status_line(model: &Model) -> String {
             PendingConfirm::DiscardEdit => "Abandonner les modifications ? (y/n)".to_owned(),
             PendingConfirm::QuitWithUnsavedEdit => {
                 "Quitter sans sauvegarder les modifications ? (y/n)".to_owned()
+            }
+            PendingConfirm::CopyUnmaskedCurl => {
+                "Copier la commande curl avec les secrets en clair ? (y/n)".to_owned()
             }
         };
     }
@@ -1422,6 +1430,38 @@ mod tests {
             "{}",
             screen[28]
         );
+    }
+
+    #[test]
+    fn curl_status_messages_and_confirm_render_in_status_bar() {
+        let mut model = loaded_model((100, 30));
+
+        model.last_status = Some(StatusMessage::CopiedCurl { masked: true });
+        let line = status_line(&model);
+        assert!(
+            line.contains("Commande curl copiée (en-têtes d'auth masqués)"),
+            "{line}"
+        );
+
+        model.last_status = Some(StatusMessage::CopiedCurl { masked: false });
+        let line = status_line(&model);
+        assert!(line.contains("Commande curl copiée (complète)"), "{line}");
+
+        model.last_status = Some(StatusMessage::NoCurlResult);
+        let line = status_line(&model);
+        assert!(
+            line.contains("Aucun résultat d'exécution à copier en curl"),
+            "{line}"
+        );
+
+        model.confirm = Some(crate::app::model::PendingConfirm::CopyUnmaskedCurl);
+        let line = status_line(&model);
+        assert!(
+            line.contains("Copier la commande curl avec les secrets en clair ? (y/n)"),
+            "{line}"
+        );
+        let screen = render(&model, 100, 30);
+        assert!(screen[28].contains("Copier la commande curl avec les secrets en clair ? (y/n)"));
     }
 
     #[test]

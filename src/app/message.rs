@@ -234,9 +234,11 @@ pub enum Message {
     /// `d`, hors saisie : oublie une variable dans le panneau des variables
     /// secrètes, ou supprime l'entrée sous le curseur en sélection de champ.
     Delete,
-    /// `c`, hors saisie, en sélection de champ : renomme la clé de l'entrée
-    /// sous le curseur.
+    /// `c`, hors saisie, en sélection de champ (Détail) : renomme la clé
+    /// de l'entrée sous le curseur ; en focus Réponse : copie en curl masqué.
     Rename,
+    /// `u`, hors saisie, en focus Réponse : copie la commande curl complète.
+    CopyCurlFull,
     /// Caractère tapé pendant une saisie de nom ou de valeur secrète.
     SecretInput(MaskedChar),
     /// `Retour arrière` pendant une saisie secrète.
@@ -354,6 +356,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('a') => Message::Add,
         KeyCode::Char('d') => Message::Delete,
         KeyCode::Char('c') => Message::Rename,
+        KeyCode::Char('u') => Message::CopyCurlFull,
         KeyCode::Char('/') => Message::StartSearch,
         KeyCode::Char('|') => Message::OpenFilter,
         KeyCode::Char('f') => Message::OpenTreeFilter,

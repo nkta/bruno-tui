@@ -230,6 +230,14 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "copier la sélection dans le presse-papiers",
             },
             HelpEntry {
+                key: "c",
+                effect: "copier en commande curl (en-têtes d'auth masqués)",
+            },
+            HelpEntry {
+                key: "u",
+                effect: "copier en commande curl complète (avec secrets)",
+            },
+            HelpEntry {
                 key: "Ctrl+E",
                 effect: "ouvrir le corps brut dans l'éditeur externe",
             },
