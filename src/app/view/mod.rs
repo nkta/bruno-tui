@@ -684,7 +684,14 @@ fn run_status(model: &Model, node: &TreeNode) -> tree::RunStatus {
 fn active_run_message(model: &Model) -> Option<String> {
     let active = model.run.active.as_ref()?;
     let target = active.target.display();
-    if active.recursive {
+    if let Some(series) = model.series.as_ref().filter(|_| active.recursive) {
+        Some(format!(
+            "Exécution récursive de {target}… (env {}/{} : {}) (Ctrl+X annuler)",
+            series.current + 1,
+            series.environments.len(),
+            series.current_environment().unwrap_or_default()
+        ))
+    } else if active.recursive {
         Some(format!("Exécution récursive de {target}… (Ctrl+X annuler)"))
     } else {
         Some(format!("Exécution de {target}… (Ctrl+X annuler)"))

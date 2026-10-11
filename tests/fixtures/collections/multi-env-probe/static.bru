@@ -1,0 +1,15 @@
+meta {
+  name: static
+  type: http
+  seq: 2
+}
+
+get {
+  url: http://127.0.0.1:18765/data.json
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}

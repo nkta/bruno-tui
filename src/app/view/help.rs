@@ -372,6 +372,14 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 key: "O",
                 effect: "options de campagne et export des rapports",
             },
+            HelpEntry {
+                key: "O puis Espace",
+                effect: "cocher des environnements : un bru run par environnement",
+            },
+            HelpEntry {
+                key: "Ctrl+X",
+                effect: "annuler l'exécution en cours et la suite de la série",
+            },
         ],
     },
 ];

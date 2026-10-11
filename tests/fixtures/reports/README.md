@@ -105,3 +105,25 @@ Le rapport contient 2 itérations (`iterationIndex: 0` et `iterationIndex: 1`),
 chacune contenant le résultat de `req.bru`. Permet de vérifier la gestion
 des itérations multiples et l'affichage dans le TUI sans écrasement.
 
+
+## `multi-env-up.json` et `multi-env-down.json`
+
+- Version : `bru` 4.2.1 (Linux)
+- Date de capture : 2026-10-12
+- Collection : `tests/fixtures/collections/multi-env-probe/`
+- Commande : `scripts/gen-report-fixtures.sh`, soit
+  `bru run -r --env <up|down> --reporter-json /dev/fd/3 3>multi-env-<env>.json`
+  à la racine de la collection, avec `tests/fixtures/collections/runner-probe/www`
+  servi sur `127.0.0.1:18765`
+- Codes de sortie : 0 (`up`), 1 (`down`)
+
+Cas couvert : la même campagne lancée sur deux environnements dont les
+verdicts divergent (tableau comparatif du panneau Campagne).
+
+| Requête | `up` | `down` | Particularité |
+|---|---|---|---|
+| `data` | `pass` / `200` | `error` / `"error"` | `{{baseUrl}}` vers le port fermé 18799 sur `down` |
+| `static` | `pass` / `200` | `pass` / `200` | URL fixe : même verdict partout |
+| `skip` | `skipped` | `skipped` | sautée par `bru.runner.skipRequest()` |
+
+Aucun secret.

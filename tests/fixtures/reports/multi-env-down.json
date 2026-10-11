@@ -1,0 +1,159 @@
+[
+  {
+    "iterationIndex": 0,
+    "results": [
+      {
+        "test": {
+          "filename": "data.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18799/data.json",
+          "headers": {
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "bruno-runtime/4.2.1",
+            "Accept-Encoding": "gzip, compress, deflate, br",
+            "Host": "127.0.0.1:18799",
+            "Connection": "keep-alive",
+            "content-type": null
+          }
+        },
+        "response": {
+          "status": "error",
+          "statusText": null,
+          "headers": null,
+          "data": null,
+          "url": null,
+          "responseTime": 0,
+          "duration": 0,
+          "size": 0
+        },
+        "error": "connect ECONNREFUSED 127.0.0.1:18799",
+        "status": "error",
+        "assertionResults": [],
+        "testResults": [],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.094909232,
+        "name": "data",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-multi-env/tests/fixtures/collections/multi-env-probe/data",
+        "path": "data",
+        "iterationIndex": 0
+      },
+      {
+        "test": {
+          "filename": "static.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "http://127.0.0.1:18765/data.json",
+          "headers": {
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "bruno-runtime/4.2.1",
+            "Accept-Encoding": "gzip, compress, deflate, br",
+            "Host": "127.0.0.1:18765",
+            "Connection": "keep-alive",
+            "content-type": null
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "headers": {
+            "server": "SimpleHTTP/0.6 Python/3.12.3",
+            "date": "Sun, 11 Oct 2026 22:00:30 GMT",
+            "content-type": "application/json",
+            "content-length": "21",
+            "last-modified": "Sun, 11 Oct 2026 19:59:42 GMT"
+          },
+          "data": {
+            "a": [
+              1,
+              2
+            ],
+            "b": null
+          },
+          "url": "http://127.0.0.1/data.json",
+          "responseTime": 3,
+          "duration": 3,
+          "size": 21
+        },
+        "error": null,
+        "status": "pass",
+        "assertionResults": [
+          {
+            "uid": "93Sj77Al3oxriEG_UTLaL",
+            "lhsExpr": "res.status",
+            "rhsExpr": "eq 200",
+            "rhsOperand": "200",
+            "operator": "eq",
+            "status": "pass"
+          }
+        ],
+        "testResults": [],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.027313561,
+        "name": "static",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-multi-env/tests/fixtures/collections/multi-env-probe/static",
+        "path": "static",
+        "iterationIndex": 0
+      },
+      {
+        "test": {
+          "filename": "skip.bru"
+        },
+        "request": {
+          "method": "GET",
+          "url": "{{baseUrl}}/data.json",
+          "headers": {
+            "content-type": null
+          }
+        },
+        "response": {
+          "status": "skipped",
+          "statusText": "request skipped via pre-request script",
+          "data": null,
+          "responseTime": 0,
+          "duration": 0,
+          "size": 0
+        },
+        "error": null,
+        "status": "skipped",
+        "skipped": true,
+        "assertionResults": [],
+        "testResults": [],
+        "preRequestTestResults": [],
+        "postResponseTestResults": [],
+        "shouldStopRunnerExecution": false,
+        "runDuration": 0.141201552,
+        "name": "skip",
+        "suitename": "/home/nicolas/.herdr/worktrees/bruno-tui/feat-multi-env/tests/fixtures/collections/multi-env-probe/skip",
+        "path": "skip",
+        "iterationIndex": 0
+      }
+    ],
+    "summary": {
+      "totalRequests": 3,
+      "passedRequests": 1,
+      "failedRequests": 0,
+      "errorRequests": 1,
+      "skippedRequests": 1,
+      "skippedByBail": 0,
+      "totalAssertions": 1,
+      "passedAssertions": 1,
+      "failedAssertions": 0,
+      "totalTests": 0,
+      "passedTests": 0,
+      "failedTests": 0,
+      "totalPreRequestTests": 0,
+      "passedPreRequestTests": 0,
+      "failedPreRequestTests": 0,
+      "totalPostResponseTests": 0,
+      "passedPostResponseTests": 0,
+      "failedPostResponseTests": 0
+    }
+  }
+]

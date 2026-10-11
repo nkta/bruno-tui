@@ -149,6 +149,7 @@ impl RunnerOptions {
 /// Configuration des options de campagne mémorisée pour la session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerOptionsConfig {
+    pub environments: Vec<String>,
     pub tags: Vec<String>,
     pub exclude_tags: Vec<String>,
     pub delay_ms: Option<u64>,
@@ -174,6 +175,7 @@ pub struct RunnerOptionsConfig {
 impl Default for RunnerOptionsConfig {
     fn default() -> Self {
         Self {
+            environments: Vec::new(),
             tags: Vec::new(),
             exclude_tags: Vec::new(),
             delay_ms: None,
@@ -201,7 +203,8 @@ impl Default for RunnerOptionsConfig {
 impl RunnerOptionsConfig {
     /// Indique si au moins une option influençant l'exécution ou l'export est active.
     pub fn has_active_options(&self) -> bool {
-        !self.tags.is_empty()
+        !self.environments.is_empty()
+            || !self.tags.is_empty()
             || !self.exclude_tags.is_empty()
             || self.delay_ms.is_some()
             || self.bail
@@ -225,6 +228,9 @@ impl RunnerOptionsConfig {
     /// Résumé textuel court des options actives pour l'affichage en ligne d'état ou en-tête.
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
+        if !self.environments.is_empty() {
+            parts.push(format!("envs: {}", self.environments.join(",")));
+        }
         if !self.tags.is_empty() {
             parts.push(format!("tags: {}", self.tags.join(",")));
         }
@@ -541,6 +547,11 @@ mod tests {
         assert_eq!(config.summary(), "aucune");
         assert!(!config.has_active_options());
 
+        config.environments = vec!["dev".into(), "staging".into()];
+        assert_eq!(config.summary(), "envs: dev,staging");
+        assert!(config.has_active_options());
+
+        config.environments.clear();
         config.tags = vec!["smoke".into()];
         config.bail = true;
         config.insecure = true;

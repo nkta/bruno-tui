@@ -10,13 +10,15 @@ use super::filter::{FilterState, evaluate};
 use super::global_search::GlobalSearchPopup;
 use super::message::{InputKey, Message, MouseInput, MouseKind, TextCapture};
 use super::model::{
-    CampaignFailure, CampaignFilter, CampaignItem, CampaignItemStatus, CampaignSummary,
-    ClipboardSource, CollectionState, DetailSelection, Drag, DragPanel, EditSession, EditState,
-    EditableField, EnvironmentEditSession, EnvironmentEditState, Exit, Focus, HistoryEntry,
-    HistoryOutcome, InputTarget, Model, RequestTab, ResponseTab, RunnerOptionsField,
-    RunnerOptionsPopup, SecretError, SecretInput, StatusMessage, all_rows, environment_name_at,
-    field_enabled, field_value, field_value_committed, secret_env_vars, secret_lookups,
-    secret_rows, section_entries, selected_response_body, tree_node_at, visible_rows,
+    CampaignComparison, CampaignFailure, CampaignFilter, CampaignItem, CampaignItemStatus,
+    CampaignSummary, CampaignView, ClipboardSource, CollectionState, DetailSelection, Drag,
+    DragPanel, EditSession, EditState, EditableField, EnvRun, EnvRunOutcome, EnvSeries,
+    EnvironmentEditSession, EnvironmentEditState, Exit, Focus, HistoryEntry, HistoryOutcome,
+    InputTarget, Model, RequestTab, ResponseTab, RunnerOptionsField, RunnerOptionsPopup,
+    SecretError, SecretInput, StatusMessage, all_rows, environment_name_at, field_enabled,
+    field_value, field_value_committed, secret_env_vars, secret_env_vars_for_env, secret_lookups,
+    secret_rows, secret_rows_for_env, secrets_panel_environment, section_entries,
+    selected_response_body, tree_node_at, visible_rows,
 };
 use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match};
 use super::text_input::TextInput;
@@ -562,7 +564,10 @@ fn apply(model: &mut Model, message: Message) -> Command {
             if model.loaded().is_some() {
                 model.runner_options_popup = match model.runner_options_popup.take() {
                     Some(_) => None,
-                    None => Some(RunnerOptionsPopup::from_config(&model.runner_options)),
+                    None => Some(RunnerOptionsPopup::from_config(
+                        &model.runner_options,
+                        model.loaded(),
+                    )),
                 };
             }
             Command::None
@@ -606,10 +611,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
             });
             Command::None
         }
-        Message::RunFinished(event) => {
-            run_finished(model, event);
-            Command::None
-        }
+        Message::RunFinished(event) => run_finished(model, event),
         Message::StartSearch => {
             start_search(model);
             Command::None
@@ -918,16 +920,7 @@ fn run_selected(model: &mut Model) -> Command {
     if model.loaded().is_none() {
         return Command::None;
     }
-    if should_propose_secrets(model) {
-        let missing = first_missing_declared_secret(model);
-        model.secrets.pending_run = Some((target, recursive));
-        model.secrets.selected = missing;
-        model.secrets.input = None;
-        model.secrets.error = None;
-        model.focus = Focus::Secrets;
-        return Command::None;
-    }
-    start_run(model, target, recursive)
+    begin_run(model, target, recursive)
 }
 
 /// Déclenche une campagne récursive depuis le popup d'options.
@@ -948,17 +941,7 @@ fn run_campaign_from_popup(model: &mut Model) -> Command {
         },
     }
     .unwrap_or_default();
-
-    if should_propose_secrets(model) {
-        let missing = first_missing_declared_secret(model);
-        model.secrets.pending_run = Some((target, true));
-        model.secrets.selected = missing;
-        model.secrets.input = None;
-        model.secrets.error = None;
-        model.focus = Focus::Secrets;
-        return Command::None;
-    }
-    start_run(model, target, true)
+    begin_run(model, target, true)
 }
 
 /// Traite les messages lorsque le popup d'options de campagne est ouvert.
@@ -1103,6 +1086,10 @@ fn apply_runner_options_popup(model: &mut Model, message: Message) -> Command {
                 return Command::None;
             };
             match popup.current_field() {
+                RunnerOptionsField::Environment(_) => {
+                    popup.toggle_current();
+                    Command::None
+                }
                 RunnerOptionsField::Tags
                 | RunnerOptionsField::ExcludeTags
                 | RunnerOptionsField::Delay
@@ -1358,9 +1345,86 @@ fn apply_global_search(model: &mut Model, message: Message) -> Command {
     }
 }
 
-/// Construit l'exécution sur la cible, avec l'environnement, les options de campagne
-/// et les variables secrètes en vigueur à cet instant.
+/// Lance une exécution : propose d'abord les variables secrètes manquantes,
+/// puis, pour une campagne avec des environnements cochés, une série d'un
+/// `bru run` par environnement ; sinon une exécution unique sur
+/// l'environnement courant.
+fn begin_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> Command {
+    let environments = if recursive {
+        campaign_environments(model)
+    } else {
+        Vec::new()
+    };
+    if environments.is_empty() {
+        if should_propose_secrets(model, model.current_environment.as_deref()) {
+            propose_secrets(model, target, recursive, None, Vec::new());
+            return Command::None;
+        }
+        return start_run(model, target, recursive);
+    }
+    if let Some(env) = next_environment_to_propose(model, &environments) {
+        propose_secrets(model, target, true, Some(env), environments);
+        return Command::None;
+    }
+    start_series(model, target, environments)
+}
+
+/// Environnements cochés dans les options de campagne et encore déclarés
+/// par la collection, dans l'ordre de la collection.
+fn campaign_environments(model: &Model) -> Vec<String> {
+    let Some(collection) = model.loaded() else {
+        return Vec::new();
+    };
+    collection
+        .environments
+        .iter()
+        .flatten()
+        .map(|env| &env.name)
+        .filter(|name| model.runner_options.environments.contains(name))
+        .cloned()
+        .collect()
+}
+
+/// Démarre une série : la première exécution part tout de suite, les
+/// suivantes à la réception de l'issue de la précédente (`run_finished`).
+fn start_series(
+    model: &mut Model,
+    target: std::path::PathBuf,
+    environments: Vec<String>,
+) -> Command {
+    model.comparison = None;
+    model.series = Some(EnvSeries::new(target, environments));
+    start_series_step(model)
+}
+
+/// Lance l'exécution de l'environnement courant de la série.
+fn start_series_step(model: &mut Model) -> Command {
+    let Some(series) = &model.series else {
+        return Command::None;
+    };
+    let target = series.target.clone();
+    let env = series.current_environment().map(str::to_owned);
+    let command = start_run_in(model, target, true, env);
+    if matches!(command, Command::None) {
+        model.series = None;
+    }
+    command
+}
+
+/// Exécution sur l'environnement courant.
 fn start_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> Command {
+    let env = model.current_environment.clone();
+    start_run_in(model, target, recursive, env)
+}
+
+/// Construit l'exécution sur la cible et l'environnement donnés, avec les
+/// options de campagne et les variables secrètes en vigueur à cet instant.
+fn start_run_in(
+    model: &mut Model,
+    target: std::path::PathBuf,
+    recursive: bool,
+    env: Option<String>,
+) -> Command {
     let Some(root) = model.loaded().map(|collection| collection.root.clone()) else {
         return Command::None;
     };
@@ -1372,7 +1436,16 @@ fn start_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> 
     } else {
         (crate::runner::RunnerOptions::default(), Vec::new())
     };
-    model.last_reports = reports;
+    // Une série cumule les rapports exportés de chacune de ses exécutions.
+    if model
+        .series
+        .as_ref()
+        .is_some_and(|series| series.current > 0)
+    {
+        model.last_reports.extend(reports);
+    } else {
+        model.last_reports = reports;
+    }
     let targets = if target.as_os_str().is_empty() {
         Vec::new()
     } else {
@@ -1383,8 +1456,8 @@ fn start_run(model: &mut Model, target: std::path::PathBuf, recursive: bool) -> 
             collection_root: root,
             targets,
             recursive,
-            env: model.current_environment.clone(),
-            env_vars: secret_env_vars(model),
+            env_vars: secret_env_vars_for_env(model, env.as_deref()),
+            env,
             options,
         }),
         target,
@@ -1445,13 +1518,8 @@ fn run_failed_requests(model: &mut Model) -> Command {
         return Command::None;
     }
     let target = campaign.target.clone();
-    if should_propose_secrets(model) {
-        let missing = first_missing_declared_secret(model);
-        model.secrets.pending_run = Some((target, true));
-        model.secrets.selected = missing;
-        model.secrets.input = None;
-        model.secrets.error = None;
-        model.focus = Focus::Secrets;
+    if should_propose_secrets(model, model.current_environment.as_deref()) {
+        propose_secrets(model, target, true, None, Vec::new());
         return Command::None;
     }
     start_run_failures(model, target, failure_paths)
@@ -1466,28 +1534,52 @@ fn cycle_campaign_filter(model: &mut Model) {
     }
 }
 
-/// Vrai si l'environnement courant, non encore acquitté, déclare un
+/// Vrai si l'environnement donné, non encore acquitté, déclare un
 /// `vars:secret` resté sans valeur.
-fn should_propose_secrets(model: &Model) -> bool {
-    let Some(env) = &model.current_environment else {
+fn should_propose_secrets(model: &Model, env: Option<&str>) -> bool {
+    let Some(env) = env else {
         return false;
     };
     !model.secrets.acknowledged.contains(env)
-        && secret_rows(model)
+        && secret_rows_for_env(model, Some(env))
             .iter()
             .any(|row| row.declared && row.value.is_none())
 }
 
-/// Ligne de la première variable déclarée non fournie (0 à défaut).
-fn first_missing_declared_secret(model: &Model) -> usize {
-    secret_rows(model)
+/// Premier environnement de la série à qui proposer des secrets.
+fn next_environment_to_propose(model: &Model, environments: &[String]) -> Option<String> {
+    environments
         .iter()
-        .position(|row| row.declared && row.value.is_none())
-        .unwrap_or(0)
+        .find(|env| should_propose_secrets(model, Some(env)))
+        .cloned()
 }
 
-/// `r` dans le panneau des variables secrètes : lance l'exécution en
-/// attente avec les valeurs alors résolues, et acquitte l'environnement.
+/// Retient l'exécution et ouvre le panneau des secrets sur la première
+/// variable déclarée non fournie de `prompt_env` (l'environnement courant
+/// à défaut). `pending_envs` porte les environnements d'une série.
+fn propose_secrets(
+    model: &mut Model,
+    target: std::path::PathBuf,
+    recursive: bool,
+    prompt_env: Option<String>,
+    pending_envs: Vec<String>,
+) {
+    let secrets = &mut model.secrets;
+    secrets.pending_run = Some((target, recursive));
+    secrets.prompt_env = prompt_env;
+    secrets.pending_envs = pending_envs;
+    secrets.input = None;
+    secrets.error = None;
+    model.secrets.selected = secret_rows(model)
+        .iter()
+        .position(|row| row.declared && row.value.is_none())
+        .unwrap_or(0);
+    model.focus = Focus::Secrets;
+}
+
+/// `r` dans le panneau des variables secrètes : acquitte l'environnement
+/// proposé, puis passe à l'environnement suivant de la série qui manque de
+/// secrets, ou lance l'exécution en attente avec les valeurs alors résolues.
 fn launch_pending_run(model: &mut Model) -> Command {
     if model.run.active.is_some() {
         return Command::None;
@@ -1497,22 +1589,35 @@ fn launch_pending_run(model: &mut Model) -> Command {
     };
     acknowledge_environment(model);
     model.secrets.input = None;
+    model.secrets.prompt_env = None;
+    let environments = std::mem::take(&mut model.secrets.pending_envs);
+    if environments.is_empty() {
+        model.focus = Focus::Tree;
+        return start_run(model, target, recursive);
+    }
+    if let Some(env) = next_environment_to_propose(model, &environments) {
+        propose_secrets(model, target, recursive, Some(env), environments);
+        return Command::None;
+    }
     model.focus = Focus::Tree;
-    start_run(model, target, recursive)
+    start_series(model, target, environments)
 }
 
+/// Acquitte l'environnement montré par le panneau des secrets.
 fn acknowledge_environment(model: &mut Model) {
-    if let Some(env) = &model.current_environment {
-        model.secrets.acknowledged.insert(env.clone());
+    if let Some(env) = secrets_panel_environment(model).map(str::to_owned) {
+        model.secrets.acknowledged.insert(env);
     }
 }
 
-/// `Échap` ou `S` : ferme le panneau ; une exécution en attente est
-/// abandonnée et l'environnement acquitté.
+/// `Échap` ou `S` : ferme le panneau ; une exécution en attente (ou toute
+/// la série) est abandonnée et l'environnement proposé acquitté.
 fn close_secrets(model: &mut Model) {
     if model.secrets.pending_run.take().is_some() {
         acknowledge_environment(model);
     }
+    model.secrets.prompt_env = None;
+    model.secrets.pending_envs.clear();
     model.secrets.input = None;
     model.secrets.error = None;
     model.focus = Focus::Tree;
@@ -1525,6 +1630,8 @@ fn reset_secrets_for_collection(model: &mut Model) {
     let secrets = &mut model.secrets;
     secrets.resolved.clear();
     secrets.pending_run = None;
+    secrets.prompt_env = None;
+    secrets.pending_envs.clear();
     secrets.acknowledged.clear();
     secrets.input = None;
     secrets.error = None;
@@ -1624,6 +1731,10 @@ fn cancel_run(model: &mut Model) {
         && let Some(handle) = active.handle.take()
     {
         handle.cancel();
+        // Une série n'enchaîne pas les environnements suivants.
+        if let Some(series) = &mut model.series {
+            series.cancelled = true;
+        }
     }
 }
 
@@ -1656,18 +1767,48 @@ fn is_background_result(message: &Message) -> bool {
     )
 }
 
-fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
+/// Applique l'issue d'une exécution ; dans une série, renvoie le lancement
+/// de l'environnement suivant.
+fn run_finished(model: &mut Model, event: crate::runner::RunEvent) -> Command {
     let matches_active = model
         .run
         .active
         .as_ref()
         .is_some_and(|active| active.id == event.id);
     if !matches_active {
-        return;
+        return Command::None;
     }
     let Some(active) = model.run.active.take() else {
-        return;
+        return Command::None;
     };
+    // Environnement de la série dont c'est l'issue, et l'issue à conserver
+    // pour le tableau comparatif (`None` pour une annulation).
+    let series_env = model
+        .series
+        .as_ref()
+        .filter(|_| active.recursive)
+        .and_then(|series| series.current_environment().map(str::to_owned));
+    let series_run = series_env.as_ref().map(|env| {
+        let outcome = match &event.outcome {
+            crate::runner::RunOutcome::Completed {
+                report,
+                exit_code,
+                output,
+            } => Some(EnvRunOutcome::Completed {
+                report: report.clone(),
+                exit_code: *exit_code,
+                console: std::sync::Arc::from(output.as_str()),
+            }),
+            crate::runner::RunOutcome::Failed(error) => {
+                Some(EnvRunOutcome::Failed(error.to_string()))
+            }
+            crate::runner::RunOutcome::Cancelled => None,
+        };
+        outcome.map(|outcome| EnvRun {
+            environment: env.clone(),
+            outcome,
+        })
+    });
 
     let started_at = std::time::SystemTime::now();
     let history_outcome = match &event.outcome {
@@ -1770,6 +1911,10 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
             })
             .collect();
 
+        // Une campagne hors série remplace la comparaison précédente.
+        if series_env.is_none() {
+            model.comparison = None;
+        }
         model.campaign = Some(CampaignSummary {
             target: active.target.clone(),
             total,
@@ -1829,7 +1974,8 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
                             std::sync::Arc::clone(&output),
                             is_global_console,
                         )
-                        .with_iteration(current_iteration, total_iterations),
+                        .with_iteration(current_iteration, total_iterations)
+                        .with_environment(series_env.clone()),
                     );
                 }
             }
@@ -1847,6 +1993,84 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
             });
         }
     }
+    match series_run {
+        Some(run) => advance_series(model, run),
+        None => Command::None,
+    }
+}
+
+/// Range l'issue d'un environnement de la série, puis lance le suivant,
+/// sauf annulation (`run` vaut `None`, ou annulation demandée) ou fin de
+/// série.
+fn advance_series(model: &mut Model, run: Option<EnvRun>) -> Command {
+    let Some(series) = &mut model.series else {
+        return Command::None;
+    };
+    let stop = run.is_none() || series.cancelled;
+    if let Some(run) = run {
+        series.runs.push(run);
+    }
+    if !stop && series.current + 1 < series.environments.len() {
+        series.current += 1;
+        return start_series_step(model);
+    }
+    finish_series(model);
+    Command::None
+}
+
+/// Clôt la série : construit le tableau comparatif à partir d'au moins deux
+/// environnements exécutés et résume les verdicts dans la barre d'état.
+fn finish_series(model: &mut Model) {
+    let Some(series) = model.series.take() else {
+        return;
+    };
+    let planned = series.environments.len();
+    let done = series.runs.len();
+    let mut parts: Vec<String> = series
+        .runs
+        .iter()
+        .map(|run| match &run.outcome {
+            EnvRunOutcome::Completed { report, .. } => {
+                let results: Vec<_> = report
+                    .iterations()
+                    .iter()
+                    .flat_map(|iteration| &iteration.results)
+                    .collect();
+                let failed = results.iter().filter(|r| r.is_failure()).count();
+                format!(
+                    "{} : {} échec(s) sur {}",
+                    run.environment,
+                    failed,
+                    results.len()
+                )
+            }
+            EnvRunOutcome::Failed(_) => format!("{} : erreur", run.environment),
+        })
+        .collect();
+    if done < planned {
+        parts.push(format!("interrompue après {done}/{planned}"));
+    }
+    let hint = if done >= 2 {
+        " — C puis t pour comparer"
+    } else {
+        ""
+    };
+    let target = if series.target.as_os_str().is_empty() {
+        "collection entière".to_owned()
+    } else {
+        series.target.display().to_string()
+    };
+    let text = format!(
+        "Campagne multi-environnements {target} : {}{hint}",
+        parts.join(" · ")
+    );
+    if done >= 2 {
+        model.comparison = Some(CampaignComparison::build(series.target, series.runs));
+        model.campaign_view = CampaignView::Comparison;
+        model.campaign_selected = 0;
+        model.comparison_column = 0;
+    }
+    model.last_status = Some(StatusMessage::CampaignFinished(text));
 }
 
 /// Détermine la première raison d'échec d'une requête exécutée.
@@ -11509,8 +11733,15 @@ mod mouse_tests {
         assert!(!model.runner_options_popup.as_ref().unwrap().editing_text);
         assert!(model.runner_options_popup.as_ref().unwrap().error.is_none());
 
-        // Naviguer jusqu'au bouton Enregistrer (champ 20, 18 fois Down depuis champ 2) et presser Entrée
-        for _ in 0..18 {
+        // Naviguer jusqu'au bouton Enregistrer (champ fixe 20, 18 fois Down
+        // depuis le champ 2, plus une case par environnement) et presser Entrée
+        let envs = model
+            .runner_options_popup
+            .as_ref()
+            .unwrap()
+            .available_environments
+            .len();
+        for _ in 0..18 + envs {
             update(&mut model, Message::Down);
         }
         assert_eq!(
@@ -11771,8 +12002,14 @@ mod mouse_tests {
         update(&mut model, Message::ToggleField);
         assert!(model.runner_options_popup.as_ref().unwrap().parallel);
 
-        // Aller à SaveButton (champ 20) : 6x Down
-        for _ in 0..6 {
+        // Aller à SaveButton (champ fixe 20) : 6x Down, plus une case par environnement
+        let envs = model
+            .runner_options_popup
+            .as_ref()
+            .unwrap()
+            .available_environments
+            .len();
+        for _ in 0..6 + envs {
             update(&mut model, Message::Down);
         }
         assert_eq!(
@@ -11954,5 +12191,333 @@ mod mouse_tests {
             }),
         );
         assert!(model.global_search.is_none());
+    }
+}
+
+/// Campagnes multi-environnements : une exécution par environnement coché,
+/// enchaînées l'une après l'autre (`feat/multi-env`).
+#[cfg(test)]
+mod series_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::app::model::ActiveRun;
+    use crate::app::test_support::{loaded_model, render, select};
+    use crate::runner::{Report, RunEvent, RunId, RunOutcome};
+
+    fn report(json: &str) -> Report {
+        serde_json::from_str(json).expect("rapport de fixture")
+    }
+
+    fn up_report() -> Report {
+        report(include_str!(
+            "../../tests/fixtures/reports/multi-env-up.json"
+        ))
+    }
+
+    fn down_report() -> Report {
+        report(include_str!(
+            "../../tests/fixtures/reports/multi-env-down.json"
+        ))
+    }
+
+    fn args(request: &RunRequest) -> Vec<String> {
+        request
+            .bru_args()
+            .into_iter()
+            .map(|arg| arg.into_string().expect("argument UTF-8"))
+            .collect()
+    }
+
+    /// `parser-cases` : `local` déclare le secret `token`, `staging` aucun.
+    fn series_model(environments: &[&str]) -> Model {
+        let mut model = loaded_model((100, 30));
+        model.runner_options.environments = environments.iter().map(|e| e.to_string()).collect();
+        select(&mut model, "grp");
+        model
+    }
+
+    fn started(command: Command) -> RunRequest {
+        match command {
+            Command::StartRun { request, .. } => *request,
+            other => panic!("StartRun attendu, obtenu {other:?}"),
+        }
+    }
+
+    /// Simule le démarrage effectif par la boucle (sans poignée).
+    fn mark_active(model: &mut Model, id: u64) {
+        model.run.active = Some(ActiveRun {
+            id: RunId(id),
+            target: PathBuf::from("grp"),
+            recursive: true,
+            is_campaign: true,
+            handle: None,
+        });
+    }
+
+    fn finish(model: &mut Model, id: u64, outcome: RunOutcome) -> Command {
+        update(
+            model,
+            Message::RunFinished(RunEvent {
+                id: RunId(id),
+                outcome,
+            }),
+        )
+    }
+
+    fn completed(report: Report) -> RunOutcome {
+        RunOutcome::Completed {
+            report,
+            exit_code: Some(1),
+            output: "console".into(),
+        }
+    }
+
+    #[test]
+    fn popup_keeps_the_collection_order_of_checked_environments() {
+        let mut model = loaded_model((100, 30));
+        update(&mut model, Message::ToggleRunnerOptions);
+        let popup = model.runner_options_popup.as_mut().expect("popup");
+        assert_eq!(popup.available_environments, ["local", "staging"]);
+        // Cocher `staging` puis `local` : la campagne suit l'ordre de la collection.
+        popup.cursor = RunnerOptionsField::ENVIRONMENTS_AT + 1;
+        assert_eq!(popup.current_field(), RunnerOptionsField::Environment(1));
+        update(&mut model, Message::ToggleField);
+        update(&mut model, Message::Up);
+        update(&mut model, Message::Enter);
+        let popup = model.runner_options_popup.as_ref().expect("popup");
+        assert_eq!(popup.selected_environments, ["staging", "local"]);
+        assert_eq!(
+            popup.to_config().expect("config").environments,
+            ["local", "staging"]
+        );
+        // Un second appui décoche.
+        update(&mut model, Message::ToggleField);
+        let popup = model.runner_options_popup.as_ref().expect("popup");
+        assert_eq!(popup.to_config().expect("config").environments, ["staging"]);
+    }
+
+    #[test]
+    fn series_runs_each_environment_in_turn_with_the_same_options() {
+        let mut model = series_model(&["local", "staging"]);
+        model.secrets.acknowledged.insert("local".into());
+        model.runner_options.tags = vec!["smoke".into()];
+        model.current_environment = Some("staging".into());
+
+        let first = started(update(&mut model, Message::RunSelected));
+        assert_eq!(
+            args(&first),
+            [
+                "run",
+                "grp",
+                "-r",
+                "--env",
+                "local",
+                "--tags",
+                "smoke",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+        mark_active(&mut model, 1);
+        let screen = render(&model, 100, 30);
+        assert!(
+            screen.iter().any(|l| l.contains("env 1/2 : local")),
+            "{screen:#?}"
+        );
+
+        // Fin du premier : le second part aussitôt, mêmes options.
+        let second = started(finish(&mut model, 1, completed(up_report())));
+        assert_eq!(
+            args(&second),
+            [
+                "run",
+                "grp",
+                "-r",
+                "--env",
+                "staging",
+                "--tags",
+                "smoke",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+        assert!(model.comparison.is_none(), "pas de tableau avant la fin");
+        mark_active(&mut model, 2);
+        let screen = render(&model, 100, 30);
+        assert!(
+            screen.iter().any(|l| l.contains("env 2/2 : staging")),
+            "{screen:#?}"
+        );
+
+        // Fin du dernier : plus d'exécution, tableau comparatif prêt.
+        assert!(matches!(
+            finish(&mut model, 2, completed(down_report())),
+            Command::None
+        ));
+        assert!(model.series.is_none());
+        assert!(model.run.active.is_none());
+        let comparison = model.comparison.as_ref().expect("comparaison");
+        assert_eq!(comparison.environments, ["local", "staging"]);
+        assert_eq!(model.campaign_view, CampaignView::Comparison);
+        let Some(StatusMessage::CampaignFinished(text)) = &model.last_status else {
+            panic!("statut de fin attendu : {:?}", model.last_status);
+        };
+        assert!(text.contains("local : 0 échec(s) sur 3"), "{text}");
+        assert!(text.contains("staging : 1 échec(s) sur 3"), "{text}");
+        // Le panneau Réponse indique l'environnement du résultat conservé.
+        let outcome = &model.run.outcomes[&PathBuf::from("data.bru")];
+        assert_eq!(outcome.environment.as_deref(), Some("staging"));
+    }
+
+    #[test]
+    fn a_failed_environment_does_not_stop_the_series() {
+        let mut model = series_model(&["local", "staging"]);
+        model.secrets.acknowledged.insert("local".into());
+        started(update(&mut model, Message::RunSelected));
+        mark_active(&mut model, 1);
+        let next = finish(
+            &mut model,
+            1,
+            RunOutcome::Failed(crate::runner::RunError::BruNotFound),
+        );
+        assert_eq!(started(next).env.as_deref(), Some("staging"));
+        mark_active(&mut model, 2);
+        finish(&mut model, 2, completed(down_report()));
+        let comparison = model.comparison.as_ref().expect("comparaison");
+        assert!(comparison.errors[0].is_some());
+        assert!(comparison.errors[1].is_none());
+    }
+
+    #[test]
+    fn a_cancelled_run_ends_the_series_without_chaining() {
+        let mut model = series_model(&["local", "staging"]);
+        model.secrets.acknowledged.insert("local".into());
+        started(update(&mut model, Message::RunSelected));
+        mark_active(&mut model, 1);
+        assert!(matches!(
+            finish(&mut model, 1, RunOutcome::Cancelled),
+            Command::None
+        ));
+        assert!(model.series.is_none());
+        assert!(model.comparison.is_none());
+        let Some(StatusMessage::CampaignFinished(text)) = &model.last_status else {
+            panic!("statut de fin attendu : {:?}", model.last_status);
+        };
+        assert!(text.contains("interrompue après 0/2"), "{text}");
+    }
+
+    /// `Ctrl+X` pendant une exécution : même si `bru` livre malgré tout un
+    /// rapport (fin simultanée), la série n'enchaîne pas.
+    #[tokio::test]
+    async fn cancel_request_stops_the_chain_even_if_the_run_completes() {
+        let mut model = series_model(&["local", "staging"]);
+        model.secrets.acknowledged.insert("local".into());
+        let request = started(update(&mut model, Message::RunSelected));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let runner = crate::runner::BruRunner::with_program("bru-introuvable", tx);
+        let handle = runner.start(request);
+        let id = handle.id();
+        update(
+            &mut model,
+            Message::RunStarted {
+                id,
+                target: PathBuf::from("grp"),
+                recursive: true,
+                is_campaign: true,
+                handle,
+            },
+        );
+        update(&mut model, Message::CancelRun);
+        assert!(model.series.as_ref().is_some_and(|s| s.cancelled));
+        let command = update(
+            &mut model,
+            Message::RunFinished(RunEvent {
+                id,
+                outcome: completed(up_report()),
+            }),
+        );
+        assert!(matches!(command, Command::None));
+        assert!(model.series.is_none());
+        // Un seul environnement exécuté : pas de tableau comparatif.
+        assert!(model.comparison.is_none());
+    }
+
+    #[test]
+    fn secrets_are_proposed_per_environment_before_the_series() {
+        let mut model = series_model(&["local", "staging"]);
+        assert!(matches!(
+            update(&mut model, Message::RunSelected),
+            Command::None
+        ));
+        assert_eq!(model.focus, Focus::Secrets);
+        assert_eq!(model.secrets.prompt_env.as_deref(), Some("local"));
+        assert_eq!(model.secrets.pending_envs, ["local", "staging"]);
+        let rows = secret_rows(&model);
+        assert!(rows.iter().any(|row| row.name == "token" && row.declared));
+        let screen = render(&model, 100, 30);
+        assert!(
+            screen
+                .iter()
+                .any(|l| l.contains("Environnement : local (1/2)")),
+            "{screen:#?}"
+        );
+
+        // Saisie de `token`, puis `r` : `staging` ne manque de rien, la série démarre.
+        model
+            .secrets
+            .typed
+            .push(("token".into(), SecretString::new("valeur")));
+        let first = started(update(&mut model, Message::RunSelected));
+        assert_eq!(first.env.as_deref(), Some("local"));
+        assert!(args(&first).contains(&"token=valeur".to_owned()));
+        assert_eq!(model.focus, Focus::Tree);
+        assert!(model.secrets.prompt_env.is_none());
+        assert!(model.secrets.acknowledged.contains("local"));
+
+        // `staging` ne déclare pas `token` : la valeur ne lui est pas transmise.
+        mark_active(&mut model, 1);
+        let second = started(finish(&mut model, 1, completed(up_report())));
+        assert_eq!(second.env.as_deref(), Some("staging"));
+        assert!(!args(&second).iter().any(|a| a.starts_with("token=")));
+    }
+
+    #[test]
+    fn escape_in_the_secrets_panel_abandons_the_whole_series() {
+        let mut model = series_model(&["local", "staging"]);
+        update(&mut model, Message::RunSelected);
+        assert_eq!(model.focus, Focus::Secrets);
+        update(&mut model, Message::FocusTree);
+        assert!(model.secrets.pending_run.is_none());
+        assert!(model.secrets.prompt_env.is_none());
+        assert!(model.secrets.pending_envs.is_empty());
+        assert!(model.series.is_none());
+        assert!(model.secrets.acknowledged.contains("local"));
+    }
+
+    #[test]
+    fn a_single_checked_environment_replaces_the_current_one() {
+        let mut model = series_model(&["staging"]);
+        model.current_environment = Some("local".into());
+        model.secrets.acknowledged.insert("local".into());
+        let request = started(update(&mut model, Message::RunSelected));
+        assert_eq!(request.env.as_deref(), Some("staging"));
+        mark_active(&mut model, 1);
+        assert!(matches!(
+            finish(&mut model, 1, completed(up_report())),
+            Command::None
+        ));
+        assert!(model.comparison.is_none());
+        assert!(model.series.is_none());
+    }
+
+    #[test]
+    fn a_single_request_ignores_the_checked_environments() {
+        let mut model = series_model(&["local", "staging"]);
+        model.current_environment = Some("staging".into());
+        select(&mut model, "simple-get.bru");
+        let request = started(update(&mut model, Message::RunSelected));
+        assert_eq!(request.env.as_deref(), Some("staging"));
+        assert!(model.series.is_none());
     }
 }

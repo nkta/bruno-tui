@@ -13,7 +13,8 @@ use super::{inner, panel, theme};
 use crate::app::diagnostics::diagnostics;
 use crate::app::model::{
     CampaignFilter, CampaignItemStatus, EnvironmentEditSession, EnvironmentEditState, Focus,
-    HistoryEntry, HistoryOutcome, Model, RunnerOptionsPopup, SecretError, SecretInput, secret_rows,
+    HistoryEntry, HistoryOutcome, Model, RunnerOptionsField, RunnerOptionsPopup, SecretError,
+    SecretInput, secret_rows,
 };
 use crate::secrets::SecretSource;
 
@@ -546,6 +547,22 @@ fn secrets_header(model: &Model) -> Vec<Line<'static>> {
             ),
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
+        // Série multi-environnements : préciser l'environnement proposé.
+        if let Some(env) = &state.prompt_env {
+            let position = state
+                .pending_envs
+                .iter()
+                .position(|name| name == env)
+                .map(|index| format!(" ({}/{})", index + 1, state.pending_envs.len()))
+                .unwrap_or_default();
+            lines.push(Line::from(vec![
+                Span::styled("Environnement : ", theme::LABEL),
+                Span::styled(
+                    format!("{env}{position}"),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
     }
     match &state.input {
         Some(SecretInput::Name(name)) => lines.push(Line::from(vec![
@@ -744,7 +761,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Filtres & Exécution ──", theme::SECTION));
 
     // Champ 0: Tags inclus
-    let c0 = popup.cursor == 0;
+    let c0 = popup.current_field() == RunnerOptionsField::from_static_index(0);
     if c0 {
         selected_line_idx = lines.len();
     }
@@ -770,7 +787,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 1: Tags exclus
-    let c1 = popup.cursor == 1;
+    let c1 = popup.current_field() == RunnerOptionsField::from_static_index(1);
     if c1 {
         selected_line_idx = lines.len();
     }
@@ -796,7 +813,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 2: Délai en ms
-    let c2 = popup.cursor == 2;
+    let c2 = popup.current_field() == RunnerOptionsField::from_static_index(2);
     if c2 {
         selected_line_idx = lines.len();
     }
@@ -822,7 +839,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 3: Bail
-    let c3 = popup.cursor == 3;
+    let c3 = popup.current_field() == RunnerOptionsField::from_static_index(3);
     if c3 {
         selected_line_idx = lines.len();
     }
@@ -841,7 +858,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 4: Tests-only
-    let c4 = popup.cursor == 4;
+    let c4 = popup.current_field() == RunnerOptionsField::from_static_index(4);
     if c4 {
         selected_line_idx = lines.len();
     }
@@ -863,7 +880,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Réseau & TLS ──", theme::SECTION));
 
     // Champ 5: Insecure
-    let c5 = popup.cursor == 5;
+    let c5 = popup.current_field() == RunnerOptionsField::from_static_index(5);
     if c5 {
         selected_line_idx = lines.len();
     }
@@ -882,7 +899,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 6: Cacert
-    let c6 = popup.cursor == 6;
+    let c6 = popup.current_field() == RunnerOptionsField::from_static_index(6);
     if c6 {
         selected_line_idx = lines.len();
     }
@@ -908,7 +925,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 7: IgnoreTruststore
-    let c7 = popup.cursor == 7;
+    let c7 = popup.current_field() == RunnerOptionsField::from_static_index(7);
     if c7 {
         selected_line_idx = lines.len();
     }
@@ -931,7 +948,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 8: ClientCertConfig
-    let c8 = popup.cursor == 8;
+    let c8 = popup.current_field() == RunnerOptionsField::from_static_index(8);
     if c8 {
         selected_line_idx = lines.len();
     }
@@ -957,7 +974,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 9: NoProxy
-    let c9 = popup.cursor == 9;
+    let c9 = popup.current_field() == RunnerOptionsField::from_static_index(9);
     if c9 {
         selected_line_idx = lines.len();
     }
@@ -976,7 +993,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 10: DisableCookies
-    let c10 = popup.cursor == 10;
+    let c10 = popup.current_field() == RunnerOptionsField::from_static_index(10);
     if c10 {
         selected_line_idx = lines.len();
     }
@@ -998,7 +1015,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Données & Itérations ──", theme::SECTION));
 
     // Champ 11: CsvFilePath
-    let c11 = popup.cursor == 11;
+    let c11 = popup.current_field() == RunnerOptionsField::from_static_index(11);
     if c11 {
         selected_line_idx = lines.len();
     }
@@ -1024,7 +1041,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 12: JsonFilePath
-    let c12 = popup.cursor == 12;
+    let c12 = popup.current_field() == RunnerOptionsField::from_static_index(12);
     if c12 {
         selected_line_idx = lines.len();
     }
@@ -1050,7 +1067,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 13: IterationCount
-    let c13 = popup.cursor == 13;
+    let c13 = popup.current_field() == RunnerOptionsField::from_static_index(13);
     if c13 {
         selected_line_idx = lines.len();
     }
@@ -1076,7 +1093,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 14: Parallel
-    let c14 = popup.cursor == 14;
+    let c14 = popup.current_field() == RunnerOptionsField::from_static_index(14);
     if c14 {
         selected_line_idx = lines.len();
     }
@@ -1098,7 +1115,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Divers ──", theme::SECTION));
 
     // Champ 15: Sandbox
-    let c15 = popup.cursor == 15;
+    let c15 = popup.current_field() == RunnerOptionsField::from_static_index(15);
     if c15 {
         selected_line_idx = lines.len();
     }
@@ -1120,7 +1137,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 16: Verbose
-    let c16 = popup.cursor == 16;
+    let c16 = popup.current_field() == RunnerOptionsField::from_static_index(16);
     if c16 {
         selected_line_idx = lines.len();
     }
@@ -1142,7 +1159,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     lines.push(Line::styled("── Rapports & Export ──", theme::SECTION));
 
     // Champ 17: Rapport JUnit
-    let c17 = popup.cursor == 17;
+    let c17 = popup.current_field() == RunnerOptionsField::from_static_index(17);
     if c17 {
         selected_line_idx = lines.len();
     }
@@ -1161,7 +1178,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 18: Rapport HTML
-    let c18 = popup.cursor == 18;
+    let c18 = popup.current_field() == RunnerOptionsField::from_static_index(18);
     if c18 {
         selected_line_idx = lines.len();
     }
@@ -1180,7 +1197,7 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
     ]));
 
     // Champ 19: Masquer en-têtes sensibles
-    let c19 = popup.cursor == 19;
+    let c19 = popup.current_field() == RunnerOptionsField::from_static_index(19);
     if c19 {
         selected_line_idx = lines.len();
     }
@@ -1198,11 +1215,41 @@ pub fn render_runner_options_popup(popup: &RunnerOptionsPopup, frame: &mut Frame
         ),
     ]));
 
+    // --- Section Environnements ---
+    lines.push(Line::styled(
+        "── Environnements (un bru run par environnement coché) ──",
+        theme::SECTION,
+    ));
+    if popup.available_environments.is_empty() {
+        lines.push(Line::styled(
+            "  (aucun environnement déclaré dans la collection)",
+            theme::LABEL,
+        ));
+    } else {
+        for (i, env_name) in popup.available_environments.iter().enumerate() {
+            let is_cur = popup.current_field() == RunnerOptionsField::Environment(i);
+            if is_cur {
+                selected_line_idx = lines.len();
+            }
+            let is_checked = popup.selected_environments.contains(env_name);
+            let check_str = if is_checked { "[x]" } else { "[ ]" };
+            let style = if is_cur {
+                theme::SELECTION
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(if is_cur { "▶ " } else { "  " }, theme::FOCUS),
+                Span::styled(format!("{check_str} {env_name}"), style),
+            ]));
+        }
+    }
+
     lines.push(Line::default());
 
     // Boutons (Champs 20 et 21)
-    let c20 = popup.cursor == 20;
-    let c21 = popup.cursor == 21;
+    let c20 = popup.current_field() == RunnerOptionsField::from_static_index(20);
+    let c21 = popup.current_field() == RunnerOptionsField::from_static_index(21);
     if c20 || c21 {
         selected_line_idx = lines.len();
     }

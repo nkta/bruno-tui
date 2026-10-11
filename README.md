@@ -264,6 +264,16 @@ sélectionnée a un résultat avec un corps non vide.
     `~/.local/state/bruno-tui/reports/`, repli vers `./reports`), horodatés avec le nom
     du dossier cible. Le masquage des en-têtes sensibles (`--reporter-skip-all-headers`)
     est activé par défaut et peut être basculé.
+  - **Environnements** : une case par environnement de la collection (`Espace` ou
+    `Entrée` coche/décoche). Aucun coché : la campagne tourne sur l'environnement actif,
+    comme avant. Un seul coché : il remplace l'environnement actif pour la campagne.
+    Deux ou plus : la campagne lance un `bru run` par environnement coché, l'un après
+    l'autre (jamais en parallèle), dans l'ordre de la collection et avec les mêmes
+    options. La barre d'état suit la progression (`env 2/3 : staging`). `Ctrl+X` arrête
+    l'exécution en cours et n'enchaîne pas les suivantes. Avant de démarrer la série,
+    le panneau Secrets propose, environnement par environnement, les `vars:secret`
+    manquants (`r` passe à l'environnement suivant puis lance, `Échap` abandonne toute
+    la série). Une requête seule (`r` sur une requête) reste sur l'environnement actif.
   - `Entrée` édite ou bascule un champ, `r` (hors saisie) lance directement la
     campagne avec les options configurées, `Échap` enregistre et referme le popup.
 - **Recherche globale** (`Ctrl+K`) : popup centré de recherche en direct dans l'ensemble
