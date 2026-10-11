@@ -103,6 +103,17 @@ pub enum Command {
         path: std::path::PathBuf,
         bytes: Vec<u8>,
     },
+    /// Regroupe plusieurs commandes à exécuter séquentiellement par la boucle.
+    Batch(Vec<Command>),
+    /// Charger l'historique persistant depuis le disque.
+    LoadHistory {
+        root: std::path::PathBuf,
+    },
+    /// Sauvegarder l'historique persistant sur le disque.
+    SaveHistory {
+        root: std::path::PathBuf,
+        history: Vec<super::model::HistoryEntry>,
+    },
 }
 
 /// Applique un message au modèle.
@@ -279,19 +290,25 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::CollectionLoaded(result) => {
-            let command = match &result {
-                Ok(collection) => {
-                    let lookups = secret_lookups(&model.secrets.mappings, collection);
-                    if lookups.is_empty() {
-                        Command::None
-                    } else {
-                        Command::ResolveSecrets {
-                            root: collection.root.clone(),
-                            lookups,
-                        }
-                    }
+            let mut commands = Vec::new();
+            if let Ok(collection) = &result {
+                let lookups = secret_lookups(&model.secrets.mappings, collection);
+                if !lookups.is_empty() {
+                    commands.push(Command::ResolveSecrets {
+                        root: collection.root.clone(),
+                        lookups,
+                    });
                 }
-                Err(_) => Command::None,
+                if model.history_enabled {
+                    commands.push(Command::LoadHistory {
+                        root: collection.root.clone(),
+                    });
+                }
+            }
+            let command = match commands.len() {
+                0 => Command::None,
+                1 => commands.pop().unwrap(),
+                _ => Command::Batch(commands),
             };
             let is_reloading = matches!(model.collection, CollectionState::Loaded(_));
             // Échec d'un rechargement automatique (fichier momentanément
@@ -617,10 +634,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
             });
             Command::None
         }
-        Message::RunFinished(event) => {
-            run_finished(model, event);
-            Command::None
-        }
+        Message::RunFinished(event) => run_finished(model, event),
         Message::StartSearch => {
             start_search(model);
             Command::None
@@ -908,6 +922,26 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 }
                 Err(reason) => {
                     model.last_status = Some(StatusMessage::ExportError(reason));
+                }
+            }
+            Command::None
+        }
+        Message::HistoryLoaded {
+            root,
+            entries,
+            notice,
+        } => {
+            let is_matching_col = model.loaded().is_some_and(|col| col.root == root);
+            if is_matching_col {
+                model.history = std::collections::VecDeque::from(entries);
+                model.history_selected = 0;
+                if let Some(msg) = notice
+                    && let Some(col) = model.loaded_mut()
+                {
+                    col.notices.push(crate::collection::LoadNotice {
+                        path: std::path::PathBuf::from("history.json"),
+                        message: msg,
+                    });
                 }
             }
             Command::None
@@ -1740,20 +1774,21 @@ fn is_background_result(message: &Message) -> bool {
             | Message::SecretsResolved { .. }
             | Message::WatchReload(_)
             | Message::ResponseBodyExported { .. }
+            | Message::HistoryLoaded { .. }
     )
 }
 
-fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
+fn run_finished(model: &mut Model, event: crate::runner::RunEvent) -> Command {
     let matches_active = model
         .run
         .active
         .as_ref()
         .is_some_and(|active| active.id == event.id);
     if !matches_active {
-        return;
+        return Command::None;
     }
     let Some(active) = model.run.active.take() else {
-        return;
+        return Command::None;
     };
 
     let started_at = std::time::SystemTime::now();
@@ -1919,6 +1954,17 @@ fn run_finished(model: &mut Model, event: crate::runner::RunEvent) {
                 target: active.target,
             });
         }
+    }
+
+    if model.history_enabled
+        && let Some(col) = model.loaded()
+    {
+        Command::SaveHistory {
+            root: col.root.clone(),
+            history: model.history.iter().cloned().collect(),
+        }
+    } else {
+        Command::None
     }
 }
 
@@ -5734,6 +5780,32 @@ mod tests {
         assert_eq!(model.run.outcomes.len(), 2);
         assert!(model.run.outcomes.contains_key(Path::new("grp/x.bru")));
         assert!(model.run.outcomes.contains_key(Path::new("grp/y.bru")));
+    }
+
+    #[test]
+    fn run_finished_emits_save_history_when_enabled() {
+        let mut model = loaded_model((100, 30));
+        model.history_enabled = true;
+        model.run.active = Some(ActiveRun {
+            id: runner::RunId(7),
+            target: "grp".into(),
+            recursive: true,
+            is_campaign: true,
+            handle: None,
+        });
+        let report = sample_report(&["grp/x.bru"]);
+        let command = update(
+            &mut model,
+            Message::RunFinished(runner::RunEvent {
+                id: runner::RunId(7),
+                outcome: runner::RunOutcome::Completed {
+                    report,
+                    exit_code: Some(0),
+                    output: String::new(),
+                },
+            }),
+        );
+        assert!(matches!(command, Command::SaveHistory { .. }));
     }
 
     #[test]
@@ -11806,5 +11878,58 @@ mod mouse_tests {
             }),
         );
         assert!(model.global_search.is_none());
+    }
+
+    #[test]
+    fn test_collection_loaded_requests_history_when_enabled() {
+        use crate::collection::CollectionLoader;
+        let fixture = crate::app::test_support::fixture();
+        let mut model = Model::new(fixture.clone(), (100, 30));
+        model.history_enabled = true;
+        let loaded = crate::collection::BruLoader.load(&fixture);
+        let cmd = update(&mut model, Message::CollectionLoaded(loaded));
+        match cmd {
+            Command::Batch(cmds) => {
+                assert!(
+                    cmds.iter()
+                        .any(|c| matches!(c, Command::LoadHistory { .. }))
+                );
+            }
+            Command::LoadHistory { root } => {
+                assert_eq!(root, fixture);
+            }
+            other => panic!("LoadHistory ou Batch attendu, obtenu {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_history_loaded_populates_model_and_records_notice() {
+        use std::path::PathBuf;
+        let mut model = loaded_model((100, 30));
+        let root = model.loaded().unwrap().root.clone();
+        let entries = vec![crate::app::model::HistoryEntry {
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            target: PathBuf::from("req.bru"),
+            recursive: false,
+            outcome: crate::app::model::HistoryOutcome::Cancelled,
+        }];
+        update(
+            &mut model,
+            Message::HistoryLoaded {
+                root,
+                entries,
+                notice: Some("corrompu".to_owned()),
+            },
+        );
+        assert_eq!(model.history.len(), 1);
+        assert_eq!(model.history[0].target, PathBuf::from("req.bru"));
+        assert!(
+            model
+                .loaded()
+                .unwrap()
+                .notices
+                .iter()
+                .any(|n| n.message.contains("corrompu"))
+        );
     }
 }

@@ -13,6 +13,7 @@ pub mod event;
 pub mod export;
 pub mod filter;
 pub mod global_search;
+pub mod history;
 pub mod message;
 pub mod model;
 pub mod mouse;
@@ -72,11 +73,13 @@ pub async fn run<B: Backend>(
     mouse: MouseSetup,
     suspended: Arc<AtomicBool>,
     watch: bool,
+    history: bool,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
     model.secrets.mappings = secrets;
     model.mouse.capture = mouse.enabled;
+    model.history_enabled = history;
     if let Some(reason) = mouse.startup_error {
         model.last_status = Some(model::StatusMessage::MouseCaptureError(reason));
     }
@@ -132,66 +135,64 @@ pub async fn run<B: Backend>(
             continue;
         };
         {
-            let command = update(&mut model, message);
-            match command {
-                Command::None => {}
-                Command::StartRun {
-                    request,
-                    target,
-                    is_campaign,
-                } => {
-                    let recursive = request.recursive;
-                    let handle = runner.start(request);
-                    update(
-                        &mut model,
-                        Message::RunStarted {
-                            id: handle.id(),
-                            target,
-                            recursive,
-                            is_campaign,
-                            handle,
-                        },
-                    );
-                }
-                Command::CopyToClipboard { token, text } => {
-                    let clipboard = Arc::clone(&clipboard);
-                    let sender = sender.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result = clipboard.set_text(text);
-                        let _ = sender.blocking_send(AppEvent::ClipboardResult { token, result });
-                    });
-                }
-                Command::SaveEdit {
-                    path,
-                    ast,
-                    stamp,
-                    edits,
-                } => {
-                    let root = model
-                        .loaded()
-                        .map(|c| c.root.clone())
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    let full_path = root.join(&path);
-                    let writer = Arc::clone(&writer);
-                    let sender = sender.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result = writer
-                            .write_request(&full_path, &ast, &stamp, &edits)
-                            .and_then(|new_stamp| {
-                                let bytes = std::fs::read(&full_path).map_err(|source| {
-                                    writer::WriteError::Io {
-                                        path: full_path.clone(),
-                                        source,
-                                    }
-                                })?;
-                                let text = String::from_utf8(bytes).map_err(|source| {
-                                    writer::WriteError::Io {
-                                        path: full_path.clone(),
-                                        source: io::Error::new(io::ErrorKind::InvalidData, source),
-                                    }
-                                })?;
-                                let ast =
-                                    crate::collection::BruFile::parse(text).map_err(|source| {
+            let mut pending_commands = vec![update(&mut model, message)];
+            while let Some(command) = pending_commands.pop() {
+                match command {
+                    Command::None => {}
+                    Command::Batch(commands) => {
+                        pending_commands.extend(commands.into_iter().rev());
+                    }
+                    Command::StartRun {
+                        request,
+                        target,
+                        is_campaign,
+                    } => {
+                        let recursive = request.recursive;
+                        let handle = runner.start(request);
+                        update(
+                            &mut model,
+                            Message::RunStarted {
+                                id: handle.id(),
+                                target,
+                                recursive,
+                                is_campaign,
+                                handle,
+                            },
+                        );
+                    }
+                    Command::CopyToClipboard { token, text } => {
+                        let clipboard = Arc::clone(&clipboard);
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result = clipboard.set_text(text);
+                            let _ =
+                                sender.blocking_send(AppEvent::ClipboardResult { token, result });
+                        });
+                    }
+                    Command::SaveEdit {
+                        path,
+                        ast,
+                        stamp,
+                        edits,
+                    } => {
+                        let root = model
+                            .loaded()
+                            .map(|c| c.root.clone())
+                            .unwrap_or_else(|| PathBuf::from("."));
+                        let full_path = root.join(&path);
+                        let writer = Arc::clone(&writer);
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result = writer
+                                .write_request(&full_path, &ast, &stamp, &edits)
+                                .and_then(|new_stamp| {
+                                    let bytes = std::fs::read(&full_path).map_err(|source| {
+                                        writer::WriteError::Io {
+                                            path: full_path.clone(),
+                                            source,
+                                        }
+                                    })?;
+                                    let text = String::from_utf8(bytes).map_err(|source| {
                                         writer::WriteError::Io {
                                             path: full_path.clone(),
                                             source: io::Error::new(
@@ -200,125 +201,164 @@ pub async fn run<B: Backend>(
                                             ),
                                         }
                                     })?;
-                                let view = crate::collection::RequestView::from_ast(&ast).map_err(
-                                    |source| writer::WriteError::Io {
-                                        path: full_path.clone(),
-                                        source: io::Error::new(io::ErrorKind::InvalidData, source),
-                                    },
-                                )?;
-                                Ok(model::SavedEdit {
-                                    stamp: new_stamp,
-                                    ast,
-                                    view,
-                                })
-                            });
-                        let _ = sender.blocking_send(AppEvent::EditSaved { path, result });
-                    });
-                }
-                Command::SaveEnvironment {
-                    path,
-                    ast,
-                    stamp,
-                    edits,
-                } => {
-                    let root = model
-                        .loaded()
-                        .map(|c| c.root.clone())
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    let full_path = root.join(&path);
-                    let sender = sender.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result = writer::write_environment(&full_path, &ast, &stamp, &edits)
-                            .and_then(|new_stamp| {
-                                let bytes = std::fs::read(&full_path).map_err(|source| {
-                                    writer::WriteError::Io {
-                                        path: full_path.clone(),
-                                        source,
-                                    }
-                                })?;
-                                let text = String::from_utf8(bytes).map_err(|source| {
-                                    writer::WriteError::Io {
-                                        path: full_path.clone(),
-                                        source: io::Error::new(io::ErrorKind::InvalidData, source),
-                                    }
-                                })?;
-                                // Fichier d'environnement : accepte `extends`/`color`.
-                                let ast = crate::collection::BruFile::parse_environment(text)
-                                    .map_err(|source| writer::WriteError::Io {
-                                        path: full_path.clone(),
-                                        source: io::Error::new(io::ErrorKind::InvalidData, source),
-                                    })?;
-                                Ok(model::SavedEnvironment {
-                                    stamp: new_stamp,
-                                    ast,
-                                })
-                            });
-                        let _ = sender.blocking_send(AppEvent::EnvironmentSaved { path, result });
-                    });
-                }
-                Command::SetMouseCapture(enabled) => {
-                    let result = mouse
-                        .capture
-                        .set(enabled)
-                        .map_err(|error| error.to_string());
-                    update(&mut model, Message::MouseCaptureChanged { enabled, result });
-                }
-                Command::ResolveSecrets { root, lookups } => {
-                    let sender = sender.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let resolved =
-                            secrets::resolve(&root, &lookups, &|key| std::env::var_os(key));
-                        let _ = sender.blocking_send(AppEvent::SecretsResolved { root, resolved });
-                    });
-                }
-                Command::OpenInEditor { program, text } => {
-                    suspended.store(true, Ordering::SeqCst);
-                    let mouse_was_captured = model.mouse.capture;
-                    if mouse_was_captured {
-                        let _ = mouse.capture.set(false);
+                                    let ast = crate::collection::BruFile::parse(text).map_err(
+                                        |source| writer::WriteError::Io {
+                                            path: full_path.clone(),
+                                            source: io::Error::new(
+                                                io::ErrorKind::InvalidData,
+                                                source,
+                                            ),
+                                        },
+                                    )?;
+                                    let view = crate::collection::RequestView::from_ast(&ast)
+                                        .map_err(|source| writer::WriteError::Io {
+                                            path: full_path.clone(),
+                                            source: io::Error::new(
+                                                io::ErrorKind::InvalidData,
+                                                source,
+                                            ),
+                                        })?;
+                                    Ok(model::SavedEdit {
+                                        stamp: new_stamp,
+                                        ast,
+                                        view,
+                                    })
+                                });
+                            let _ = sender.blocking_send(AppEvent::EditSaved { path, result });
+                        });
                     }
-                    let _ = ratatui::try_restore();
-
-                    let result = tokio::task::spawn_blocking(move || {
-                        editor::spawn_external_editor(&program, &text)
-                    })
-                    .await;
-
-                    let _ = ratatui::try_init();
-                    let _ = terminal.clear();
-                    if mouse_was_captured {
-                        let _ = mouse.capture.set(true);
+                    Command::SaveEnvironment {
+                        path,
+                        ast,
+                        stamp,
+                        edits,
+                    } => {
+                        let root = model
+                            .loaded()
+                            .map(|c| c.root.clone())
+                            .unwrap_or_else(|| PathBuf::from("."));
+                        let full_path = root.join(&path);
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result =
+                                writer::write_environment(&full_path, &ast, &stamp, &edits)
+                                    .and_then(|new_stamp| {
+                                        let bytes =
+                                            std::fs::read(&full_path).map_err(|source| {
+                                                writer::WriteError::Io {
+                                                    path: full_path.clone(),
+                                                    source,
+                                                }
+                                            })?;
+                                        let text = String::from_utf8(bytes).map_err(|source| {
+                                            writer::WriteError::Io {
+                                                path: full_path.clone(),
+                                                source: io::Error::new(
+                                                    io::ErrorKind::InvalidData,
+                                                    source,
+                                                ),
+                                            }
+                                        })?;
+                                        // Fichier d'environnement : accepte `extends`/`color`.
+                                        let ast =
+                                            crate::collection::BruFile::parse_environment(text)
+                                                .map_err(|source| writer::WriteError::Io {
+                                                    path: full_path.clone(),
+                                                    source: io::Error::new(
+                                                        io::ErrorKind::InvalidData,
+                                                        source,
+                                                    ),
+                                                })?;
+                                        Ok(model::SavedEnvironment {
+                                            stamp: new_stamp,
+                                            ast,
+                                        })
+                                    });
+                            let _ =
+                                sender.blocking_send(AppEvent::EnvironmentSaved { path, result });
+                        });
                     }
-                    suspended.store(false, Ordering::SeqCst);
-
-                    match result {
-                        Ok(Err(error)) => {
-                            model.last_status =
-                                Some(model::StatusMessage::EditorError(error.to_string()));
+                    Command::SetMouseCapture(enabled) => {
+                        let result = mouse
+                            .capture
+                            .set(enabled)
+                            .map_err(|error| error.to_string());
+                        update(&mut model, Message::MouseCaptureChanged { enabled, result });
+                    }
+                    Command::ResolveSecrets { root, lookups } => {
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let resolved =
+                                secrets::resolve(&root, &lookups, &|key| std::env::var_os(key));
+                            let _ =
+                                sender.blocking_send(AppEvent::SecretsResolved { root, resolved });
+                        });
+                    }
+                    Command::OpenInEditor { program, text } => {
+                        suspended.store(true, Ordering::SeqCst);
+                        let mouse_was_captured = model.mouse.capture;
+                        if mouse_was_captured {
+                            let _ = mouse.capture.set(false);
                         }
-                        Err(join_error) => {
-                            model.last_status =
-                                Some(model::StatusMessage::EditorError(join_error.to_string()));
+                        let _ = ratatui::try_restore();
+
+                        let result = tokio::task::spawn_blocking(move || {
+                            editor::spawn_external_editor(&program, &text)
+                        })
+                        .await;
+
+                        let _ = ratatui::try_init();
+                        let _ = terminal.clear();
+                        if mouse_was_captured {
+                            let _ = mouse.capture.set(true);
                         }
-                        Ok(Ok(())) => {}
+                        suspended.store(false, Ordering::SeqCst);
+
+                        match result {
+                            Ok(Err(error)) => {
+                                model.last_status =
+                                    Some(model::StatusMessage::EditorError(error.to_string()));
+                            }
+                            Err(join_error) => {
+                                model.last_status =
+                                    Some(model::StatusMessage::EditorError(join_error.to_string()));
+                            }
+                            Ok(Ok(())) => {}
+                        }
                     }
-                }
-                Command::ReloadCollection => {
-                    let loader = Arc::clone(&loader);
-                    let source = model.source.clone();
-                    let sender = sender.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result = loader.load(&source);
-                        let _ = sender.blocking_send(AppEvent::CollectionLoaded(result));
-                    });
-                }
-                Command::ExportResponseBody { path, bytes } => {
-                    let sender = sender.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let result = std::fs::write(&path, &bytes).map_err(|e| e.to_string());
-                        let _ =
-                            sender.blocking_send(AppEvent::ResponseBodyExported { path, result });
-                    });
+                    Command::ReloadCollection => {
+                        let loader = Arc::clone(&loader);
+                        let source = model.source.clone();
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result = loader.load(&source);
+                            let _ = sender.blocking_send(AppEvent::CollectionLoaded(result));
+                        });
+                    }
+                    Command::ExportResponseBody { path, bytes } => {
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result = std::fs::write(&path, &bytes).map_err(|e| e.to_string());
+                            let _ = sender
+                                .blocking_send(AppEvent::ResponseBodyExported { path, result });
+                        });
+                    }
+                    Command::LoadHistory { root } => {
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let (entries, notice) = history::load_history(&root);
+                            let _ = sender.blocking_send(AppEvent::HistoryLoaded {
+                                root,
+                                entries,
+                                notice,
+                            });
+                        });
+                    }
+                    Command::SaveHistory { root, history } => {
+                        tokio::task::spawn_blocking(move || {
+                            let _ = history::save_history(&root, &history);
+                        });
+                    }
                 }
             }
         }

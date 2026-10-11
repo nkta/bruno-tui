@@ -1072,6 +1072,8 @@ pub struct Model {
     pub pending_reload: bool,
     /// Saisie du chemin pour l'export du corps de réponse.
     pub export_input: Option<ExportInputState>,
+    /// Persistance de l'historique active (désactivée par `--no-history`).
+    pub history_enabled: bool,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -1385,6 +1387,7 @@ impl Model {
             last_saved_stamps: HashMap::new(),
             pending_reload: false,
             export_input: None,
+            history_enabled: false,
         }
     }
 

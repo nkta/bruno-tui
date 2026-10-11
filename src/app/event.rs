@@ -14,7 +14,7 @@ use ratatui::crossterm::event::{self, Event};
 use tokio::sync::mpsc;
 
 use super::clipboard::ClipboardError;
-use super::model::{SavedEdit, SavedEnvironment};
+use super::model::{HistoryEntry, SavedEdit, SavedEnvironment};
 use crate::collection::{Collection, LoadError};
 use crate::runner;
 use crate::secrets::Resolved;
@@ -65,6 +65,12 @@ pub enum AppEvent {
     ResponseBodyExported {
         path: PathBuf,
         result: Result<(), String>,
+    },
+    /// Historique persistant chargé depuis le disque.
+    HistoryLoaded {
+        root: PathBuf,
+        entries: Vec<HistoryEntry>,
+        notice: Option<String>,
     },
 }
 

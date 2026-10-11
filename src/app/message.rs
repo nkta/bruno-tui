@@ -19,6 +19,7 @@ use ratatui::crossterm::event::{
 
 use super::clipboard::ClipboardError;
 use super::event::AppEvent;
+use super::model::HistoryEntry;
 use crate::collection::{Collection, LoadError};
 use crate::runner::{RunEvent, RunHandle, RunId};
 use crate::secrets::Resolved;
@@ -331,6 +332,12 @@ pub enum Message {
         path: PathBuf,
         result: Result<(), String>,
     },
+    /// Historique persistant chargé depuis le disque.
+    HistoryLoaded {
+        root: PathBuf,
+        entries: Vec<HistoryEntry>,
+        notice: Option<String>,
+    },
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -359,6 +366,15 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
         AppEvent::ResponseBodyExported { path, result } => {
             Some(Message::ResponseBodyExported { path, result })
         }
+        AppEvent::HistoryLoaded {
+            root,
+            entries,
+            notice,
+        } => Some(Message::HistoryLoaded {
+            root,
+            entries,
+            notice,
+        }),
     }
 }
 
