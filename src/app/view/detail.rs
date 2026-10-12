@@ -571,6 +571,44 @@ fn is_field_cursor(session: Option<&EditSession>, field: &EditableField) -> bool
     session.is_some_and(|s| s.fields.get(s.cursor) == Some(field))
 }
 
+fn render_multiline_text(
+    lines: &mut Vec<Line<'static>>,
+    field_lines: &mut Vec<FieldLine>,
+    field: EditableField,
+    text: &str,
+    session: Option<&EditSession>,
+    view: &crate::collection::RequestView,
+) {
+    let is_cursor = is_field_cursor(session, &field);
+    let is_editable = EditableField::list_for(view).contains(&field);
+    let val = session.map_or(text, |s| field_value(s, &field));
+    let hscroll = value_hscroll(session, &field);
+    let first = lines.len();
+    if val.is_empty() && !is_editable {
+        lines.push(Line::raw("  aucun"));
+        return;
+    }
+    for l in val.split('\n') {
+        let (l, _) = skip_columns(l, hscroll);
+        let mut line = Line::raw(format!("  {l}"));
+        if is_editable {
+            line = tint_line(line, theme::EDITABLE_BODY);
+        }
+        if is_cursor {
+            line = tint_line(line, FIELD_CURSOR_STYLE);
+        }
+        lines.push(line);
+    }
+    if is_editable {
+        field_lines.push(FieldLine {
+            field,
+            line: first,
+            count: lines.len() - first,
+            prefix_width: 2,
+        });
+    }
+}
+
 /// Saisie en cours de la session sur la cible `target`, s'il y en a une.
 fn input_for(
     session: Option<&EditSession>,
@@ -613,6 +651,8 @@ fn editable_entries(
             EntrySection::VarsPostResponse => EditableField::VarsPostResponseValue(i),
             EntrySection::Assert => EditableField::AssertValue(i),
             EntrySection::Settings => EditableField::SettingsValue(i),
+            EntrySection::FormUrlEncoded => EditableField::FormUrlEncodedValue(i),
+            EntrySection::MultipartForm => EditableField::MultipartFormValue(i),
         };
         let hscroll = value_hscroll(session, &field);
         let renamed = input_for(session, |target| {
@@ -637,16 +677,28 @@ fn editable_entries(
             count: 1,
             prefix_width,
         });
+        let is_file = section == EntrySection::MultipartForm
+            && entry.value.trim_start().starts_with("@file(");
         let enabled = session.map_or(entry.enabled, |s| field_enabled(s, &field));
-        let mut line = if enabled {
+        let mut line = if !enabled {
             Line::from(vec![
                 Span::styled(key_text, theme::LABEL),
-                Span::raw(value_text),
+                Span::styled(format!("{value_text} (désactivé)"), DISABLED_ENTRY_VALUE),
+            ])
+        } else if is_file {
+            Line::from(vec![
+                Span::styled(key_text, theme::LABEL),
+                Span::styled(
+                    format!("{value_text} (lecture seule)"),
+                    Style::new()
+                        .fg(Color::Rgb(150, 150, 155))
+                        .add_modifier(Modifier::ITALIC),
+                ),
             ])
         } else {
             Line::from(vec![
                 Span::styled(key_text, theme::LABEL),
-                Span::styled(format!("{value_text} (désactivé)"), DISABLED_ENTRY_VALUE),
+                Span::raw(value_text),
             ])
         };
         if is_field_cursor(session, &field) {
@@ -939,52 +991,245 @@ pub fn request_text_and_fields(
             );
         }
         RequestTab::Body => {
-            // gRPC et WebSocket : le corps est une liste de messages.
+            let is_graphql = view.kind.as_deref() == Some("graphql");
+            if !view.is_file_meta() {
+                if is_graphql {
+                    lines.push(field("Mode du corps", "graphql"));
+                } else if view.is_http() {
+                    const BODY_MODE_LABEL: &str = "Mode du corps : ";
+                    let body_mode_field = EditableField::BodyMode;
+                    let mode_val =
+                        session.map_or(view.body_mode(), |s| field_value(s, &body_mode_field));
+                    let body_mode_label = Span::styled(BODY_MODE_LABEL, theme::LABEL);
+                    field_lines.push(FieldLine {
+                        field: body_mode_field,
+                        line: lines.len(),
+                        count: 1,
+                        prefix_width: body_mode_label.width(),
+                    });
+                    let mut body_mode_value = Line::from(Span::raw(mode_val.to_owned()));
+                    if is_field_cursor(session, &body_mode_field) {
+                        body_mode_value = tint_line(body_mode_value, FIELD_CURSOR_STYLE);
+                    }
+                    let mut body_mode_line = Line::from(body_mode_label);
+                    body_mode_line.spans.extend(body_mode_value.spans);
+                    lines.push(body_mode_line);
+
+                    if let Some(session) = session
+                        && let EditState::BodyModePicker { selected } = &session.state
+                    {
+                        boxed_section(
+                            &mut lines,
+                            &mut field_lines,
+                            &mut boxes,
+                            "Mode du corps".to_owned(),
+                            |lines, _| {
+                                for (index, mode) in crate::writer::BODY_MODES.iter().enumerate() {
+                                    let mut line = Line::raw(format!("  {mode}"));
+                                    if index == *selected {
+                                        line = tint_line(line, FIELD_CURSOR_STYLE);
+                                    }
+                                    lines.push(line);
+                                }
+                            },
+                        );
+                    }
+                }
+            }
+
             let title = if view.is_http() { "Corps" } else { "Messages" };
-            let corps_title = match &view.body {
+            let current_body = shown.body.as_ref();
+            let corps_title = match current_body {
                 Some(body) => format!("{title} ({})", body_label(&body.kind)),
                 None => title.to_owned(),
             };
-            boxed_section(
-                &mut lines,
-                &mut field_lines,
-                &mut boxes,
-                corps_title,
-                |lines, field_lines| match &view.body {
-                    None => lines.push(Line::raw("  aucun")),
-                    Some(body) => match &body.content {
-                        BodyContent::Text(text) => {
-                            let field = EditableField::BodyText;
-                            let is_cursor = is_field_cursor(session, &field);
-                            let is_editable = EditableField::list_for(view).contains(&field);
-                            let val = session.map_or(text.as_str(), |s| field_value(s, &field));
-                            let hscroll = value_hscroll(session, &field);
-                            let first = lines.len();
-                            for l in val.split('\n') {
-                                let (l, _) = skip_columns(l, hscroll);
-                                let mut line = Line::raw(format!("  {l}"));
-                                if is_editable {
-                                    line = tint_line(line, theme::EDITABLE_BODY);
+
+            match current_body.map(|b| &b.kind) {
+                Some(BodyKind::FormUrlEncoded) => {
+                    boxed_section(
+                        &mut lines,
+                        &mut field_lines,
+                        &mut boxes,
+                        corps_title,
+                        |lines, field_lines| {
+                            let entries = match current_body {
+                                Some(b) => match &b.content {
+                                    BodyContent::Entries(e) => e.as_slice(),
+                                    _ => &[],
+                                },
+                                None => &[],
+                            };
+                            editable_entries(
+                                lines,
+                                field_lines,
+                                entries,
+                                session,
+                                EntrySection::FormUrlEncoded,
+                            );
+                        },
+                    );
+                }
+                Some(BodyKind::MultipartForm) => {
+                    boxed_section(
+                        &mut lines,
+                        &mut field_lines,
+                        &mut boxes,
+                        corps_title,
+                        |lines, field_lines| {
+                            let entries = match current_body {
+                                Some(b) => match &b.content {
+                                    BodyContent::Entries(e) => e.as_slice(),
+                                    _ => &[],
+                                },
+                                None => &[],
+                            };
+                            editable_entries(
+                                lines,
+                                field_lines,
+                                entries,
+                                session,
+                                EntrySection::MultipartForm,
+                            );
+                        },
+                    );
+                }
+                Some(BodyKind::Graphql) => {
+                    boxed_section(
+                        &mut lines,
+                        &mut field_lines,
+                        &mut boxes,
+                        corps_title,
+                        |lines, field_lines| {
+                            let text = match current_body {
+                                Some(b) => match &b.content {
+                                    BodyContent::Text(t) => t.as_str(),
+                                    _ => "",
+                                },
+                                None => "",
+                            };
+                            render_multiline_text(
+                                lines,
+                                field_lines,
+                                EditableField::BodyText,
+                                text,
+                                session,
+                                shown,
+                            );
+                        },
+                    );
+                    boxed_section(
+                        &mut lines,
+                        &mut field_lines,
+                        &mut boxes,
+                        "Variables GraphQL".to_owned(),
+                        |lines, field_lines| {
+                            let vars = shown.graphql_vars().unwrap_or("");
+                            render_multiline_text(
+                                lines,
+                                field_lines,
+                                EditableField::GraphqlVars,
+                                vars,
+                                session,
+                                shown,
+                            );
+                        },
+                    );
+                }
+                Some(BodyKind::File) => {
+                    boxed_section(
+                        &mut lines,
+                        &mut field_lines,
+                        &mut boxes,
+                        corps_title,
+                        |lines, _| match current_body {
+                            Some(b) => match &b.content {
+                                BodyContent::Text(path) => {
+                                    lines.push(Line::raw(format!("  {path}")));
                                 }
-                                if is_cursor {
-                                    line = tint_line(line, FIELD_CURSOR_STYLE);
+                                _ => lines.push(Line::raw("  aucun")),
+                            },
+                            None => lines.push(Line::raw("  aucun")),
+                        },
+                    );
+                }
+                Some(
+                    BodyKind::Json
+                    | BodyKind::Text
+                    | BodyKind::Xml
+                    | BodyKind::Sparql
+                    | BodyKind::Other(_),
+                ) => {
+                    boxed_section(
+                        &mut lines,
+                        &mut field_lines,
+                        &mut boxes,
+                        corps_title,
+                        |lines, field_lines| match current_body {
+                            Some(body) => match &body.content {
+                                BodyContent::Text(text) => {
+                                    render_multiline_text(
+                                        lines,
+                                        field_lines,
+                                        EditableField::BodyText,
+                                        text,
+                                        session,
+                                        shown,
+                                    );
                                 }
-                                lines.push(line);
-                            }
-                            if is_editable {
-                                field_lines.push(FieldLine {
-                                    field,
-                                    line: first,
-                                    count: lines.len() - first,
-                                    prefix_width: 2,
-                                });
-                            }
-                        }
-                        BodyContent::Entries(values) => entries(lines, values),
-                        BodyContent::Missing => lines.push(Line::raw("  bloc absent")),
-                    },
-                },
-            );
+                                BodyContent::Entries(values) => entries(lines, values),
+                                BodyContent::Missing => lines.push(Line::raw("  bloc absent")),
+                            },
+                            None => lines.push(Line::raw("  aucun")),
+                        },
+                    );
+                }
+                None if is_graphql => {
+                    boxed_section(
+                        &mut lines,
+                        &mut field_lines,
+                        &mut boxes,
+                        "Corps (graphql)".to_owned(),
+                        |lines, field_lines| {
+                            render_multiline_text(
+                                lines,
+                                field_lines,
+                                EditableField::BodyText,
+                                "",
+                                session,
+                                shown,
+                            );
+                        },
+                    );
+                    boxed_section(
+                        &mut lines,
+                        &mut field_lines,
+                        &mut boxes,
+                        "Variables GraphQL".to_owned(),
+                        |lines, field_lines| {
+                            let vars = shown.graphql_vars().unwrap_or("");
+                            render_multiline_text(
+                                lines,
+                                field_lines,
+                                EditableField::GraphqlVars,
+                                vars,
+                                session,
+                                shown,
+                            );
+                        },
+                    );
+                }
+                None => {
+                    boxed_section(
+                        &mut lines,
+                        &mut field_lines,
+                        &mut boxes,
+                        corps_title,
+                        |lines, _| {
+                            lines.push(Line::raw("  aucun"));
+                        },
+                    );
+                }
+            }
         }
         RequestTab::Headers => {
             boxed_section(
@@ -3972,5 +4217,85 @@ auth:basic {
             .expect("ligne add vars_pre");
         model.editing.as_mut().expect("session").cursor = add_vars_index;
         assert_eq!(model.shown_request_tab(), RequestTab::Vars);
+    }
+
+    #[test]
+    fn body_mode_rendering_and_picker_in_body_tab() {
+        use crate::app::message::Message;
+        use crate::app::update::update;
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        model.request_tab = RequestTab::Body;
+        let text = plain(&detail_text(&model));
+        assert!(text.contains("Mode du corps : none"), "{text}");
+        assert!(text.contains("aucun"), "{text}");
+
+        // Démarrer l'édition et ouvrir le BodyModePicker
+        update(&mut model, Message::NextFocus); // Focus Detail
+        update(&mut model, Message::Enter); // Start Edit
+        let body_mode_idx = model
+            .editing
+            .as_ref()
+            .unwrap()
+            .fields
+            .iter()
+            .position(|f| *f == EditableField::BodyMode)
+            .unwrap();
+        model.editing.as_mut().unwrap().cursor = body_mode_idx;
+        update(&mut model, Message::Enter); // Open picker
+
+        let text = plain(&detail_text(&model));
+        assert!(text.contains("Mode du corps"), "{text}");
+        assert!(text.contains("json"), "{text}");
+        assert!(text.contains("formUrlEncoded"), "{text}");
+        assert!(text.contains("multipartForm"), "{text}");
+    }
+
+    #[test]
+    fn graphql_fixed_mode_and_vars_rendering() {
+        use crate::collection::{BruFile, RequestView, TreeNode};
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        let content = "meta {\n  name: gql\n  type: graphql\n  seq: 1\n}\n\npost {\n  url: https://api.com/graphql\n  body: graphql\n  auth: none\n}\n\nbody:graphql {\n  query { user { id } }\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n";
+        let ast = BruFile::parse(content.to_owned()).expect("parse");
+        let view = RequestView::from_ast(&ast).expect("view");
+        let path = match model.selected_node().unwrap() {
+            TreeNode::Request(r) => r.path.clone(),
+            _ => panic!("requête attendue"),
+        };
+        model.replace_request_node(&path, ast, view);
+        model.request_tab = RequestTab::Body;
+
+        let text = plain(&detail_text(&model));
+        assert!(text.contains("Mode du corps : graphql"), "{text}");
+        assert!(text.contains("Variables GraphQL"), "{text}");
+        assert!(text.contains("\"id\": 1"), "{text}");
+    }
+
+    #[test]
+    fn multipart_and_form_urlencoded_rendering_with_readonly_file() {
+        use crate::collection::{BruFile, RequestView, TreeNode};
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        let content = "meta {\n  name: upload\n  type: http\n  seq: 1\n}\n\npost {\n  url: https://api.com/upload\n  body: multipartForm\n  auth: none\n}\n\nbody:multipart-form {\n  username: alice\n  avatar: @file(/tmp/photo.jpg)\n  ~doc: @file(/tmp/doc.pdf)\n}\n";
+        let ast = BruFile::parse(content.to_owned()).expect("parse");
+        let view = RequestView::from_ast(&ast).expect("view");
+        let path = match model.selected_node().unwrap() {
+            TreeNode::Request(r) => r.path.clone(),
+            _ => panic!("requête attendue"),
+        };
+        model.replace_request_node(&path, ast, view);
+        model.request_tab = RequestTab::Body;
+
+        let text = plain(&detail_text(&model));
+        assert!(text.contains("username: alice"), "{text}");
+        assert!(
+            text.contains("avatar: @file(/tmp/photo.jpg) (lecture seule)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("doc: @file(/tmp/doc.pdf) (désactivé)"),
+            "{text}"
+        );
     }
 }

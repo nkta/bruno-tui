@@ -720,6 +720,7 @@ pub fn parse_item(source: &str) -> Result<Parsed<RequestView>, ParseError> {
                 ..found.grpc
             }),
             auth_params: auth_params(auth_source),
+            graphql_vars: None,
         }),
     };
     Ok(Parsed {

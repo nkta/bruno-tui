@@ -18,7 +18,7 @@ mod error;
 mod format;
 mod query;
 
-pub use edit::{EntrySection, FieldEdit};
+pub use edit::{BODY_MODES, EntrySection, FieldEdit};
 pub use environment::{EnvironmentVarEdit, write_environment};
 pub use error::{EditError, EntryProblem, WriteError};
 

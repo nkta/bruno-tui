@@ -14,7 +14,8 @@ CASES="$ROOT/tests/fixtures/collections/writer-cases"
 
 CASES_NAMES=(add-header add-block add-path-between remove-entry rename-disabled
   duplicates query-sync url-sync crlf-add
-  vars-ops assert-ops settings-ops folder-ops collection-ops)
+  vars-ops assert-ops settings-ops folder-ops collection-ops
+  body-mode-ops body-form-urlencoded-ops body-multipart-form-ops body-graphql-vars-ops)
 
 for name in "${CASES_NAMES[@]}"; do
   out="$CASES/$name.after.bruno.json"

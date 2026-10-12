@@ -704,9 +704,9 @@ async fn external_text_editor_flow_with_fake_editor() {
     // Ouvrir la session d'édition (Entrée)
     sender.send(key(KeyCode::Enter)).await.expect("enter");
 
-    // Naviguer jusqu'à ScriptPreRequest (8 fois bas : les lignes d'ajout
-    // vars:pre-request, vars:post-response et assert précèdent les scripts)
-    for _ in 0..8 {
+    // Naviguer jusqu'à ScriptPreRequest (9 fois bas : les lignes d'ajout
+    // vars:pre-request, vars:post-response, assert et le sélecteur de mode de corps précèdent les scripts)
+    for _ in 0..9 {
         sender.send(key(KeyCode::Down)).await.expect("down");
     }
 

@@ -20,14 +20,18 @@ pub enum EntrySection {
     VarsPostResponse,
     Assert,
     Settings,
+    FormUrlEncoded,
+    MultipartForm,
 }
 
 impl EntrySection {
     /// Ordre d'écriture de Bruno après le bloc de méthode.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::QueryParams,
         Self::PathParams,
         Self::Headers,
+        Self::FormUrlEncoded,
+        Self::MultipartForm,
         Self::VarsPreRequest,
         Self::VarsPostResponse,
         Self::Assert,
@@ -40,6 +44,8 @@ impl EntrySection {
             Self::QueryParams => "params:query",
             Self::PathParams => "params:path",
             Self::Headers => "headers",
+            Self::FormUrlEncoded => "body:form-urlencoded",
+            Self::MultipartForm => "body:multipart-form",
             Self::VarsPreRequest => "vars:pre-request",
             Self::VarsPostResponse => "vars:post-response",
             Self::Assert => "assert",
@@ -53,13 +59,27 @@ impl EntrySection {
             Self::QueryParams => 0,
             Self::PathParams => 1,
             Self::Headers => 2,
-            Self::VarsPreRequest => 3,
-            Self::VarsPostResponse => 4,
-            Self::Assert => 5,
-            Self::Settings => 6,
+            Self::FormUrlEncoded => 3,
+            Self::MultipartForm => 4,
+            Self::VarsPreRequest => 5,
+            Self::VarsPostResponse => 6,
+            Self::Assert => 7,
+            Self::Settings => 8,
         }
     }
 }
+
+/// Modes du corps autorisés pour une requête HTTP (`docs/edition-phase2.md` § 6).
+pub const BODY_MODES: [&str; 8] = [
+    "none",
+    "json",
+    "text",
+    "xml",
+    "sparql",
+    "formUrlEncoded",
+    "multipartForm",
+    "file",
+];
 
 /// Modification d'une requête chargée.
 ///
@@ -67,13 +87,15 @@ impl EntrySection {
 /// désigne la position dans `RequestView.headers` / `.query_params` /
 /// `.path_params` / etc. telle qu'elle résulte des modifications précédentes
 /// de la même liste. Sans ajout ni suppression, il coïncide avec l'indice
-/// exposé par `bru-parser`. `Url`, `Method` et `BodyText` sont singletons.
+/// exposé par `bru-parser`. `Url`, `Method`, `BodyMode` et `BodyText` sont singletons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldEdit {
     Url(String),
     /// Nom du bloc de méthode, en minuscules, l'une des 9 valeurs de
     /// `crate::collection::ast::METHODS` (`add-method-editing`).
     Method(String),
+    /// Mode du corps dans le bloc de méthode (`BODY_MODES`).
+    BodyMode(String),
     HeaderValue {
         index: usize,
         value: String,
@@ -126,7 +148,25 @@ pub enum FieldEdit {
         index: usize,
         value: String,
     },
+    FormUrlEncodedValue {
+        index: usize,
+        value: String,
+    },
+    FormUrlEncodedEnabled {
+        index: usize,
+        enabled: bool,
+    },
+    MultipartFormValue {
+        index: usize,
+        value: String,
+    },
+    MultipartFormEnabled {
+        index: usize,
+        enabled: bool,
+    },
     BodyText(String),
+    /// Contenu du bloc body:graphql:vars ; vide pour retirer le bloc.
+    GraphqlVars(String),
     /// Contenu du bloc script:pre-request ; vide pour retirer le bloc.
     ScriptPreRequest(String),
     /// Contenu du bloc script:post-response ; vide pour retirer le bloc.

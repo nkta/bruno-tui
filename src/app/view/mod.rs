@@ -27,10 +27,11 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 
 use super::model::{
     CampaignView, CollectionState, EditState, Focus, Model, PendingConfirm, RunFailure,
-    StatusMessage,
+    StatusMessage, section_entries,
 };
 use super::update::{active_tree_filter_pattern, is_tree_filtered};
 use crate::collection::TreeNode;
+use crate::writer::EntrySection;
 
 /// Largeur minimale du terminal : exactement la somme des planchers de
 /// l'arbre, du détail et de la réponse (`MIN_TREE_WIDTH +
@@ -845,6 +846,15 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
                 Some(EditableField::SettingsValue(_)) => {
                     "↑↓ champ  Entrée modifier  Ctrl+S enregistrer  Échap fermer"
                 }
+                // Les entrées `@file(...)` de multipart sont en lecture seule :
+                // seules la bascule d'activation et la suppression sont permises.
+                Some(EditableField::MultipartFormValue(index))
+                    if section_entries(&session.preview, EntrySection::MultipartForm)
+                        .get(index)
+                        .is_some_and(|kv| kv.value.trim_start().starts_with("@file(")) =>
+                {
+                    "↑↓ champ  Espace activer  d supprimer  Ctrl+S enregistrer  Échap fermer"
+                }
                 Some(f) if f.entry().is_some() => {
                     "↑↓ champ  Entrée modifier  Espace activer  a ajouter  d supprimer  c renommer  Ctrl+S enregistrer  Échap fermer"
                 }
@@ -872,6 +882,11 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
         }
         EditState::MethodPicker { .. } => {
             format!("Méthode · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler")
+        }
+        EditState::BodyModePicker { .. } => {
+            format!(
+                "Mode du corps · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler"
+            )
         }
     }
 }

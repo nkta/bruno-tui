@@ -1,0 +1,32 @@
+{
+  "url": "https://{{host}}/login",
+  "body_mode": "formUrlEncoded",
+  "headers": [],
+  "params": [],
+  "body_form": [
+    {
+      "name": "username",
+      "value": "bob",
+      "enabled": true
+    },
+    {
+      "name": "auth_token",
+      "value": "1234",
+      "enabled": true
+    },
+    {
+      "name": "remember_me",
+      "value": "true",
+      "enabled": true
+    },
+    {
+      "name": "grant_type",
+      "value": "password",
+      "enabled": true
+    }
+  ],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {}
+}

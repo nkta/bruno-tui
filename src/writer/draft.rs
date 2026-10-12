@@ -11,7 +11,7 @@ use super::dictionary::{
     DictEntry as DraftEntry, DictSection as Section, check_key_general, dictionary_replacements,
     following_blank_line_len, preceding_blank_line_len, section_block_node,
 };
-use super::edit::{EntrySection, FieldEdit, Replacement};
+use super::edit::{BODY_MODES, EntrySection, FieldEdit, Replacement};
 use super::error::{EditError, EntryProblem};
 use super::format;
 use super::query;
@@ -36,6 +36,14 @@ struct UrlState {
     current: String,
 }
 
+/// Clé `body` du bloc de méthode (`docs/edition-phase2.md` § 6).
+struct BodyModeState {
+    span: Option<Range<usize>>,
+    insert_anchor: usize,
+    original: String,
+    current: String,
+}
+
 /// Nom du bloc de méthode (ex. `"get"`), tranche de ce seul mot-clé dans
 /// le source (`add-method-editing`) : le bloc de méthode s'écrit toujours
 /// en colonne 0, donc cette tranche est
@@ -48,7 +56,9 @@ struct MethodState {
 
 /// Contenu d'un bloc de corps texte ciblé.
 struct BodyState {
-    span: Range<usize>,
+    block_name: &'static str,
+    block_span: Option<Range<usize>>,
+    content_span: Option<Range<usize>>,
     text: String,
 }
 
@@ -58,14 +68,16 @@ pub(crate) enum TextBlockKind {
     ScriptPostResponse,
     Tests,
     Docs,
+    GraphqlVars,
 }
 
 impl TextBlockKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::ScriptPreRequest,
         Self::ScriptPostResponse,
         Self::Tests,
         Self::Docs,
+        Self::GraphqlVars,
     ];
 
     pub fn block_name(&self) -> &'static str {
@@ -74,6 +86,7 @@ impl TextBlockKind {
             Self::ScriptPostResponse => "script:post-response",
             Self::Tests => "tests",
             Self::Docs => "docs",
+            Self::GraphqlVars => "body:graphql:vars",
         }
     }
 
@@ -83,11 +96,12 @@ impl TextBlockKind {
             Self::ScriptPostResponse => 1,
             Self::Tests => 2,
             Self::Docs => 3,
+            Self::GraphqlVars => 4,
         }
     }
 }
 
-/// État d'un bloc de texte libre (`script:*`, `tests`, `docs`).
+/// État d'un bloc de texte libre (`script:*`, `tests`, `docs`, `body:graphql:vars`).
 struct TextBlockState {
     block_span: Option<Range<usize>>,
     content_span: Option<Range<usize>>,
@@ -98,9 +112,10 @@ pub(crate) struct Draft<'a> {
     ast: &'a BruFile,
     url: Result<UrlState, EditError>,
     method: Result<MethodState, EditError>,
+    body_mode: Result<BodyModeState, EditError>,
     sections: [Section; EntrySection::ALL.len()],
     body: Option<BodyState>,
-    text_blocks: [TextBlockState; 4],
+    text_blocks: [TextBlockState; TextBlockKind::ALL.len()],
 }
 
 impl<'a> Draft<'a> {
@@ -143,6 +158,7 @@ impl<'a> Draft<'a> {
             ast,
             url: url_state(ast),
             method: method_state(ast),
+            body_mode: body_mode_state(ast),
             sections: EntrySection::ALL.map(section),
             body: None,
             text_blocks: TextBlockKind::ALL.map(text_block),
@@ -153,7 +169,8 @@ impl<'a> Draft<'a> {
     /// l'état courant de la section.
     pub(crate) fn apply(&mut self, edit: &FieldEdit) -> Result<(), EditError> {
         use EntrySection::{
-            Assert, Headers, PathParams, QueryParams, Settings, VarsPostResponse, VarsPreRequest,
+            Assert, FormUrlEncoded, Headers, MultipartForm, PathParams, QueryParams, Settings,
+            VarsPostResponse, VarsPreRequest,
         };
         match edit {
             FieldEdit::Url(value) => {
@@ -167,6 +184,13 @@ impl<'a> Draft<'a> {
                 }
                 let method = self.method.as_mut().map_err(|error| error.clone())?;
                 method.current = value.clone();
+            }
+            FieldEdit::BodyMode(value) => {
+                if !BODY_MODES.contains(&value.as_str()) {
+                    return Err(EditError::UnknownBodyMode);
+                }
+                let body_mode = self.body_mode.as_mut().map_err(|error| error.clone())?;
+                body_mode.current = value.clone();
             }
             FieldEdit::HeaderValue { index, value } => {
                 self.entry_mut(Headers, *index)?.value = value.clone();
@@ -191,6 +215,23 @@ impl<'a> Draft<'a> {
             FieldEdit::SettingsValue { index, value } => {
                 self.entry_mut(Settings, *index)?.value = value.clone();
             }
+            FieldEdit::FormUrlEncodedValue { index, value } => {
+                self.entry_mut(FormUrlEncoded, *index)?.value = value.clone();
+            }
+            FieldEdit::FormUrlEncodedEnabled { index, enabled } => {
+                self.entry_mut(FormUrlEncoded, *index)?.disabled = !enabled;
+            }
+            FieldEdit::MultipartFormValue { index, value } => {
+                let entry = self.entry_mut(MultipartForm, *index)?;
+                if entry.value.trim_start().starts_with("@file(") {
+                    return Err(EditError::ImmutableFileEntry);
+                }
+                let preserved = preserve_content_type(value, &entry.value);
+                self.entry_mut(MultipartForm, *index)?.value = preserved;
+            }
+            FieldEdit::MultipartFormEnabled { index, enabled } => {
+                self.entry_mut(MultipartForm, *index)?.disabled = !enabled;
+            }
             FieldEdit::HeaderEnabled { index, enabled } => {
                 self.entry_mut(Headers, *index)?.disabled = !enabled;
             }
@@ -212,7 +253,12 @@ impl<'a> Draft<'a> {
             }
             FieldEdit::BodyText(text) => {
                 if self.body.is_none() {
-                    self.body = Some(body_state(self.ast)?);
+                    let declared = self
+                        .body_mode
+                        .as_ref()
+                        .map(|m| m.current.as_str())
+                        .unwrap_or("none");
+                    self.body = Some(body_state(self.ast, declared)?);
                 }
                 if let Some(body) = &mut self.body {
                     body.text = text.clone();
@@ -231,6 +277,10 @@ impl<'a> Draft<'a> {
             }
             FieldEdit::Docs(text) => {
                 self.text_blocks[TextBlockKind::Docs.position()].new_text = Some(text.clone());
+            }
+            FieldEdit::GraphqlVars(text) => {
+                self.text_blocks[TextBlockKind::GraphqlVars.position()].new_text =
+                    Some(text.clone());
             }
             FieldEdit::AddEntry {
                 section,
@@ -283,9 +333,21 @@ impl<'a> Draft<'a> {
                         block: Settings.block_name(),
                     });
                 }
+                if *section == MultipartForm {
+                    let entry = self.entry_mut(*section, *index)?;
+                    if entry.value.trim_start().starts_with("@file(") {
+                        return Err(EditError::ImmutableFileEntry);
+                    }
+                }
                 self.entry_mut(*section, *index)?;
                 check_key(*section, key, Some(*index))?;
-                self.entry_mut(*section, *index)?.key = key.clone();
+                let old_key = self.entry_mut(*section, *index)?.key.clone();
+                let final_key = if *section == MultipartForm {
+                    preserve_key_prefix(key, &old_key)
+                } else {
+                    key.clone()
+                };
+                self.entry_mut(*section, *index)?.key = final_key;
                 if *section == QueryParams {
                     self.sync_url_from_params();
                 }
@@ -400,14 +462,52 @@ impl<'a> Draft<'a> {
                 bytes: method.current.clone(),
             });
         }
+        if let Ok(body_mode) = &self.body_mode
+            && body_mode.current != body_mode.original
+        {
+            match &body_mode.span {
+                Some(span) => {
+                    replacements.push(Replacement {
+                        span: span.clone(),
+                        bytes: format!("  body: {}{eol}", body_mode.current),
+                    });
+                }
+                None => {
+                    if body_mode.current != "none" {
+                        replacements.push(Replacement {
+                            span: body_mode.insert_anchor..body_mode.insert_anchor,
+                            bytes: format!("  body: {}{eol}", body_mode.current),
+                        });
+                    }
+                }
+            }
+        }
+        let mut prefixed_anchors: Vec<usize> = Vec::new();
+
         if let Some(body) = &self.body {
-            replacements.push(Replacement {
-                span: body.span.clone(),
-                bytes: format::format_body_content(&body.text, eol),
-            });
+            let anchor = if body.block_span.is_none() && !body.text.trim().is_empty() {
+                canonical_creation_anchor(self.ast, body.block_name)
+            } else {
+                0
+            };
+            let separate = !prefixed_anchors.contains(&anchor);
+            if body.block_span.is_none() && !body.text.trim().is_empty() && separate {
+                prefixed_anchors.push(anchor);
+            }
+            replacements.extend(render_text_block(
+                raw,
+                eol,
+                TextBlockTarget {
+                    block_name: body.block_name,
+                    block_span: body.block_span.as_ref(),
+                    content_span: body.content_span.as_ref(),
+                },
+                Some(&body.text),
+                anchor,
+                separate,
+            ));
         }
 
-        let mut prefixed_anchors: Vec<usize> = Vec::new();
         for section in EntrySection::ALL {
             let state = &self.sections[section.position()];
             let block = section_block_node(self.ast, section);
@@ -471,6 +571,36 @@ impl<'a> Draft<'a> {
     }
 }
 
+fn preserve_content_type(new_val: &str, old_val: &str) -> String {
+    if !new_val.contains("@contentType(")
+        && let Some(idx) = old_val.rfind("@contentType(")
+    {
+        let suffix = &old_val[idx..];
+        if suffix.ends_with(')') {
+            return format!("{new_val} {suffix}");
+        }
+    }
+    new_val.to_owned()
+}
+
+fn preserve_key_prefix(new_key: &str, old_key: &str) -> String {
+    if !new_key.starts_with('@')
+        && old_key.starts_with('@')
+        && let Some(space_idx) = old_key.rfind(") ")
+    {
+        let prefix = &old_key[..space_idx + 2];
+        return format!("{prefix}{new_key}");
+    }
+    new_key.to_owned()
+}
+
+/// Cible d'un bloc de texte (`body:*`, `script:*`, `tests`, `docs`).
+struct TextBlockTarget<'a> {
+    block_name: &'a str,
+    block_span: Option<&'a Range<usize>>,
+    content_span: Option<&'a Range<usize>>,
+}
+
 /// Émet les remplacements pour un bloc de texte libre (`script:*`, `tests`, `docs`) :
 /// modification, suppression ou création.
 fn text_block_replacements(
@@ -481,15 +611,39 @@ fn text_block_replacements(
     create_anchor: usize,
     separate_from_previous: bool,
 ) -> Vec<Replacement> {
+    render_text_block(
+        raw,
+        eol,
+        TextBlockTarget {
+            block_name: kind.block_name(),
+            block_span: state.block_span.as_ref(),
+            content_span: state.content_span.as_ref(),
+        },
+        state.new_text.as_deref(),
+        create_anchor,
+        separate_from_previous,
+    )
+}
+
+/// Émet les remplacements pour un bloc de texte (`body:*`, `script:*`, `tests`, `docs`) :
+/// modification, suppression ou création.
+fn render_text_block(
+    raw: &str,
+    eol: &str,
+    target: TextBlockTarget<'_>,
+    new_text: Option<&str>,
+    create_anchor: usize,
+    separate_from_previous: bool,
+) -> Vec<Replacement> {
     let mut replacements = Vec::new();
-    let Some(new_text) = &state.new_text else {
+    let Some(new_text) = new_text else {
         return replacements;
     };
 
     let is_empty = new_text.trim().is_empty();
 
-    match state.block_span {
-        Some(ref span) => {
+    match target.block_span {
+        Some(span) => {
             if is_empty {
                 let preceding = preceding_blank_line_len(raw, span.start);
                 let start = span.start - preceding;
@@ -502,7 +656,7 @@ fn text_block_replacements(
                     span: start..end,
                     bytes: String::new(),
                 });
-            } else if let Some(ref content_span) = state.content_span {
+            } else if let Some(content_span) = target.content_span {
                 replacements.push(Replacement {
                     span: content_span.clone(),
                     bytes: format::format_body_content(new_text, eol),
@@ -522,7 +676,7 @@ fn text_block_replacements(
                 if anything_before {
                     bytes.push_str(eol);
                 }
-                bytes.push_str(kind.block_name());
+                bytes.push_str(target.block_name);
                 bytes.push_str(" {");
                 bytes.push_str(eol);
                 bytes.push_str(&format::format_body_content(new_text, eol));
@@ -566,42 +720,75 @@ fn canonical_block_rank(name: &str) -> Option<usize> {
     if name.starts_with("auth:") || name == "auth" {
         return Some(6);
     }
-    if name.starts_with("body:") || name == "body" {
+    if name == "body:json" {
         return Some(7);
+    }
+    if name == "body:text" {
+        return Some(8);
+    }
+    if name == "body:xml" {
+        return Some(9);
+    }
+    if name == "body:sparql" {
+        return Some(10);
+    }
+    if name == "body:form-urlencoded" {
+        return Some(11);
+    }
+    if name == "body:multipart-form" {
+        return Some(12);
+    }
+    if name == "body:file" {
+        return Some(13);
+    }
+    if name == "body:graphql" {
+        return Some(14);
+    }
+    if name == "body:graphql:vars" {
+        return Some(15);
+    }
+    if name.starts_with("body:grpc") {
+        return Some(16);
+    }
+    if name.starts_with("body:ws") {
+        return Some(17);
+    }
+    if name.starts_with("body:") || name == "body" {
+        return Some(18);
     }
     // `vars` est l'ancien nom de `vars:pre-request`, conservé tel quel.
     if name == "vars:pre-request" || name == "vars" {
-        return Some(8);
+        return Some(19);
     }
     if name == "vars:post-response" {
-        return Some(9);
+        return Some(20);
     }
     if name == "assert" {
-        return Some(10);
+        return Some(21);
     }
     if name == "script:pre-request" {
-        return Some(11);
+        return Some(22);
     }
     if name == "script:post-response" {
-        return Some(12);
+        return Some(23);
     }
     if name.starts_with("script:grpc:") || name == "script:grpc" {
-        return Some(13);
+        return Some(24);
     }
     if name == "tests" {
-        return Some(14);
+        return Some(25);
     }
     if name == "app" {
-        return Some(15);
+        return Some(26);
     }
     if name == "settings" {
-        return Some(16);
+        return Some(27);
     }
     if name == "docs" {
-        return Some(17);
+        return Some(28);
     }
     if name == "example" {
-        return Some(18);
+        return Some(29);
     }
     None
 }
@@ -726,7 +913,7 @@ fn method_state(ast: &BruFile) -> Result<MethodState, EditError> {
     })
 }
 
-fn body_state(ast: &BruFile) -> Result<BodyState, EditError> {
+fn body_mode_state(ast: &BruFile) -> Result<BodyModeState, EditError> {
     let method = ast
         .blocks()
         .find(|block| METHODS.contains(&block.name.as_str()))
@@ -734,12 +921,29 @@ fn body_state(ast: &BruFile) -> Result<BodyState, EditError> {
     let BlockBody::Dictionary(entries) = &method.body else {
         return Err(EditError::MissingField { field: "body" });
     };
-    let declared = entries
+    let insert_anchor = entries
         .iter()
-        .find(|entry| entry.key == "body")
-        .map(|entry| entry.value.as_str())
-        .unwrap_or_default();
+        .find(|entry| entry.key == "url")
+        .map(|entry| entry.span.end)
+        .unwrap_or(0);
+    let existing = entries.iter().find(|entry| entry.key == "body");
+    let (span, original, current) = match existing {
+        Some(entry) => (
+            Some(entry.span.clone()),
+            entry.value.clone(),
+            entry.value.clone(),
+        ),
+        None => (None, "none".to_owned(), "none".to_owned()),
+    };
+    Ok(BodyModeState {
+        span,
+        insert_anchor,
+        original,
+        current,
+    })
+}
 
+fn body_state(ast: &BruFile, declared: &str) -> Result<BodyState, EditError> {
     if FORM_BODY_KINDS.contains(&declared) {
         return Err(EditError::WrongBodyForm {
             expected: "body:text",
@@ -749,15 +953,31 @@ fn body_state(ast: &BruFile) -> Result<BodyState, EditError> {
         .iter()
         .find(|(kind, _)| *kind == declared)
         .map(|(_, block)| *block)
+        .or_else(|| {
+            TEXT_BODY_BLOCKS.iter().find_map(|(_, block)| {
+                if ast.block(block).is_some() {
+                    Some(*block)
+                } else {
+                    None
+                }
+            })
+        })
         .ok_or(EditError::NoSuchBlock { block: "body" })?;
-    let block = ast
-        .block(block_name)
-        .ok_or(EditError::NoSuchBlock { block: block_name })?;
-    let BlockBody::Text { content } = &block.body else {
-        return Err(EditError::NoSuchBlock { block: block_name });
+    let found = ast.nodes().iter().find_map(|node| match &node.kind {
+        NodeKind::Block(block) if block.name == block_name => match &block.body {
+            BlockBody::Text { content } => Some((node.span.clone(), content.clone())),
+            _ => None,
+        },
+        _ => None,
+    });
+    let (block_span, content_span) = match found {
+        Some((b, c)) => (Some(b), Some(c)),
+        None => (None, None),
     };
     Ok(BodyState {
-        span: content.clone(),
+        block_name,
+        block_span,
+        content_span,
         text: String::new(),
     })
 }
@@ -1343,6 +1563,262 @@ mod tests {
         assert_eq!(
             out,
             "get {\n  url: http://a\n}\n\nheaders {\n  H: 1\n}\n\nvars:post-response {\n  v2: b\n}\n\nassert {\n  res.status: eq 200\n}\n\nscript:pre-request {\n  pre();\n}\n\ntests {\n  test();\n}\n\nsettings {\n  encodeUrl: true\n}\n\ndocs {\n  doc\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_mode_replaces_existing_mode_and_preserves_other_blocks() {
+        let source =
+            "post {\n  url: http://a\n  body: json\n  auth: none\n}\n\nbody:json {\n  {}\n}\n";
+        let out = apply(source, &[FieldEdit::BodyMode("formUrlEncoded".into())]);
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n  auth: none\n}\n\nbody:json {\n  {}\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_mode_inserts_after_url_when_absent() {
+        let source = "get {\n  url: http://a\n  auth: none\n}\n";
+        let out = apply(source, &[FieldEdit::BodyMode("json".into())]);
+        assert_eq!(
+            out,
+            "get {\n  url: http://a\n  body: json\n  auth: none\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_mode_none_replaces_existing_mode() {
+        let source = "post {\n  url: http://a\n  body: json\n}\n";
+        let out = apply(source, &[FieldEdit::BodyMode("none".into())]);
+        assert_eq!(out, "post {\n  url: http://a\n  body: none\n}\n");
+    }
+
+    #[test]
+    fn body_mode_unknown_is_refused() {
+        let file = parse(GET);
+        let error = resolve(&file, &[FieldEdit::BodyMode("yaml".into())]).unwrap_err();
+        assert_eq!(error, EditError::UnknownBodyMode);
+    }
+
+    #[test]
+    fn body_text_creates_missing_block_at_canonical_anchor() {
+        let source = "post {\n  url: http://a\n  body: json\n}\n\nheaders {\n  Content-Type: application/json\n}\n";
+        let out = apply(source, &[FieldEdit::BodyText("{\n  \"a\": 1\n}".into())]);
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: json\n}\n\nheaders {\n  Content-Type: application/json\n}\n\nbody:json {\n  {\n    \"a\": 1\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_text_removes_cleared_block() {
+        let source =
+            "post {\n  url: http://a\n  body: json\n}\n\nbody:json {\n  {\n    \"a\": 1\n  }\n}\n";
+        let out = apply(source, &[FieldEdit::BodyText("".into())]);
+        assert_eq!(out, "post {\n  url: http://a\n  body: json\n}\n");
+    }
+
+    #[test]
+    fn body_text_does_not_create_block_if_empty() {
+        let source = "post {\n  url: http://a\n  body: json\n}\n";
+        let out = apply(source, &[FieldEdit::BodyText("   \n  ".into())]);
+        assert_eq!(out, "post {\n  url: http://a\n  body: json\n}\n");
+    }
+
+    #[test]
+    fn body_text_creates_block_alongside_body_mode_change() {
+        let source = "post {\n  url: http://a\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::BodyMode("text".into()),
+                FieldEdit::BodyText("hello world".into()),
+            ],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: text\n}\n\nbody:text {\n  hello world\n}\n"
+        );
+    }
+
+    #[test]
+    fn graphql_vars_modifies_existing_block() {
+        let source = "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::GraphqlVars("{\n  \"id\": 2\n}".into())],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 2\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn graphql_vars_creates_missing_block_at_canonical_anchor() {
+        let source = "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::GraphqlVars("{\n  \"id\": 1\n}".into())],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn graphql_vars_removes_cleared_block() {
+        let source = "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n";
+        let out = apply(source, &[FieldEdit::GraphqlVars("".into())]);
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n"
+        );
+    }
+
+    #[test]
+    fn form_urlencoded_value_enabled_and_rename() {
+        let source = "post {\n  url: http://a\n  body: formUrlEncoded\n}\n\nbody:form-urlencoded {\n  foo: bar\n  ~old: 1\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::FormUrlEncodedValue {
+                    index: 0,
+                    value: "baz".into(),
+                },
+                FieldEdit::FormUrlEncodedEnabled {
+                    index: 1,
+                    enabled: true,
+                },
+                FieldEdit::RenameKey {
+                    section: EntrySection::FormUrlEncoded,
+                    index: 1,
+                    key: "new".into(),
+                },
+            ],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n}\n\nbody:form-urlencoded {\n  foo: baz\n  new: 1\n}\n"
+        );
+    }
+
+    #[test]
+    fn form_urlencoded_creation_and_removal() {
+        let source = "post {\n  url: http://a\n  body: formUrlEncoded\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::AddEntry {
+                section: EntrySection::FormUrlEncoded,
+                key: "a".into(),
+                value: "1".into(),
+                enabled: true,
+            }],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n}\n\nbody:form-urlencoded {\n  a: 1\n}\n"
+        );
+
+        let out_cleared = apply(
+            &out,
+            &[FieldEdit::RemoveEntry {
+                section: EntrySection::FormUrlEncoded,
+                index: 0,
+            }],
+        );
+        assert_eq!(
+            out_cleared,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n}\n"
+        );
+    }
+
+    #[test]
+    fn multipart_form_text_field_editing_preserves_content_type() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  desc: old text @contentType(text/plain)\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::MultipartFormValue {
+                index: 0,
+                value: "new text".into(),
+            }],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  desc: new text @contentType(text/plain)\n}\n"
+        );
+    }
+
+    #[test]
+    fn multipart_form_file_entry_refuses_value_edit_and_rename() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  file: @file(doc.pdf) @contentType(application/pdf)\n}\n";
+        let file = parse(source);
+        let err1 = resolve(
+            &file,
+            &[FieldEdit::MultipartFormValue {
+                index: 0,
+                value: "other.pdf".into(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err1, EditError::ImmutableFileEntry);
+
+        let err2 = resolve(
+            &file,
+            &[FieldEdit::RenameKey {
+                section: EntrySection::MultipartForm,
+                index: 0,
+                key: "other".into(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err2, EditError::ImmutableFileEntry);
+    }
+
+    #[test]
+    fn multipart_form_file_entry_allows_toggle_and_removal() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  file: @file(doc.pdf)\n}\n";
+        let out_toggle = apply(
+            source,
+            &[FieldEdit::MultipartFormEnabled {
+                index: 0,
+                enabled: false,
+            }],
+        );
+        assert_eq!(
+            out_toggle,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  ~file: @file(doc.pdf)\n}\n"
+        );
+
+        let out_remove = apply(
+            source,
+            &[FieldEdit::RemoveEntry {
+                section: EntrySection::MultipartForm,
+                index: 0,
+            }],
+        );
+        assert_eq!(
+            out_remove,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n"
+        );
+    }
+
+    #[test]
+    fn multipart_form_preserves_key_annotation_prefix_on_rename() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  @description(test) oldKey: val\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::RenameKey {
+                section: EntrySection::MultipartForm,
+                index: 0,
+                key: "newKey".into(),
+            }],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  @description(test) newKey: val\n}\n"
         );
     }
 }
