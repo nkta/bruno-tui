@@ -327,7 +327,7 @@ mod tests {
         select(&mut model, "green.bru");
         update(&mut model, Message::NextFocus); // Détail
         update(&mut model, Message::NextFocus); // Réponse
-        assert_eq!(model.focus, Focus::Response);
+        assert_eq!(model.response_tab, ResponseTab::Body);
 
         // Cycle circulaire vers l'arrière : depuis Corps, Left va à Console.
         update(&mut model, Message::Left);
