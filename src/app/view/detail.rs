@@ -52,49 +52,47 @@ fn lines_to_strings(text: &Text<'static>) -> Vec<String> {
         .collect()
 }
 
-/// Texte du détail du nœud sélectionné (ou de la collection racine) ; vide sans sélection.
-/// Ne contient plus le résultat d'exécution d'une requête, affiché séparément par
-/// [`response_text`] (`split-request-response-panels`).
-pub fn detail_text(model: &Model) -> Text<'static> {
+/// Texte, lignes de champs et boîtes de section du détail du nœud sélectionné
+/// (ou de la collection racine).
+pub fn detail_text_fields_boxes(model: &Model) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
+    let tab = model.shown_request_tab();
     if model.selected_collection {
         if let Some(collection) = model.loaded() {
-            return collection_text_and_boxes(collection, model.shown_request_tab()).0;
+            let session = model
+                .editing
+                .as_ref()
+                .filter(|s| s.path == std::path::Path::new("collection.bru"));
+            return collection_text_and_boxes(collection, session, tab);
         }
-        return Text::default();
+        return (Text::default(), Vec::new(), Vec::new());
     }
     match model.selected_node() {
         Some(TreeNode::Request(request)) => {
             let session = model.editing.as_ref().filter(|s| s.path == request.path);
-            request_text_and_fields(request, session, model.shown_request_tab()).0
+            request_text_and_fields(request, session, tab)
         }
         Some(TreeNode::Folder(folder)) => {
-            folder_text_and_boxes(folder, model.shown_request_tab()).0
+            let folder_path = folder.path.join("folder.bru");
+            let session = model.editing.as_ref().filter(|s| s.path == folder_path);
+            folder_text_and_boxes(folder, session, tab)
         }
-        Some(TreeNode::Error(error)) => error_text(error),
-        None => Text::default(),
+        Some(TreeNode::Error(error)) => (error_text(error), Vec::new(), Vec::new()),
+        None => (Text::default(), Vec::new(), Vec::new()),
     }
+}
+
+/// Texte du détail du nœud sélectionné (ou de la collection racine) ; vide sans sélection.
+/// Ne contient plus le résultat d'exécution d'une requête, affiché séparément par
+/// [`response_text`] (`split-request-response-panels`).
+pub fn detail_text(model: &Model) -> Text<'static> {
+    detail_text_fields_boxes(model).0
 }
 
 /// Boîtes de section du détail de la requête, du dossier ou de la collection
 /// sélectionné ; vide hors sélection ou pour un nœud en erreur
 /// (`add-boxed-detail-sections`).
 pub fn detail_section_boxes(model: &Model) -> Vec<SectionBox> {
-    if model.selected_collection {
-        if let Some(collection) = model.loaded() {
-            return collection_text_and_boxes(collection, model.shown_request_tab()).1;
-        }
-        return Vec::new();
-    }
-    match model.selected_node() {
-        Some(TreeNode::Request(request)) => {
-            let session = model.editing.as_ref().filter(|s| s.path == request.path);
-            request_text_and_fields(request, session, model.shown_request_tab()).2
-        }
-        Some(TreeNode::Folder(folder)) => {
-            folder_text_and_boxes(folder, model.shown_request_tab()).1
-        }
-        _ => Vec::new(),
-    }
+    detail_text_fields_boxes(model).2
 }
 
 /// Texte de la réponse du nœud sélectionné : le résultat de la dernière
@@ -228,6 +226,68 @@ fn render_code_block(lines: &mut Vec<Line<'static>>, code: Option<&str>) {
         let num_span = Span::styled(format!("  {:>width$} ", idx + 1), theme::LABEL);
         let code_span = Span::raw((*line).to_owned());
         lines.push(Line::from(vec![num_span, code_span]));
+    }
+}
+
+/// Affiche un bloc de code éditable (scripts, tests, docs), avec mise en valeur
+/// sous le curseur et enregistrement dans `field_lines` lors d'une session d'édition.
+fn render_editable_code_block(
+    lines: &mut Vec<Line<'static>>,
+    field_lines: &mut Vec<FieldLine>,
+    code: Option<&str>,
+    session: Option<&EditSession>,
+    field: EditableField,
+) {
+    let first = lines.len();
+    let is_cursor = is_field_cursor(session, &field);
+    let val = session
+        .map(|s| field_value(s, &field))
+        .or(code)
+        .unwrap_or("");
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
+        let empty_label = match field {
+            EditableField::Docs => "  aucune",
+            _ => "  aucun",
+        };
+        let mut line = Line::raw(empty_label);
+        if is_cursor {
+            line = tint_line(line, FIELD_CURSOR_STYLE);
+        }
+        lines.push(line);
+    } else {
+        match field {
+            EditableField::Docs => {
+                for l in val.lines() {
+                    let mut line = Line::raw(format!("  {l}"));
+                    if is_cursor {
+                        line = tint_line(line, FIELD_CURSOR_STYLE);
+                    }
+                    lines.push(line);
+                }
+            }
+            _ => {
+                let code_lines: Vec<&str> = val.lines().collect();
+                let width = code_lines.len().to_string().len();
+                for (idx, line_str) in code_lines.iter().enumerate() {
+                    let num_span = Span::styled(format!("  {:>width$} ", idx + 1), theme::LABEL);
+                    let code_span = Span::raw((*line_str).to_owned());
+                    let mut line = Line::from(vec![num_span, code_span]);
+                    if is_cursor {
+                        line = tint_line(line, FIELD_CURSOR_STYLE);
+                    }
+                    lines.push(line);
+                }
+            }
+        }
+    }
+    if session.is_some() {
+        field_lines.push(FieldLine {
+            field,
+            line: first,
+            count: lines.len() - first,
+            prefix_width: 2,
+        });
     }
 }
 
@@ -1010,8 +1070,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Script pré-requête".to_owned(),
-                |lines, _| {
-                    render_code_block(lines, view.script_pre_request());
+                |lines, field_lines| {
+                    render_editable_code_block(
+                        lines,
+                        field_lines,
+                        shown.script_pre_request(),
+                        session,
+                        EditableField::ScriptPreRequest,
+                    );
                 },
             );
             boxed_section(
@@ -1019,8 +1085,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Script post-réponse".to_owned(),
-                |lines, _| {
-                    render_code_block(lines, view.script_post_response());
+                |lines, field_lines| {
+                    render_editable_code_block(
+                        lines,
+                        field_lines,
+                        shown.script_post_response(),
+                        session,
+                        EditableField::ScriptPostResponse,
+                    );
                 },
             );
         }
@@ -1036,8 +1108,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Tests".to_owned(),
-                |lines, _| {
-                    render_code_block(lines, view.tests());
+                |lines, field_lines| {
+                    render_editable_code_block(
+                        lines,
+                        field_lines,
+                        shown.tests(),
+                        session,
+                        EditableField::Tests,
+                    );
                 },
             );
         }
@@ -1047,13 +1125,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Documentation".to_owned(),
-                |lines, _| match view.docs() {
-                    Some(docs) if !docs.trim().is_empty() => {
-                        for l in docs.lines() {
-                            lines.push(Line::raw(format!("  {l}")));
-                        }
-                    }
-                    _ => lines.push(Line::raw("  aucune")),
+                |lines, field_lines| {
+                    render_editable_code_block(
+                        lines,
+                        field_lines,
+                        shown.docs(),
+                        session,
+                        EditableField::Docs,
+                    );
                 },
             );
         }
@@ -1270,14 +1349,10 @@ pub fn folder_tab_at(shown: RequestTab, width: u16, offset: u16) -> Option<Reque
 }
 
 /// Champ éditable affiché à la ligne logique `line` du détail de la
-/// requête sélectionnée, en tenant compte de la session d'édition
-/// (`mouse-support`, D4) ; `None` hors champ ou hors requête.
+/// requête, du dossier ou de la collection sélectionné, en tenant compte
+/// de la session d'édition (`mouse-support`, D4) ; `None` hors champ.
 pub fn field_at_line(model: &Model, line: u16) -> Option<EditableField> {
-    let Some(TreeNode::Request(request)) = model.selected_node() else {
-        return None;
-    };
-    let session = model.editing.as_ref().filter(|s| s.path == request.path);
-    let (_, fields, _) = request_text_and_fields(request, session, model.shown_request_tab());
+    let (_, fields, _) = detail_text_fields_boxes(model);
     let line = usize::from(line);
     fields
         .into_iter()
@@ -1772,12 +1847,29 @@ pub fn tab_bar(active: ResponseTab) -> Line<'static> {
 
 fn meta_tab_content(
     meta: &FileMeta,
+    session: Option<&EditSession>,
     tab: RequestTab,
     scope: &str,
-) -> (Vec<Line<'static>>, Vec<SectionBox>) {
+) -> (Vec<Line<'static>>, Vec<FieldLine>, Vec<SectionBox>) {
     let mut lines = vec![field("Portée", scope), Line::default()];
     let mut field_lines = Vec::new();
     let mut boxes = Vec::new();
+
+    let (script_pre, script_post, tests, docs) = if let Some(session) = session {
+        (
+            session.preview.script_pre_request(),
+            session.preview.script_post_response(),
+            session.preview.tests(),
+            session.preview.docs(),
+        )
+    } else {
+        (
+            meta.script_pre_request(),
+            meta.script_post_response(),
+            meta.tests(),
+            meta.docs(),
+        )
+    };
 
     match tab {
         RequestTab::Headers => {
@@ -1786,8 +1878,18 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "En-têtes".to_owned(),
-                |lines, _| {
-                    entries(lines, meta.headers());
+                |lines, field_lines| {
+                    if let Some(session) = session {
+                        editable_entries(
+                            lines,
+                            field_lines,
+                            &session.preview.headers,
+                            Some(session),
+                            EntrySection::Headers,
+                        );
+                    } else {
+                        entries(lines, meta.headers());
+                    }
                 },
             );
         }
@@ -1837,8 +1939,14 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "Script pré-requête".to_owned(),
-                |lines, _| {
-                    render_code_block(lines, meta.script_pre_request());
+                |lines, field_lines| {
+                    render_editable_code_block(
+                        lines,
+                        field_lines,
+                        script_pre,
+                        session,
+                        EditableField::ScriptPreRequest,
+                    );
                 },
             );
             boxed_section(
@@ -1846,8 +1954,14 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "Script post-réponse".to_owned(),
-                |lines, _| {
-                    render_code_block(lines, meta.script_post_response());
+                |lines, field_lines| {
+                    render_editable_code_block(
+                        lines,
+                        field_lines,
+                        script_post,
+                        session,
+                        EditableField::ScriptPostResponse,
+                    );
                 },
             );
         }
@@ -1857,8 +1971,14 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "Tests".to_owned(),
-                |lines, _| {
-                    render_code_block(lines, meta.tests());
+                |lines, field_lines| {
+                    render_editable_code_block(
+                        lines,
+                        field_lines,
+                        tests,
+                        session,
+                        EditableField::Tests,
+                    );
                 },
             );
         }
@@ -1868,34 +1988,46 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "Documentation".to_owned(),
-                |lines, _| match meta.docs() {
-                    Some(docs) if !docs.trim().is_empty() => {
-                        for l in docs.lines() {
-                            lines.push(Line::raw(format!("  {l}")));
-                        }
-                    }
-                    _ => lines.push(Line::raw("  aucune")),
+                |lines, field_lines| {
+                    render_editable_code_block(
+                        lines,
+                        field_lines,
+                        docs,
+                        session,
+                        EditableField::Docs,
+                    );
                 },
             );
         }
         _ => {}
     }
 
-    (lines, boxes)
+    (lines, field_lines, boxes)
 }
 
-fn folder_text_and_boxes(folder: &FolderNode, tab: RequestTab) -> (Text<'static>, Vec<SectionBox>) {
+fn folder_text_and_boxes(
+    folder: &FolderNode,
+    session: Option<&EditSession>,
+    tab: RequestTab,
+) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     match &folder.meta {
         Some(Ok(meta)) => {
             let mut lines = vec![title(folder.name.clone()), Line::default()];
             let offset = lines.len();
-            let (tab_lines, mut boxes) =
-                meta_tab_content(meta, tab, "déclaré dans ce dossier (sans héritage)");
+            let (tab_lines, mut field_lines, mut boxes) = meta_tab_content(
+                meta,
+                session,
+                tab,
+                "déclaré dans ce dossier (sans héritage)",
+            );
             for b in &mut boxes {
                 b.first_line += offset;
             }
+            for fl in &mut field_lines {
+                fl.line += offset;
+            }
             lines.extend(tab_lines);
-            (Text::from(lines), boxes)
+            (Text::from(lines), field_lines, boxes)
         }
         Some(Err(error)) => {
             let lines = vec![
@@ -1912,7 +2044,7 @@ fn folder_text_and_boxes(folder: &FolderNode, tab: RequestTab) -> (Text<'static>
                 field("folder.bru", "en erreur"),
                 Line::raw(format!("  {error}")),
             ];
-            (Text::from(lines), Vec::new())
+            (Text::from(lines), Vec::new(), Vec::new())
         }
         None => {
             let lines = vec![
@@ -1928,26 +2060,34 @@ fn folder_text_and_boxes(folder: &FolderNode, tab: RequestTab) -> (Text<'static>
                 Line::default(),
                 field("folder.bru", "absent"),
             ];
-            (Text::from(lines), Vec::new())
+            (Text::from(lines), Vec::new(), Vec::new())
         }
     }
 }
 
 fn collection_text_and_boxes(
     collection: &Collection,
+    session: Option<&EditSession>,
     tab: RequestTab,
-) -> (Text<'static>, Vec<SectionBox>) {
+) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     match &collection.settings {
         Some(Ok(meta)) => {
             let mut lines = vec![title(collection.name.clone()), Line::default()];
             let offset = lines.len();
-            let (tab_lines, mut boxes) =
-                meta_tab_content(meta, tab, "déclaré au niveau collection (sans héritage)");
+            let (tab_lines, mut field_lines, mut boxes) = meta_tab_content(
+                meta,
+                session,
+                tab,
+                "déclaré au niveau collection (sans héritage)",
+            );
             for b in &mut boxes {
                 b.first_line += offset;
             }
+            for fl in &mut field_lines {
+                fl.line += offset;
+            }
             lines.extend(tab_lines);
-            (Text::from(lines), boxes)
+            (Text::from(lines), field_lines, boxes)
         }
         Some(Err(error)) => {
             let lines = vec![
@@ -1957,7 +2097,7 @@ fn collection_text_and_boxes(
                 field("Paramètres de collection", "en erreur"),
                 Line::raw(format!("  {error}")),
             ];
-            (Text::from(lines), Vec::new())
+            (Text::from(lines), Vec::new(), Vec::new())
         }
         None => {
             let lines = vec![
@@ -1966,7 +2106,7 @@ fn collection_text_and_boxes(
                 Line::default(),
                 field("Paramètres de collection", "absents"),
             ];
-            (Text::from(lines), Vec::new())
+            (Text::from(lines), Vec::new(), Vec::new())
         }
     }
 }

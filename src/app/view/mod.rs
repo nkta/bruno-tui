@@ -1768,7 +1768,14 @@ mod tests {
         select(&mut model, "post-json.bru");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
-        let body = model.editing.as_ref().expect("session").fields.len() - 1;
+        let body = model
+            .editing
+            .as_ref()
+            .expect("session")
+            .fields
+            .iter()
+            .position(|f| *f == crate::app::model::EditableField::BodyText)
+            .expect("champ corps");
         for _ in 0..body {
             update(&mut model, Message::Down);
         }

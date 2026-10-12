@@ -155,6 +155,11 @@ impl RequestTab {
                 Some(RequestTab::Params)
             }
             EditableField::BodyText => Some(RequestTab::Body),
+            EditableField::ScriptPreRequest | EditableField::ScriptPostResponse => {
+                Some(RequestTab::Script)
+            }
+            EditableField::Tests => Some(RequestTab::Tests),
+            EditableField::Docs => Some(RequestTab::Docs),
         }
     }
 }
@@ -1037,38 +1042,54 @@ pub enum EditableField {
     /// Ligne « + Ajouter » d'une section.
     AddRow(EntrySection),
     BodyText,
+    ScriptPreRequest,
+    ScriptPostResponse,
+    Tests,
+    Docs,
 }
 
 impl EditableField {
     /// Positions du curseur pour une vue de requête : la méthode, l'URL,
     /// chaque section suivie de sa ligne d'ajout, puis le corps s'il est
-    /// éditable.
+    /// éditable, et les blocs de texte (scripts, tests, docs). Pour un dossier
+    /// ou la collection (sans méthode), seuls les en-têtes et les blocs de
+    /// texte sont exposés.
     pub fn list_for(view: &RequestView) -> Vec<Self> {
-        let mut fields = vec![Self::Method, Self::Url];
+        let mut fields = Vec::new();
+        if !view.method.is_empty() {
+            fields.push(Self::Method);
+            fields.push(Self::Url);
+        }
         for index in 0..view.headers.len() {
             fields.push(Self::HeaderValue(index));
         }
         fields.push(Self::AddRow(EntrySection::Headers));
-        for index in 0..view.query_params.len() {
-            fields.push(Self::QueryParamValue(index));
+        if !view.method.is_empty() {
+            for index in 0..view.query_params.len() {
+                fields.push(Self::QueryParamValue(index));
+            }
+            fields.push(Self::AddRow(EntrySection::QueryParams));
+            for index in 0..view.path_params.len() {
+                fields.push(Self::PathParamValue(index));
+            }
+            fields.push(Self::AddRow(EntrySection::PathParams));
+            if let Some(body) = &view.body
+                && matches!(
+                    body.kind,
+                    BodyKind::Json
+                        | BodyKind::Text
+                        | BodyKind::Xml
+                        | BodyKind::Sparql
+                        | BodyKind::Graphql
+                )
+            {
+                fields.push(Self::BodyText);
+            }
         }
-        fields.push(Self::AddRow(EntrySection::QueryParams));
-        for index in 0..view.path_params.len() {
-            fields.push(Self::PathParamValue(index));
-        }
-        fields.push(Self::AddRow(EntrySection::PathParams));
-        if let Some(body) = &view.body
-            && matches!(
-                body.kind,
-                BodyKind::Json
-                    | BodyKind::Text
-                    | BodyKind::Xml
-                    | BodyKind::Sparql
-                    | BodyKind::Graphql
-            )
-        {
-            fields.push(Self::BodyText);
-        }
+        fields.push(Self::ScriptPreRequest);
+        fields.push(Self::ScriptPostResponse);
+        fields.push(Self::Tests);
+        fields.push(Self::Docs);
         fields
     }
 
@@ -1078,7 +1099,14 @@ impl EditableField {
             Self::HeaderValue(index) => Some((EntrySection::Headers, *index)),
             Self::QueryParamValue(index) => Some((EntrySection::QueryParams, *index)),
             Self::PathParamValue(index) => Some((EntrySection::PathParams, *index)),
-            Self::Method | Self::Url | Self::AddRow(_) | Self::BodyText => None,
+            Self::Method
+            | Self::Url
+            | Self::AddRow(_)
+            | Self::BodyText
+            | Self::ScriptPreRequest
+            | Self::ScriptPostResponse
+            | Self::Tests
+            | Self::Docs => None,
         }
     }
 
@@ -1109,6 +1137,10 @@ impl EditableField {
             ),
             Self::AddRow(section) => add_row_label(*section).to_owned(),
             Self::BodyText => "Corps".to_owned(),
+            Self::ScriptPreRequest => "Script pré-requête".to_owned(),
+            Self::ScriptPostResponse => "Script post-réponse".to_owned(),
+            Self::Tests => "Tests".to_owned(),
+            Self::Docs => "Documentation".to_owned(),
         }
     }
 }
@@ -1219,6 +1251,10 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
             },
             None => "",
         },
+        EditableField::ScriptPreRequest => view.script_pre_request().unwrap_or(""),
+        EditableField::ScriptPostResponse => view.script_post_response().unwrap_or(""),
+        EditableField::Tests => view.tests().unwrap_or(""),
+        EditableField::Docs => view.docs().unwrap_or(""),
         entry => entry
             .entry()
             .and_then(|(section, index)| section_entries(view, section).get(index))
@@ -2025,6 +2061,14 @@ impl Model {
     /// l'onglet choisi restreint à [`FOLDER_TABS`] (défaut [`RequestTab::Headers`]) ;
     /// sinon l'onglet choisi.
     pub fn shown_request_tab(&self) -> RequestTab {
+        let session_tab = self
+            .editing
+            .as_ref()
+            .and_then(EditSession::current_field)
+            .and_then(RequestTab::of_field);
+        if let Some(tab) = session_tab {
+            return tab;
+        }
         if self.is_folder_or_collection_selected() {
             if FOLDER_TABS.contains(&self.request_tab) {
                 self.request_tab
@@ -2032,16 +2076,7 @@ impl Model {
                 RequestTab::Headers
             }
         } else {
-            let session_tab = match self.selected_node() {
-                Some(TreeNode::Request(request)) => self
-                    .editing
-                    .as_ref()
-                    .filter(|session| session.path == request.path)
-                    .and_then(EditSession::current_field)
-                    .and_then(RequestTab::of_field),
-                _ => None,
-            };
-            session_tab.unwrap_or(self.request_tab)
+            self.request_tab
         }
     }
 
@@ -2138,8 +2173,9 @@ impl Model {
         }
     }
 
-    /// Remplace l'AST et la vue d'une requête identifiée par son chemin (D7, Risks).
-    pub fn replace_request_node(
+    /// Remplace l'AST et la vue d'une requête, d'un dossier (`folder.bru`) ou de la
+    /// collection (`collection.bru`) identifié par son chemin relatif.
+    pub fn replace_file_meta_or_request_node(
         &mut self,
         path: &std::path::Path,
         ast: crate::collection::BruFile,
@@ -2148,9 +2184,23 @@ impl Model {
         let Some(collection) = self.loaded_mut() else {
             return false;
         };
+        if path == std::path::Path::new("collection.bru") {
+            collection.settings = Some(Ok(crate::collection::FileMeta::from_ast(ast)));
+            return true;
+        }
         let mut ast = Some(ast);
         let mut view = Some(view);
-        replace_request_in_tree(&mut collection.tree, path, &mut ast, &mut view)
+        replace_node_in_tree(&mut collection.tree, path, &mut ast, &mut view)
+    }
+
+    /// Remplace l'AST et la vue d'une requête identifiée par son chemin (D7, Risks).
+    pub fn replace_request_node(
+        &mut self,
+        path: &std::path::Path,
+        ast: crate::collection::BruFile,
+        view: RequestView,
+    ) -> bool {
+        self.replace_file_meta_or_request_node(path, ast, view)
     }
 
     /// Nœud désigné par une adresse.
@@ -2191,9 +2241,9 @@ pub fn selected_response_body(model: &Model) -> Option<String> {
     }
 }
 
-/// Remplace l'AST et la vue de la requête désignée par `path` dans l'arbre.
+/// Remplace l'AST et la vue de la requête ou du dossier désigné par `path` dans l'arbre.
 /// Retourne `true` si le nœud a été trouvé et remplacé (D7, Risks).
-pub fn replace_request_in_tree(
+pub fn replace_node_in_tree(
     tree: &mut [TreeNode],
     path: &std::path::Path,
     ast: &mut Option<crate::collection::BruFile>,
@@ -2209,7 +2259,13 @@ pub fn replace_request_in_tree(
                 return true;
             }
             TreeNode::Folder(folder) => {
-                if replace_request_in_tree(&mut folder.children, path, ast, view) {
+                if folder.path.join("folder.bru") == path {
+                    if let Some(ast) = ast.take() {
+                        folder.meta = Some(Ok(crate::collection::FileMeta::from_ast(ast)));
+                    }
+                    return true;
+                }
+                if replace_node_in_tree(&mut folder.children, path, ast, view) {
                     return true;
                 }
             }
@@ -2217,6 +2273,16 @@ pub fn replace_request_in_tree(
         }
     }
     false
+}
+
+/// Remplace l'AST et la vue de la requête désignée par `path` dans l'arbre.
+pub fn replace_request_in_tree(
+    tree: &mut [TreeNode],
+    path: &std::path::Path,
+    ast: &mut Option<crate::collection::BruFile>,
+    view: &mut Option<RequestView>,
+) -> bool {
+    replace_node_in_tree(tree, path, ast, view)
 }
 
 /// Nom de l'environnement à l'indice donné dans le panneau de sélection :
@@ -2530,7 +2596,7 @@ mod tests {
     fn editable_field_list_for_request_view() {
         use crate::writer::EntrySection::{Headers, PathParams, QueryParams};
 
-        // Méthode + URL + 2 en-têtes + corps json -> 8 positions dans l'ordre
+        // Méthode + URL + 2 en-têtes + corps json + blocs texte -> 12 positions dans l'ordre
         let fields = EditableField::list_for(&make_view(Some(BodyKind::Json), 2));
         assert_eq!(
             fields,
@@ -2543,10 +2609,14 @@ mod tests {
                 EditableField::AddRow(QueryParams),
                 EditableField::AddRow(PathParams),
                 EditableField::BodyText,
+                EditableField::ScriptPreRequest,
+                EditableField::ScriptPostResponse,
+                EditableField::Tests,
+                EditableField::Docs,
             ]
         );
 
-        // corps formUrlEncoded -> corps exclu
+        // corps formUrlEncoded -> corps exclu, blocs texte inclus
         let fields_form = EditableField::list_for(&make_view(Some(BodyKind::FormUrlEncoded), 0));
         assert_eq!(
             fields_form,
@@ -2556,6 +2626,10 @@ mod tests {
                 EditableField::AddRow(Headers),
                 EditableField::AddRow(QueryParams),
                 EditableField::AddRow(PathParams),
+                EditableField::ScriptPreRequest,
+                EditableField::ScriptPostResponse,
+                EditableField::Tests,
+                EditableField::Docs,
             ]
         );
 
@@ -2611,7 +2685,7 @@ mod tests {
             session
                 .current_field()
                 .map(|f| f.display_name(&session.preview)),
-            Some("Corps".to_owned())
+            Some("Documentation".to_owned())
         );
 
         // En saisie sur un champ : le tampon est affiché pour ce champ seul.

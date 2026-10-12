@@ -213,14 +213,23 @@ pub async fn run<B: Backend>(
                                             ),
                                         },
                                     )?;
-                                    let view = crate::collection::RequestView::from_ast(&ast)
-                                        .map_err(|source| writer::WriteError::Io {
-                                            path: full_path.clone(),
-                                            source: io::Error::new(
-                                                io::ErrorKind::InvalidData,
-                                                source,
-                                            ),
-                                        })?;
+                                    let view = match crate::collection::RequestView::from_ast(&ast)
+                                    {
+                                        Ok(v) => v,
+                                        Err(crate::collection::ParseError::MissingMethod) => {
+                                            crate::collection::FileMeta::from_ast(ast.clone())
+                                                .to_request_view()
+                                        }
+                                        Err(source) => {
+                                            return Err(writer::WriteError::Io {
+                                                path: full_path.clone(),
+                                                source: io::Error::new(
+                                                    io::ErrorKind::InvalidData,
+                                                    source,
+                                                ),
+                                            });
+                                        }
+                                    };
                                     Ok(model::SavedEdit {
                                         stamp: new_stamp,
                                         ast,
@@ -328,6 +337,42 @@ pub async fn run<B: Backend>(
                             }
                             Ok(Ok(())) => {}
                         }
+                    }
+                    Command::EditTextInEditor {
+                        program,
+                        text,
+                        extension,
+                        field,
+                    } => {
+                        suspended.store(true, Ordering::SeqCst);
+                        let mouse_was_captured = model.mouse.capture;
+                        if mouse_was_captured {
+                            let _ = mouse.capture.set(false);
+                        }
+                        let _ = ratatui::try_restore();
+
+                        let result = tokio::task::spawn_blocking(move || {
+                            editor::edit_external_text(&program, &text, &extension)
+                        })
+                        .await;
+
+                        let _ = ratatui::try_init();
+                        let _ = terminal.clear();
+                        if mouse_was_captured {
+                            let _ = mouse.capture.set(true);
+                        }
+                        suspended.store(false, Ordering::SeqCst);
+
+                        let event_result = match result {
+                            Ok(res) => res.map_err(|e| e.to_string()),
+                            Err(join_error) => Err(join_error.to_string()),
+                        };
+                        let _ = sender
+                            .send(AppEvent::TextEditorClosed {
+                                field,
+                                result: event_result,
+                            })
+                            .await;
                     }
                     Command::ReloadCollection => {
                         let loader = Arc::clone(&loader);

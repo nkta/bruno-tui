@@ -632,6 +632,40 @@ impl FileMeta {
             }),
         }
     }
+
+    /// Convertit les métadonnées et le contenu du fichier (`folder.bru` ou `collection.bru`)
+    /// en une [`RequestView`] sans méthode ni URL, permettant de réutiliser la session
+    /// d'édition et le writer.
+    pub fn to_request_view(&self) -> RequestView {
+        RequestView {
+            name: self.name.clone(),
+            kind: None,
+            seq: self.seq,
+            method: String::new(),
+            url: String::new(),
+            headers: self.content.headers.clone(),
+            query_params: Vec::new(),
+            path_params: Vec::new(),
+            body: None,
+            auth: self.content.auth.clone(),
+            has_pre_request_script: self.has_pre_request_script,
+            has_post_response_script: self.has_post_response_script,
+            has_tests: self.has_tests,
+            has_assert: false,
+            extra: Box::new(ExtraTabs {
+                vars_pre_request: self.content.vars_pre_request.clone(),
+                vars_post_response: self.content.vars_post_response.clone(),
+                script_pre_request: self.content.script_pre_request.clone(),
+                script_post_response: self.content.script_post_response.clone(),
+                tests: self.content.tests.clone(),
+                docs: self.content.docs.clone(),
+                settings: Vec::new(),
+                assertions: Vec::new(),
+                grpc: None,
+                auth_params: self.content.auth_params.clone(),
+            }),
+        }
+    }
 }
 
 /// Environnement(s) parent(s) dont hérite cet environnement (`extends`).
