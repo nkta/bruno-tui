@@ -411,6 +411,7 @@ mod tests {
 
     use super::super::*;
     use super::*;
+    use crate::app::message::InputKey;
     use crate::app::model::{
         EnvironmentEditSession, InputTarget, MouseState, PendingConfirm, RequestTab, ResponseTab,
         field_value,
@@ -420,6 +421,7 @@ mod tests {
     use crate::app::view::detail::{plain_lines, response_plain_lines};
     use crate::app::view::hit::{Hit, hit_test};
     use crate::app::view::response_text_area;
+    use crate::collection::TreeNode;
     use crate::writer::EntrySection;
     use ratatui::text::Line;
 
