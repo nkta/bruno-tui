@@ -1059,6 +1059,11 @@ fn apply(model: &mut Model, message: Message) -> Command {
                         Message::Down => move_method_picker(model, 1),
                         _ => {}
                     },
+                    Some(EditState::BodyModePicker { .. }) => match navigation {
+                        Message::Up => move_body_mode_picker(model, -1),
+                        Message::Down => move_body_mode_picker(model, 1),
+                        _ => {}
+                    },
                     // Hors session : ←/→ changent d'onglet de requête ou dossier/collection.
                     None => match navigation {
                         Message::Left => {

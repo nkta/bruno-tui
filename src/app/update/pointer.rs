@@ -59,7 +59,9 @@ pub(crate) fn mouse_accepted(model: &Model) -> bool {
         && model.confirm.is_none()
         && matches!(
             model.text_capture(),
-            None | Some(TextCapture::Input) | Some(TextCapture::MethodPicker)
+            None | Some(TextCapture::Input)
+                | Some(TextCapture::MethodPicker)
+                | Some(TextCapture::BodyModePicker)
         )
         && matches!(
             model.focus,
@@ -82,19 +84,14 @@ fn input_field_lines(model: &Model) -> Option<std::ops::Range<usize>> {
 }
 
 fn mouse_press(model: &mut Model, input: MouseInput) {
-    // Le sélecteur de méthode se pilote au clavier seulement (aucune
-    // entrée n'y est cliquable) : un clic ailleurs le referme sans rien
-    // changer, comme `Échap`, plutôt que de rendre la souris inerte
-    // jusqu'à une touche (`add-method-editing`). Le clic s'arrête là,
-    // sans agir sur une nouvelle cible dans le même geste : la boîte du
-    // sélecteur occupe des lignes qui disparaissent de la séquence une
-    // fois refermée, ce qui rendrait la position cliquée incohérente
-    // avec ce que l'utilisateur voyait.
-    if model
-        .editing
-        .as_ref()
-        .is_some_and(|s| matches!(s.state, EditState::MethodPicker { .. }))
-    {
+    // Le sélecteur de méthode ou de mode de corps se pilote au clavier seulement :
+    // un clic ailleurs le referme sans rien changer, comme `Échap`.
+    if model.editing.as_ref().is_some_and(|s| {
+        matches!(
+            s.state,
+            EditState::MethodPicker { .. } | EditState::BodyModePicker { .. }
+        )
+    }) {
         cancel_input(model);
         return;
     }
@@ -558,7 +555,9 @@ mod tests {
     fn input_text(model: &Model) -> Option<String> {
         match &model.editing.as_ref()?.state {
             EditState::Input(input) => Some(input.text().to_owned()),
-            EditState::FieldSelect | EditState::MethodPicker { .. } => None,
+            EditState::FieldSelect
+            | EditState::MethodPicker { .. }
+            | EditState::BodyModePicker { .. } => None,
         }
     }
 

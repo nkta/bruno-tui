@@ -125,7 +125,9 @@ pub(crate) fn press(model: &mut Model, key: InputKey, times: usize) {
 pub(crate) fn input_of(model: &Model) -> &TextInput {
     match &model.editing.as_ref().expect("session").state {
         EditState::Input(input) => input,
-        EditState::FieldSelect | EditState::MethodPicker { .. } => panic!("saisie attendue"),
+        EditState::FieldSelect
+        | EditState::MethodPicker { .. }
+        | EditState::BodyModePicker { .. } => panic!("saisie attendue"),
     }
 }
 

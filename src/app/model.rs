@@ -165,7 +165,11 @@ impl RequestTab {
             EditableField::SettingsValue(_) | EditableField::AddRow(EntrySection::Settings) => {
                 Some(RequestTab::Settings)
             }
-            EditableField::BodyText
+            EditableField::BodyMode
+            | EditableField::BodyText
+            | EditableField::GraphqlVars
+            | EditableField::FormUrlEncodedValue(_)
+            | EditableField::MultipartFormValue(_)
             | EditableField::AddRow(EntrySection::FormUrlEncoded | EntrySection::MultipartForm) => {
                 Some(RequestTab::Body)
             }
@@ -803,7 +807,9 @@ impl EditSession {
     pub fn has_unsaved(&self) -> bool {
         self.dirty
             || match &self.state {
-                EditState::FieldSelect | EditState::MethodPicker { .. } => false,
+                EditState::FieldSelect
+                | EditState::MethodPicker { .. }
+                | EditState::BodyModePicker { .. } => false,
                 EditState::Input(input) => {
                     input.is_modified() || matches!(self.target, InputTarget::NewValue { .. })
                 }
@@ -1022,6 +1028,11 @@ pub enum EditState {
     MethodPicker {
         selected: usize,
     },
+    /// Sélecteur de mode de corps ouvert, `selected` est l'indice présélectionné
+    /// dans `crate::writer::BODY_MODES`.
+    BodyModePicker {
+        selected: usize,
+    },
 }
 
 /// Ce que produit la validation de la saisie en cours.
@@ -1059,7 +1070,13 @@ pub enum EditableField {
     SettingsValue(usize),
     /// Ligne « + Ajouter » d'une section.
     AddRow(EntrySection),
+    /// Mode du corps de la requête HTTP (`docs/edition-phase2.md` § 6).
+    BodyMode,
     BodyText,
+    /// Variables GraphQL `body:graphql:vars`.
+    GraphqlVars,
+    FormUrlEncodedValue(usize),
+    MultipartFormValue(usize),
     ScriptPreRequest,
     ScriptPostResponse,
     Tests,
@@ -1109,17 +1126,42 @@ impl EditableField {
         for index in 0..view.extra.settings.len() {
             fields.push(Self::SettingsValue(index));
         }
-        if let Some(body) = &view.body
-            && matches!(
-                body.kind,
-                BodyKind::Json
-                    | BodyKind::Text
-                    | BodyKind::Xml
-                    | BodyKind::Sparql
-                    | BodyKind::Graphql
-            )
-        {
-            fields.push(Self::BodyText);
+        if !view.is_file_meta() {
+            let is_graphql = view.kind.as_deref() == Some("graphql");
+            if !is_graphql {
+                fields.push(Self::BodyMode);
+            }
+            if let Some(body) = &view.body {
+                match body.kind {
+                    BodyKind::Json | BodyKind::Text | BodyKind::Xml | BodyKind::Sparql => {
+                        fields.push(Self::BodyText);
+                    }
+                    BodyKind::Graphql => {
+                        fields.push(Self::BodyText);
+                        fields.push(Self::GraphqlVars);
+                    }
+                    BodyKind::FormUrlEncoded => {
+                        if let BodyContent::Entries(entries) = &body.content {
+                            for index in 0..entries.len() {
+                                fields.push(Self::FormUrlEncodedValue(index));
+                            }
+                        }
+                        fields.push(Self::AddRow(EntrySection::FormUrlEncoded));
+                    }
+                    BodyKind::MultipartForm => {
+                        if let BodyContent::Entries(entries) = &body.content {
+                            for index in 0..entries.len() {
+                                fields.push(Self::MultipartFormValue(index));
+                            }
+                        }
+                        fields.push(Self::AddRow(EntrySection::MultipartForm));
+                    }
+                    BodyKind::File | BodyKind::Other(_) => {}
+                }
+            } else if is_graphql {
+                fields.push(Self::BodyText);
+                fields.push(Self::GraphqlVars);
+            }
         }
         fields.push(Self::ScriptPreRequest);
         fields.push(Self::ScriptPostResponse);
@@ -1138,10 +1180,14 @@ impl EditableField {
             Self::VarsPostResponseValue(index) => Some((EntrySection::VarsPostResponse, *index)),
             Self::AssertValue(index) => Some((EntrySection::Assert, *index)),
             Self::SettingsValue(index) => Some((EntrySection::Settings, *index)),
+            Self::FormUrlEncodedValue(index) => Some((EntrySection::FormUrlEncoded, *index)),
+            Self::MultipartFormValue(index) => Some((EntrySection::MultipartForm, *index)),
             Self::Method
             | Self::Url
+            | Self::BodyMode
             | Self::AddRow(_)
             | Self::BodyText
+            | Self::GraphqlVars
             | Self::ScriptPreRequest
             | Self::ScriptPostResponse
             | Self::Tests
@@ -1197,7 +1243,29 @@ impl EditableField {
                 view.extra.settings.get(*index).map_or("", |s| &s.key)
             ),
             Self::AddRow(section) => add_row_label(*section).to_owned(),
+            Self::BodyMode => "Mode du corps".to_owned(),
             Self::BodyText => "Corps".to_owned(),
+            Self::GraphqlVars => "Variables GraphQL".to_owned(),
+            Self::FormUrlEncodedValue(index) => format!(
+                "Champ {}",
+                view.body
+                    .as_ref()
+                    .and_then(|b| match &b.content {
+                        BodyContent::Entries(e) => e.get(*index).map(|kv| kv.key.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("")
+            ),
+            Self::MultipartFormValue(index) => format!(
+                "Champ {}",
+                view.body
+                    .as_ref()
+                    .and_then(|b| match &b.content {
+                        BodyContent::Entries(e) => e.get(*index).map(|kv| kv.key.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("")
+            ),
             Self::ScriptPreRequest => "Script pré-requête".to_owned(),
             Self::ScriptPostResponse => "Script post-réponse".to_owned(),
             Self::Tests => "Tests".to_owned(),
@@ -1327,6 +1395,7 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
         EditableField::Method => &view.method,
         EditableField::Url => &view.url,
         EditableField::AddRow(_) => "",
+        EditableField::BodyMode => view.body_mode(),
         EditableField::BodyText => match &view.body {
             Some(body) => match &body.content {
                 BodyContent::Text(text) => text.as_str(),
@@ -1334,6 +1403,7 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
             },
             None => "",
         },
+        EditableField::GraphqlVars => view.graphql_vars().unwrap_or(""),
         EditableField::ScriptPreRequest => view.script_pre_request().unwrap_or(""),
         EditableField::ScriptPostResponse => view.script_post_response().unwrap_or(""),
         EditableField::Tests => view.tests().unwrap_or(""),
@@ -2224,6 +2294,13 @@ impl Model {
         {
             return Some(TextCapture::MethodPicker);
         }
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|s| matches!(s.state, EditState::BodyModePicker { .. }))
+        {
+            return Some(TextCapture::BodyModePicker);
+        }
         if self.search.as_ref().is_some_and(SearchState::is_editing) {
             return Some(TextCapture::Search);
         }
@@ -2695,6 +2772,7 @@ mod tests {
                 EditableField::AddRow(VarsPreRequest),
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),
+                EditableField::BodyMode,
                 EditableField::BodyText,
                 EditableField::ScriptPreRequest,
                 EditableField::ScriptPostResponse,
@@ -2703,7 +2781,7 @@ mod tests {
             ]
         );
 
-        // corps formUrlEncoded -> corps exclu, blocs texte inclus
+        // corps formUrlEncoded -> sélecteur de mode + AddRow(FormUrlEncoded), blocs texte inclus
         let fields_form = EditableField::list_for(&make_view(Some(BodyKind::FormUrlEncoded), 0));
         assert_eq!(
             fields_form,
@@ -2716,6 +2794,8 @@ mod tests {
                 EditableField::AddRow(VarsPreRequest),
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),
+                EditableField::BodyMode,
+                EditableField::AddRow(crate::writer::EntrySection::FormUrlEncoded),
                 EditableField::ScriptPreRequest,
                 EditableField::ScriptPostResponse,
                 EditableField::Tests,

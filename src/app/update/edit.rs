@@ -78,6 +78,10 @@ pub(crate) fn enter_in_detail(model: &mut Model) -> Command {
             confirm_method_picker(model);
             Command::None
         }
+        Some(session) if matches!(session.state, EditState::BodyModePicker { .. }) => {
+            confirm_body_mode_picker(model);
+            Command::None
+        }
         Some(_) => Command::None,
     }
 }
@@ -114,6 +118,40 @@ pub(crate) fn confirm_method_picker(model: &mut Model) {
     };
     if !method.eq_ignore_ascii_case(&session.preview.method) {
         try_commit(model, FieldEdit::Method(method.to_owned()));
+    }
+    close_input(model);
+}
+
+/// Déplace la présélection du sélecteur de mode de corps (`BODY_MODES`).
+pub(crate) fn move_body_mode_picker(model: &mut Model, delta: i8) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let EditState::BodyModePicker { selected } = &mut session.state else {
+        return;
+    };
+    let count = crate::writer::BODY_MODES.len();
+    if delta < 0 {
+        *selected = selected.saturating_sub(1);
+    } else if delta > 0 {
+        *selected = (*selected + 1).min(count - 1);
+    }
+}
+
+/// Valide la présélection du sélecteur de mode de corps : applique le
+/// changement si elle diffère du mode courant, puis referme le sélecteur.
+pub(crate) fn confirm_body_mode_picker(model: &mut Model) {
+    let Some(session) = &model.editing else {
+        return;
+    };
+    let EditState::BodyModePicker { selected } = session.state else {
+        return;
+    };
+    let Some(&mode) = crate::writer::BODY_MODES.get(selected) else {
+        return;
+    };
+    if !mode.eq_ignore_ascii_case(session.preview.body_mode()) {
+        try_commit(model, FieldEdit::BodyMode(mode.to_owned()));
     }
     close_input(model);
 }
@@ -162,11 +200,19 @@ pub(crate) fn toggle_field(model: &mut Model) {
             FieldEdit::VarsPostResponseEnabled { index, enabled }
         }
         EditableField::AssertValue(index) => FieldEdit::AssertEnabled { index, enabled },
+        EditableField::FormUrlEncodedValue(index) => {
+            FieldEdit::FormUrlEncodedEnabled { index, enabled }
+        }
+        EditableField::MultipartFormValue(index) => {
+            FieldEdit::MultipartFormEnabled { index, enabled }
+        }
         EditableField::SettingsValue(_)
         | EditableField::Method
         | EditableField::Url
+        | EditableField::BodyMode
         | EditableField::AddRow(_)
         | EditableField::BodyText
+        | EditableField::GraphqlVars
         | EditableField::ScriptPreRequest
         | EditableField::ScriptPostResponse
         | EditableField::Tests
@@ -197,6 +243,20 @@ pub(crate) fn begin_input(model: &mut Model) -> Command {
             open_method_picker(model);
             Command::None
         }
+        EditableField::BodyMode => {
+            open_body_mode_picker(model);
+            Command::None
+        }
+        EditableField::MultipartFormValue(index)
+            if section_entries(&session.preview, EntrySection::MultipartForm)
+                .get(index)
+                .is_some_and(|kv| kv.value.trim_start().starts_with("@file(")) =>
+        {
+            model.last_status = Some(StatusMessage::EditRefused(
+                crate::writer::EditError::ImmutableFileEntry.to_string(),
+            ));
+            Command::None
+        }
         EditableField::ScriptPreRequest
         | EditableField::ScriptPostResponse
         | EditableField::Tests
@@ -217,7 +277,7 @@ pub(crate) fn begin_input(model: &mut Model) -> Command {
         _ => {
             let input = TextInput::new(
                 field_value(session, &field),
-                field == EditableField::BodyText,
+                matches!(field, EditableField::BodyText | EditableField::GraphqlVars),
             );
             open_input(model, input, InputTarget::Field);
             Command::None
@@ -248,6 +308,21 @@ pub(crate) fn open_method_picker(model: &mut Model) {
         .position(|candidate| current.eq_ignore_ascii_case(candidate))
         .unwrap_or(0);
     session.state = EditState::MethodPicker { selected };
+    model.last_status = None;
+    scroll_edit_into_view(model);
+}
+
+/// Ouvre le sélecteur de mode de corps (`BODY_MODES`).
+pub(crate) fn open_body_mode_picker(model: &mut Model) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let current = session.preview.body_mode();
+    let selected = crate::writer::BODY_MODES
+        .iter()
+        .position(|candidate| current.eq_ignore_ascii_case(candidate))
+        .unwrap_or(0);
+    session.state = EditState::BodyModePicker { selected };
     model.last_status = None;
     scroll_edit_into_view(model);
 }
@@ -341,6 +416,16 @@ pub(crate) fn start_rename(model: &mut Model) {
         return;
     };
     if section == EntrySection::Settings {
+        return;
+    }
+    if section == EntrySection::MultipartForm
+        && section_entries(&session.preview, section)
+            .get(index)
+            .is_some_and(|kv| kv.value.trim_start().starts_with("@file("))
+    {
+        model.last_status = Some(StatusMessage::EditRefused(
+            crate::writer::EditError::ImmutableFileEntry.to_string(),
+        ));
         return;
     }
     let Some(key) = section_entries(&session.preview, section)
@@ -477,8 +562,11 @@ pub(crate) fn finish_add(model: &mut Model, section: EntrySection) {
             }
             EntrySection::Assert => EditableField::AssertValue(count.saturating_sub(1)),
             EntrySection::Settings => EditableField::SettingsValue(count.saturating_sub(1)),
-            EntrySection::FormUrlEncoded | EntrySection::MultipartForm => {
-                EditableField::AddRow(section)
+            EntrySection::FormUrlEncoded => {
+                EditableField::FormUrlEncodedValue(count.saturating_sub(1))
+            }
+            EntrySection::MultipartForm => {
+                EditableField::MultipartFormValue(count.saturating_sub(1))
             }
         };
         if let Some(position) = session.fields.iter().position(|f| *f == field) {
@@ -504,11 +592,16 @@ pub(crate) fn value_edit(field: EditableField, value: String) -> Option<FieldEdi
         EditableField::AssertValue(index) => FieldEdit::AssertValue { index, value },
         EditableField::SettingsValue(index) => FieldEdit::SettingsValue { index, value },
         EditableField::BodyText => FieldEdit::BodyText(value),
+        EditableField::GraphqlVars => FieldEdit::GraphqlVars(value),
+        EditableField::FormUrlEncodedValue(index) => {
+            FieldEdit::FormUrlEncodedValue { index, value }
+        }
+        EditableField::MultipartFormValue(index) => FieldEdit::MultipartFormValue { index, value },
         EditableField::ScriptPreRequest => FieldEdit::ScriptPreRequest(value),
         EditableField::ScriptPostResponse => FieldEdit::ScriptPostResponse(value),
         EditableField::Tests => FieldEdit::Tests(value),
         EditableField::Docs => FieldEdit::Docs(value),
-        EditableField::Method | EditableField::AddRow(_) => return None,
+        EditableField::Method | EditableField::BodyMode | EditableField::AddRow(_) => return None,
     })
 }
 
@@ -532,7 +625,7 @@ pub(crate) fn cancel_input(model: &mut Model) {
                 session.cursor = return_cursor.min(session.fields.len().saturating_sub(1));
             }
         }
-        EditState::MethodPicker { .. } => {}
+        EditState::MethodPicker { .. } | EditState::BodyModePicker { .. } => {}
         EditState::FieldSelect => return,
     }
     model.last_status = None;
@@ -697,7 +790,9 @@ pub(crate) fn scroll_edit_into_view(model: &mut Model) {
         return;
     };
     let (target_line, hscroll) = match &session.state {
-        EditState::FieldSelect | EditState::MethodPicker { .. } => (location.line, 0),
+        EditState::FieldSelect
+        | EditState::MethodPicker { .. }
+        | EditState::BodyModePicker { .. } => (location.line, 0),
         EditState::Input(input) => {
             let (line, _) = input.cursor_line_col();
             let column = u16::try_from(Line::raw(input.text_before_cursor_on_line()).width())
@@ -1009,7 +1104,9 @@ mod tests {
                 assert_eq!(input.cursor(), expected_len);
                 assert_eq!(input.text(), initial_url);
             }
-            EditState::FieldSelect | EditState::MethodPicker { .. } => panic!("saisie attendue"),
+            EditState::FieldSelect
+            | EditState::MethodPicker { .. }
+            | EditState::BodyModePicker { .. } => panic!("saisie attendue"),
         }
 
         // Validation sans frappe (Tab) : valeur conservée, pas de dirty
@@ -1105,7 +1202,9 @@ mod tests {
             EditState::Input(input) => {
                 assert!(input.text().ends_with('\n'), "saut de ligne inséré");
             }
-            EditState::FieldSelect | EditState::MethodPicker { .. } => {
+            EditState::FieldSelect
+            | EditState::MethodPicker { .. }
+            | EditState::BodyModePicker { .. } => {
                 panic!("devrait rester en saisie sur le corps")
             }
         }
@@ -1431,7 +1530,9 @@ mod tests {
     fn input_of(model: &Model) -> &TextInput {
         match &model.editing.as_ref().expect("session").state {
             EditState::Input(input) => input,
-            EditState::FieldSelect | EditState::MethodPicker { .. } => panic!("saisie attendue"),
+            EditState::FieldSelect
+            | EditState::MethodPicker { .. }
+            | EditState::BodyModePicker { .. } => panic!("saisie attendue"),
         }
     }
 
@@ -2312,5 +2413,152 @@ mod tests {
         assert!(!session.dirty);
         assert_eq!(session.preview, saved_view);
         assert!(session.fields.contains(&EditableField::HeaderValue(0)));
+    }
+
+    #[test]
+    fn body_mode_picker_opens_navigates_confirms_and_cancels() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::BodyMode);
+
+        // Ouverture : présélection sur le mode courant ("none", indice 0).
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            session(&model).state,
+            EditState::BodyModePicker { selected: 0 }
+        );
+        assert!(!session(&model).has_unsaved());
+
+        // Navigation vers "json" (indice 1) puis validation.
+        update(&mut model, Message::Down);
+        assert_eq!(
+            session(&model).state,
+            EditState::BodyModePicker { selected: 1 }
+        );
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(shown_value(&model, EditableField::BodyMode), "json");
+        assert!(session(&model).dirty);
+
+        // Réouverture : le nouveau mode est présélectionné.
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            session(&model).state,
+            EditState::BodyModePicker { selected: 1 }
+        );
+
+        // Annulation : le sélecteur se ferme sans changer le mode.
+        update(&mut model, Message::Down);
+        update(&mut model, Message::CancelInput);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(shown_value(&model, EditableField::BodyMode), "json");
+    }
+
+    #[test]
+    fn body_mode_picker_validation_without_change_does_not_mark_modified() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::BodyMode);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(!session(&model).dirty);
+        assert!(!session(&model).has_unsaved());
+    }
+
+    #[test]
+    fn form_urlencoded_flow_add_edit_toggle_and_delete() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::BodyMode);
+        update(&mut model, Message::Enter);
+        // "formUrlEncoded" est à l'indice 5 dans BODY_MODES (none=0, json=1, text=2, xml=3, sparql=4, formUrlEncoded=5)
+        for _ in 0..5 {
+            update(&mut model, Message::Down);
+        }
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            shown_value(&model, EditableField::BodyMode),
+            "formUrlEncoded"
+        );
+
+        // Ajout d'un champ via la ligne AddRow
+        add_via_row(&mut model, EntrySection::FormUrlEncoded, "user", "alice");
+        assert_eq!(
+            shown_value(&model, EditableField::FormUrlEncodedValue(0)),
+            "alice"
+        );
+
+        // Toggle field
+        update(&mut model, Message::ToggleField);
+        assert!(!crate::app::model::field_enabled(
+            session(&model),
+            &EditableField::FormUrlEncodedValue(0)
+        ));
+
+        // Delete field
+        update(&mut model, Message::Delete);
+        assert!(
+            !session(&model)
+                .fields
+                .contains(&EditableField::FormUrlEncodedValue(0))
+        );
+    }
+
+    #[test]
+    fn multipart_file_entry_read_only_rules() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        try_commit(&mut model, FieldEdit::BodyMode("multipartForm".into()));
+        try_commit(
+            &mut model,
+            FieldEdit::AddEntry {
+                section: EntrySection::MultipartForm,
+                key: "avatar".into(),
+                value: "@file(/tmp/photo.png)".into(),
+                enabled: true,
+            },
+        );
+        move_to_field(&mut model, EditableField::MultipartFormValue(0));
+
+        // Entrée refusée (lecture seule)
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::EditRefused(_))
+        ));
+
+        // Renommage refusé (lecture seule)
+        update(&mut model, Message::Rename);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::EditRefused(_))
+        ));
+
+        // Toggle autorisé
+        update(&mut model, Message::ToggleField);
+        assert!(!crate::app::model::field_enabled(
+            session(&model),
+            &EditableField::MultipartFormValue(0)
+        ));
+
+        // Suppression autorisée
+        update(&mut model, Message::Delete);
+        assert!(
+            !session(&model)
+                .fields
+                .contains(&EditableField::MultipartFormValue(0))
+        );
+    }
+
+    #[test]
+    fn graphql_vars_can_be_edited() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        try_commit(
+            &mut model,
+            FieldEdit::GraphqlVars("{\n  \"limit\": 10\n}".into()),
+        );
+        assert_eq!(
+            shown_value(&model, EditableField::GraphqlVars),
+            "{\n  \"limit\": 10\n}"
+        );
     }
 }

@@ -45,6 +45,8 @@ pub enum TextCapture {
     /// Sélecteur de méthode ouvert (`add-method-editing`) : seules la
     /// navigation, la validation et l'annulation ont un sens.
     MethodPicker,
+    /// Sélecteur de mode de corps ouvert.
+    BodyModePicker,
     /// Recherche globale par nom, méthode, chemin et URL (`Ctrl+K`).
     GlobalSearch,
     /// Saisie du chemin pour l'exportation du corps de réponse.
@@ -485,7 +487,9 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::Filter => filter_capture_message(key),
         TextCapture::TreeFilter => tree_filter_capture_message(key),
         TextCapture::SecretName | TextCapture::SecretValue => secret_capture_message(key),
-        TextCapture::MethodPicker => method_picker_capture_message(key),
+        TextCapture::MethodPicker | TextCapture::BodyModePicker => {
+            method_picker_capture_message(key)
+        }
         TextCapture::GlobalSearch => global_search_capture_message(key),
         TextCapture::ExportPath => export_path_capture_message(key),
     }
@@ -1002,6 +1006,7 @@ mod tests {
             Some(TextCapture::SecretName),
             Some(TextCapture::SecretValue),
             Some(TextCapture::MethodPicker),
+            Some(TextCapture::BodyModePicker),
         ] {
             let event = key(KeyCode::Char('e'), KeyModifiers::CONTROL);
             assert!(

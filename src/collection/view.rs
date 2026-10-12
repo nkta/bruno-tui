@@ -99,6 +99,20 @@ pub enum BodyKind {
 }
 
 impl BodyKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Json => "json",
+            Self::Text => "text",
+            Self::Xml => "xml",
+            Self::Sparql => "sparql",
+            Self::Graphql => "graphql",
+            Self::FormUrlEncoded => "formUrlEncoded",
+            Self::MultipartForm => "multipartForm",
+            Self::File => "file",
+            Self::Other(other) => other.as_str(),
+        }
+    }
+
     fn parse(value: &str) -> Self {
         match value {
             "json" => Self::Json,
@@ -319,6 +333,11 @@ impl RequestView {
     /// Contenu du bloc `body:graphql:vars` s'il existe.
     pub fn graphql_vars(&self) -> Option<&str> {
         self.extra.graphql_vars.as_deref()
+    }
+
+    /// Mode du corps de la requête (`"none"` si absent ou non déclaré).
+    pub fn body_mode(&self) -> &str {
+        self.body.as_ref().map_or("none", |b| b.kind.as_str())
     }
 
     /// Champs gRPC ; `None` hors requête gRPC.
