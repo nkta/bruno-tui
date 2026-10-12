@@ -853,7 +853,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
         }
         Message::OpenResponseInEditor => match selected_response_body(model) {
             Some(text) => Command::OpenInEditor {
-                program: resolve_editor(),
+                program: resolve_editor(model.editor.as_deref()),
                 text,
             },
             None => {
@@ -4903,15 +4903,21 @@ fn copy_curl_full(model: &mut Model) -> Command {
     }
 }
 
-/// Résout le programme éditeur à lancer : `VISUAL` si définie et non vide,
-/// sinon `EDITOR` si définie et non vide, sinon `"nano"`.
+/// Résout le programme éditeur à lancer :
+/// 1. `cli_editor` si défini et non vide ;
+/// 2. `VISUAL` si définie et non vide ;
+/// 3. `EDITOR` si définie et non vide ;
+/// 4. `"nano"`.
 ///
-/// Paramétrée par une fonction de recherche de variable d'environnement
-/// pour rester pure et testable sans dépendre de l'état du processus.
-pub fn resolve_editor_with<F>(lookup: F) -> String
+/// Paramétrée par une commande CLI optionnelle et une fonction de recherche
+/// de variable d'environnement pour rester pure et testable sans dépendre de l'état du processus.
+pub fn resolve_editor_with<F>(cli_editor: Option<&str>, lookup: F) -> String
 where
     F: Fn(&str) -> Option<String>,
 {
+    if let Some(cli) = cli_editor.filter(|c| !c.is_empty()) {
+        return cli.to_string();
+    }
     if let Some(visual) = lookup("VISUAL").filter(|v| !v.is_empty()) {
         return visual;
     }
@@ -4922,8 +4928,8 @@ where
 }
 
 /// Résout le programme éditeur à lancer depuis l'environnement réel du processus.
-pub fn resolve_editor() -> String {
-    resolve_editor_with(|key| std::env::var(key).ok())
+pub fn resolve_editor(cli_editor: Option<&str>) -> String {
+    resolve_editor_with(cli_editor, |key| std::env::var(key).ok())
 }
 
 /// Prépare l'exportation du corps de réponse et ouvre la saisie du chemin.
@@ -5005,9 +5011,28 @@ mod tests {
 
     #[test]
     fn resolve_editor_precedence() {
+        // cli_editor est prioritaire sur VISUAL et EDITOR
+        assert_eq!(
+            resolve_editor_with(Some("subl -w"), |key| match key {
+                "VISUAL" => Some("code -w".into()),
+                "EDITOR" => Some("vim".into()),
+                _ => None,
+            }),
+            "subl -w"
+        );
+        // Si cli_editor est vide, VISUAL prend le relais
+        assert_eq!(
+            resolve_editor_with(Some(""), |key| match key {
+                "VISUAL" => Some("code -w".into()),
+                "EDITOR" => Some("vim".into()),
+                _ => None,
+            }),
+            "code -w"
+        );
+
         // VISUAL est prioritaire si définie et non vide
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => Some("code -w".into()),
                 "EDITOR" => Some("vim".into()),
                 _ => None,
@@ -5017,7 +5042,7 @@ mod tests {
 
         // EDITOR est utilisé si VISUAL n'est pas définie ou est vide
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => None,
                 "EDITOR" => Some("vim".into()),
                 _ => None,
@@ -5025,7 +5050,7 @@ mod tests {
             "vim"
         );
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => Some("".into()),
                 "EDITOR" => Some("vim".into()),
                 _ => None,
@@ -5035,7 +5060,7 @@ mod tests {
 
         // "nano" par défaut si ni VISUAL ni EDITOR ne sont définies ou sont vides
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => None,
                 "EDITOR" => None,
                 _ => None,
@@ -5043,7 +5068,7 @@ mod tests {
             "nano"
         );
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => Some("".into()),
                 "EDITOR" => Some("".into()),
                 _ => None,
@@ -5060,7 +5085,7 @@ mod tests {
         select(&mut model, "ok.bru");
         match update(&mut model, Message::OpenResponseInEditor) {
             Command::OpenInEditor { program, text } => {
-                assert_eq!(program, resolve_editor());
+                assert_eq!(program, resolve_editor(model.editor.as_deref()));
                 assert_eq!(text, "<html><body>probe</body></html>\n");
             }
             other => panic!("Command::OpenInEditor attendu, obtenu {other:?}"),

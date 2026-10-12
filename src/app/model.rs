@@ -1344,6 +1344,8 @@ pub struct Model {
     pub export_input: Option<ExportInputState>,
     /// Persistance de l'historique active (désactivée par `--no-history`).
     pub history_enabled: bool,
+    /// Commande de l'éditeur externe configurée au lancement (`--editor`).
+    pub editor: Option<String>,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -1983,6 +1985,7 @@ impl Model {
             selected_collection: false,
             export_input: None,
             history_enabled: false,
+            editor: None,
         }
     }
 

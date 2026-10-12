@@ -75,12 +75,14 @@ pub async fn run<B: Backend>(
     suspended: Arc<AtomicBool>,
     watch: bool,
     history: bool,
+    editor: Option<String>,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
     model.secrets.mappings = secrets;
     model.mouse.capture = mouse.enabled;
     model.history_enabled = history;
+    model.editor = editor;
     if let Some(reason) = mouse.startup_error {
         model.last_status = Some(model::StatusMessage::MouseCaptureError(reason));
     }
