@@ -186,6 +186,9 @@ fn apply(model: &mut Model, message: Message) -> Command {
                     super::model::PendingConfirm::OverwriteExport { path, bytes } => {
                         Command::ExportResponseBody { path, bytes }
                     }
+                    super::model::PendingConfirm::DeleteAuthBlock { .. } => {
+                        edit::force_save_edit(model)
+                    }
                 }
             }
             Message::ConfirmNo | Message::NextMatch | Message::FocusTree => {

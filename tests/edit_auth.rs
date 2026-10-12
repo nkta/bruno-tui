@@ -312,3 +312,110 @@ async fn edit_auth_mode_on_folder_and_save() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn edit_auth_mode_change_prompts_confirmation_and_deletes_old_block() {
+    let dir = workdir("confirm-delete-block");
+    let bru_json = r#"{
+  "name": "confirm-test",
+  "version": "1"
+}"#;
+    fs::write(dir.join("bruno.json"), bru_json).expect("write bruno.json");
+
+    let initial_bru = r#"meta {
+  name: basic-req
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://{{host}}/api
+  body: none
+  auth: basic
+}
+
+auth:basic {
+  username: alice
+  password: secretpassword
+}
+"#;
+    fs::write(dir.join("basic-req.bru"), initial_bru).expect("write basic-req.bru");
+
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let handle = spawn_run(dir.clone(), sender.clone(), events);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Ouvrir l'édition
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // 2. Naviguer vers AuthMode (5 crans vers le bas)
+    for _ in 0..5 {
+        sender.send(key(KeyCode::Down)).await.expect("down");
+    }
+
+    // 3. Ouvrir AuthModePicker (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Modes: ["none", "inherit", "basic", "bearer", ...]
+    // Le mode initial est basic (index 2). 1 cran vers le bas pour sélectionner bearer (index 3).
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // 4. Ctrl+S pour sauvegarder -> doit demander confirmation
+    sender.send(ctrl('s')).await.expect("ctrl+s");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 5. Refuser avec 'n'
+    sender.send(key(KeyCode::Char('n'))).await.expect("n");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Vérifier que le fichier n'a PAS été modifié sur disque
+    let content_after_n = fs::read_to_string(dir.join("basic-req.bru")).expect("read file");
+    assert!(
+        content_after_n.contains("auth: basic"),
+        "le mode basic doit toujours être présent après refus:\n{content_after_n}"
+    );
+    assert!(
+        content_after_n.contains("username: alice"),
+        "les identifiants d'origine doivent être conservés après refus:\n{content_after_n}"
+    );
+
+    // 6. Ctrl+S à nouveau puis accepter avec 'y'
+    sender.send(ctrl('s')).await.expect("ctrl+s");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    sender.send(key(KeyCode::Char('y'))).await.expect("y");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Quitter
+    sender.send(key(KeyCode::Char('q'))).await.expect("quit");
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("timeout")
+        .expect("join");
+
+    assert!(matches!(exit, Exit::Normal));
+
+    // 7. Vérifier que le fichier sur disque a été correctement sauvegardé
+    let content_after_save = fs::read_to_string(dir.join("basic-req.bru")).expect("read file");
+    assert!(
+        content_after_save.contains("auth: bearer"),
+        "le nouveau mode bearer doit être écrit:\n{content_after_save}"
+    );
+    assert!(
+        content_after_save.contains("auth:bearer {\n  token: \n}"),
+        "le nouveau bloc bearer vide doit être présent:\n{content_after_save}"
+    );
+    assert!(
+        !content_after_save.contains("auth:basic"),
+        "l'ancien bloc auth:basic doit avoir été supprimé:\n{content_after_save}"
+    );
+    assert!(
+        !content_after_save.contains("alice"),
+        "les anciennes valeurs doivent avoir été supprimées:\n{content_after_save}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

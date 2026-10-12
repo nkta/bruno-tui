@@ -4,8 +4,8 @@ use ratatui::text::Line;
 
 use crate::app::message::InputKey;
 use crate::app::model::{
-    EditSession, EditState, EditableField, Focus, InputTarget, Model, SavedEdit, StatusMessage,
-    field_enabled, field_value, field_value_committed, section_entries,
+    EditSession, EditState, EditableField, Focus, InputTarget, Model, PendingConfirm, SavedEdit,
+    StatusMessage, field_enabled, field_value, field_value_committed, section_entries,
 };
 use crate::app::text_input::TextInput;
 use crate::app::update::Command;
@@ -895,8 +895,72 @@ pub(crate) fn selection_locked(model: &Model) -> bool {
     model.editing.as_ref().is_some_and(EditSession::has_unsaved)
 }
 
+/// Détermine le mode d'authentification initial déclaré dans l'AST.
+pub(crate) fn ast_auth_mode(ast: &crate::collection::BruFile) -> Option<String> {
+    for m in crate::collection::ast::METHODS {
+        if let Some(val) = ast.entry(m, "auth") {
+            return Some(val.trim().to_string());
+        }
+    }
+    if let Some(val) = ast
+        .entry("grpc", "auth")
+        .or_else(|| ast.entry("ws", "auth"))
+    {
+        return Some(val.trim().to_string());
+    }
+    if let Some(val) = ast.entry("auth", "mode") {
+        return Some(val.trim().to_string());
+    }
+    ast.blocks()
+        .find(|b| b.name.starts_with("auth:"))
+        .map(|b| b.name["auth:".len()..].to_string())
+}
+
+/// Identifie l'ancien mode d'authentification si la session le remplace
+/// et que l'ancien bloc contenait au moins une valeur non vide.
+pub(crate) fn former_non_empty_auth_block(
+    ast: &crate::collection::BruFile,
+    pending: &[FieldEdit],
+) -> Option<String> {
+    let new_mode = pending.iter().rev().find_map(|edit| match edit {
+        FieldEdit::AuthMode(mode) => Some(mode.as_str()),
+        _ => None,
+    })?;
+    let former_mode = ast_auth_mode(ast)?;
+    if former_mode.eq_ignore_ascii_case(new_mode) {
+        return None;
+    }
+    let target_block_name = format!("auth:{former_mode}");
+    if let Some(entries) = ast.dictionary(&target_block_name) {
+        let has_non_empty = entries.iter().any(|e| !e.value.trim().is_empty());
+        if has_non_empty {
+            return Some(former_mode);
+        }
+    }
+    None
+}
+
 /// Déclenche la sauvegarde des modifications si la session est modifiée (D7).
+/// Si un ancien bloc d'auth non vide va être supprimé, demande d'abord confirmation.
 pub(crate) fn save_edit(model: &mut Model) -> Command {
+    let Some(session) = &model.editing else {
+        return Command::None;
+    };
+    if !session.dirty {
+        return Command::None;
+    }
+    let Some(ast) = current_editing_ast(model, &session.path) else {
+        return Command::None;
+    };
+    if let Some(former_mode) = former_non_empty_auth_block(ast, &session.pending) {
+        model.confirm = Some(PendingConfirm::DeleteAuthBlock { former_mode });
+        return Command::None;
+    }
+    force_save_edit(model)
+}
+
+/// Émet la commande de sauvegarde des modifications de la session sans demander de confirmation.
+pub(crate) fn force_save_edit(model: &mut Model) -> Command {
     let Some(session) = &model.editing else {
         return Command::None;
     };
@@ -2592,5 +2656,105 @@ mod tests {
             shown_value(&model, EditableField::AuthParamValue(0)),
             "my-secret-token"
         );
+    }
+
+    #[test]
+    fn former_non_empty_auth_block_detection() {
+        use crate::collection::BruFile;
+
+        // 1. Ancien bloc avec des valeurs non vides -> détecté
+        let source_with_values = "get {\n  url: http://a\n  auth: basic\n}\n\nauth:basic {\n  username: alice\n  password: secret\n}\n";
+        let ast = BruFile::parse(source_with_values.into()).unwrap();
+        assert_eq!(
+            former_non_empty_auth_block(&ast, &[FieldEdit::AuthMode("bearer".into())]),
+            Some("basic".into())
+        );
+
+        // 2. Ancien bloc avec uniquement des valeurs vides -> pas de détection
+        let source_empty_values = "get {\n  url: http://a\n  auth: basic\n}\n\nauth:basic {\n  username: \n  password: \n}\n";
+        let ast_empty = BruFile::parse(source_empty_values.into()).unwrap();
+        assert_eq!(
+            former_non_empty_auth_block(&ast_empty, &[FieldEdit::AuthMode("bearer".into())]),
+            None
+        );
+
+        // 3. Pas de changement de mode -> None
+        assert_eq!(
+            former_non_empty_auth_block(
+                &ast,
+                &[FieldEdit::AuthParamValue {
+                    index: 0,
+                    value: "bob".into()
+                }]
+            ),
+            None
+        );
+
+        // 4. Changement vers un autre mode puis retour au mode initial -> None
+        assert_eq!(
+            former_non_empty_auth_block(
+                &ast,
+                &[
+                    FieldEdit::AuthMode("bearer".into()),
+                    FieldEdit::AuthMode("basic".into()),
+                ]
+            ),
+            None
+        );
+
+        // 5. Folder / collection avec auth non vide -> détecté
+        let source_folder = "meta {\n  name: f\n}\n\nauth {\n  mode: apikey\n}\n\nauth:apikey {\n  key: X-Key\n  value: 123\n}\n";
+        let ast_folder = BruFile::parse(source_folder.into()).unwrap();
+        assert_eq!(
+            former_non_empty_auth_block(&ast_folder, &[FieldEdit::AuthMode("none".into())]),
+            Some("apikey".into())
+        );
+    }
+
+    #[test]
+    fn save_edit_triggers_confirmation_when_former_auth_block_has_values() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        move_to_field(&mut model, EditableField::AuthMode);
+
+        // scripted.bru a auth: bearer avec token: {{tok}} (non vide).
+        // On change le mode en basic (indice 2).
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::Up); // bearer -> basic
+        update(&mut model, Message::Enter);
+        assert!(session(&model).dirty);
+
+        // Ctrl+S (SaveEdit) : doit demander confirmation au lieu d'émettre Command::SaveEdit
+        let cmd = update(&mut model, Message::SaveEdit);
+        assert!(matches!(cmd, Command::None));
+        assert_eq!(
+            model.confirm,
+            Some(PendingConfirm::DeleteAuthBlock {
+                former_mode: "bearer".into()
+            })
+        );
+        assert!(model.editing.as_ref().unwrap().dirty);
+
+        // Refus de la confirmation via ConfirmNo ('n' / Échap) : annule le confirm sans sauvegarder
+        let cmd = update(&mut model, Message::ConfirmNo);
+        assert!(matches!(cmd, Command::None));
+        assert!(model.confirm.is_none());
+        assert!(
+            model.editing.as_ref().unwrap().dirty,
+            "session toujours modifiée"
+        );
+
+        // Deuxième essai Ctrl+S : confirmation redemandée
+        let _ = update(&mut model, Message::SaveEdit);
+        assert_eq!(
+            model.confirm,
+            Some(PendingConfirm::DeleteAuthBlock {
+                former_mode: "bearer".into()
+            })
+        );
+
+        // Acceptation via ConfirmYes ('y' / Entrée) : déclenche la sauvegarde
+        let cmd = update(&mut model, Message::ConfirmYes);
+        assert!(matches!(cmd, Command::SaveEdit { .. }));
+        assert!(model.confirm.is_none());
     }
 }

@@ -931,6 +931,9 @@ fn status_line(model: &Model) -> String {
             PendingConfirm::OverwriteExport { path, .. } => {
                 format!("Écraser {} existant ? (y/n)", path.display())
             }
+            PendingConfirm::DeleteAuthBlock { former_mode } => {
+                format!("L'ancien bloc auth:{former_mode} sera supprimé. Continuer ? (y/n)")
+            }
         };
     }
     if model.help.is_some() {
@@ -1767,6 +1770,15 @@ mod tests {
         model.confirm = Some(PendingConfirm::QuitWithUnsavedEdit);
         let line = status_line(&model);
         assert!(line.contains("Quitter sans sauvegarder"), "{line}");
+
+        model.confirm = Some(PendingConfirm::DeleteAuthBlock {
+            former_mode: "basic".into(),
+        });
+        let line = status_line(&model);
+        assert_eq!(
+            line,
+            "L'ancien bloc auth:basic sera supprimé. Continuer ? (y/n)"
+        );
     }
 
     #[test]

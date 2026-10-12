@@ -1292,6 +1292,8 @@ pub enum PendingConfirm {
     CopyUnmaskedCurl,
     /// Écraser un fichier existant lors de l'export du corps de réponse.
     OverwriteExport { path: PathBuf, bytes: Vec<u8> },
+    /// Supprimer un ancien bloc d'authentification non vide lors du changement de mode.
+    DeleteAuthBlock { former_mode: String },
 }
 
 /// État de saisie du chemin pour l'export du corps de réponse.
