@@ -14,7 +14,7 @@ use ratatui::crossterm::event::{self, Event};
 use tokio::sync::mpsc;
 
 use super::clipboard::ClipboardError;
-use super::model::{HistoryEntry, SavedEdit, SavedEnvironment};
+use super::model::{EditableField, HistoryEntry, SavedEdit, SavedEnvironment};
 use crate::collection::{Collection, LoadError};
 use crate::runner;
 use crate::secrets::Resolved;
@@ -40,6 +40,11 @@ pub enum AppEvent {
     ClipboardResult {
         token: u64,
         result: Result<(), ClipboardError>,
+    },
+    /// Retour de l'éditeur externe de texte (`Command::EditTextInEditor`).
+    TextEditorClosed {
+        field: EditableField,
+        result: Result<String, String>,
     },
     /// Issue d'une écriture sur disque (`Command::SaveEdit`).
     EditSaved {

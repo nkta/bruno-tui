@@ -22,6 +22,9 @@ Arguments :
                   (défaut : répertoire courant)
 
 Options :
+  --editor COMMANDE
+                  éditeur externe pour les scripts, tests, docs et le corps de
+                  réponse (défaut : $VISUAL, $EDITOR, ou nano)
   --secret NOM[=CLÉ]
                   variable secrète transmise à bru (--env-var), répétable.
                   Les vars:secret de l'environnement choisi sont cherchées
@@ -61,6 +64,8 @@ pub enum Command {
         watch: bool,
         /// Persistance de l'historique des exécutions ; `false` avec `--no-history`.
         history: bool,
+        /// Commande de l'éditeur externe demandée par `--editor`.
+        editor: Option<String>,
     },
     Help,
     Version,
@@ -77,6 +82,8 @@ pub enum UsageError {
     /// Porte l'argument fautif, qui n'est qu'un nom et jamais une valeur.
     #[error("--secret invalide : `{0}` (attendu NOM ou NOM=CLÉ, sans espace)")]
     InvalidSecret(String),
+    #[error("--editor attend une commande")]
+    MissingEditorArgument,
 }
 
 /// Analyse les arguments, nom du programme exclu.
@@ -86,6 +93,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
     let mut mouse = true;
     let mut watch = true;
     let mut history = true;
+    let mut editor: Option<String> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -94,6 +102,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
             Some("--no-mouse") => mouse = false,
             Some("--no-watch") => watch = false,
             Some("--no-history") => history = false,
+            Some("--editor") => {
+                let cmd = args.next().ok_or(UsageError::MissingEditorArgument)?;
+                editor = Some(cmd.to_string_lossy().into_owned());
+            }
+            Some(option) if option.starts_with("--editor=") => {
+                editor = Some(option["--editor=".len()..].to_owned());
+            }
             Some("--secret") => {
                 let spec = args.next().ok_or(UsageError::MissingSecretArgument)?;
                 push_secret(&mut secrets, &spec)?;
@@ -118,6 +133,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
         mouse,
         watch,
         history,
+        editor,
     })
 }
 
@@ -148,6 +164,7 @@ mod tests {
             mouse: true,
             watch: true,
             history: true,
+            editor: None,
         }
     }
 
@@ -177,6 +194,7 @@ mod tests {
         assert_eq!(parse_strs(&["x", "--help"]), Ok(Command::Help));
         assert!(VERSION.starts_with("bruno-tui "));
         assert!(USAGE.contains("--secret NOM[=CLÉ]"));
+        assert!(USAGE.contains("--editor COMMANDE"));
     }
 
     #[test]
@@ -189,6 +207,34 @@ mod tests {
     }
 
     #[test]
+    fn editor_option() {
+        let with_editor = |path: &str, editor: &str| Command::Run {
+            path: PathBuf::from(path),
+            secrets: Vec::new(),
+            mouse: true,
+            watch: true,
+            history: true,
+            editor: Some(editor.to_owned()),
+        };
+        assert_eq!(
+            parse_strs(&["--editor", "code --wait", "./c"]),
+            Ok(with_editor("./c", "code --wait"))
+        );
+        assert_eq!(
+            parse_strs(&["--editor=vim", "./c"]),
+            Ok(with_editor("./c", "vim"))
+        );
+        assert_eq!(
+            parse_strs(&["./c", "--editor", "emacs"]),
+            Ok(with_editor("./c", "emacs"))
+        );
+        assert_eq!(
+            parse_strs(&["--editor"]),
+            Err(UsageError::MissingEditorArgument)
+        );
+    }
+
+    #[test]
     fn no_mouse_option() {
         let without_mouse = |path: &str| Command::Run {
             path: PathBuf::from(path),
@@ -196,6 +242,7 @@ mod tests {
             mouse: false,
             watch: true,
             history: true,
+            editor: None,
         };
         assert_eq!(parse_strs(&["./c"]), Ok(run("./c")));
         assert_eq!(parse_strs(&["--no-mouse", "./c"]), Ok(without_mouse("./c")));
@@ -219,6 +266,7 @@ mod tests {
             mouse: true,
             watch: false,
             history: true,
+            editor: None,
         };
         assert_eq!(parse_strs(&["./c"]), Ok(run("./c")));
         assert_eq!(parse_strs(&["--no-watch", "./c"]), Ok(without_watch("./c")));
@@ -242,6 +290,7 @@ mod tests {
             mouse: true,
             watch: true,
             history: false,
+            editor: None,
         };
         assert_eq!(parse_strs(&["./c"]), Ok(run("./c")));
         assert_eq!(
@@ -282,6 +331,7 @@ mod tests {
                 mouse: true,
                 watch: true,
                 history: true,
+                editor: None,
             })
         );
         assert_eq!(
@@ -292,6 +342,7 @@ mod tests {
                 mouse: true,
                 watch: true,
                 history: true,
+                editor: None,
             })
         );
     }
@@ -328,6 +379,7 @@ mod tests {
                 mouse: true,
                 watch: true,
                 history: true,
+                editor: None,
             })
         );
     }

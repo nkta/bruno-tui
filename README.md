@@ -19,6 +19,7 @@ Options :
 | Option | Effet |
 |---|---|
 | `--secret NOM[=CLÉ]` | variable secrète transmise à `bru` (répétable). Cherchée dans le `.env` de la collection puis le shell, sous `CLÉ` ou `NOM`/`NOM_EN_MAJUSCULES` ; une saisie dans le panneau Secrets prime. Jamais de valeur en clair sur la ligne de commande. |
+| `--editor COMMANDE` | commande d'éditeur externe pour l'édition de texte (scripts, tests, docs) et l'ouverture du corps (priorité sur `VISUAL` et `EDITOR`, repli sur `nano`) |
 | `--no-mouse` | n'active pas la capture souris (la sélection native du terminal reste disponible) |
 | `--no-watch` | désactive la surveillance et le rechargement automatique de la collection |
 | `--no-history` | désactive la persistance de l'historique des exécutions dans le fichier d'état |
@@ -162,28 +163,41 @@ aussi bien pour les fichiers `.bru` que pour les collections OpenCollection YAML
 - **Masquage d'authentification** : les valeurs littérales sensibles (mots de passe, tokens,
   secrets, clés d'API) sont masquées (`********`) dans l'onglet Auth, tandis que les références
   de variables (`{{variable}}`) restent visibles en clair.
-- **Lecture seule** : les dossiers et la collection sont strictement en lecture seule ; aucune
-  session d'édition ne peut y être ouverte.
+- **Édition** : pour les collections Bruno (`.bru`), les requêtes, les dossiers (`folder.bru`)
+  et la racine (`collection.bru`) supportent l'édition des en-têtes et des blocs de texte
+  (scripts, tests, documentation). Les collections OpenCollection (YAML), gRPC et WebSocket
+  restent strictement en lecture seule.
 
 
-## Édition d'une requête
+## Édition (requêtes, dossiers, collection)
 
-Dans le panneau Détail, `Entrée` (ou `e`) ouvre une session d'édition de la
-requête sélectionnée. Rien n'est écrit sur disque avant `Ctrl+S`.
+Dans le panneau Détail, `Entrée` (ou `e`) ouvre une session d'édition de la requête,
+du dossier (`folder.bru`) ou de la collection (`collection.bru`) sélectionné. Rien n'est
+écrit sur disque avant `Ctrl+S`.
 
 Sélection de champ (URL, méthode, en-têtes, paramètres de requête et de
-chemin, corps) :
+chemin, corps, scripts pré/post, tests, documentation) :
 
 | Touche | Effet |
 |---|---|
 | `↑`/`k`, `↓`/`j` | champ précédent, suivant |
-| `Entrée` | modifier la valeur ; sur la méthode, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur une ligne « + Ajouter », ajoute une entrée |
+| `Entrée` | modifier la valeur ; sur la méthode, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur un bloc de texte (script, test, doc), ouvre l'éditeur externe ; sur une ligne « + Ajouter », ajoute une entrée |
 | `Espace` | activer ou désactiver l'en-tête ou le paramètre |
 | `a` | ajouter une entrée dans la section du champ (clé, puis valeur) |
 | `d` | supprimer l'en-tête ou le paramètre, sans confirmation |
 | `c` | renommer la clé de l'en-tête ou du paramètre |
-| `Ctrl+S` | enregistrer |
+| `Ctrl+S` | enregistrer sur le disque |
 | `Échap` | fermer la session (confirmation si modifiée) |
+
+### Édition externe des blocs de texte
+
+Sur un bloc de texte (**Script pré-requête**, **Script post-réponse**, **Tests**, **Documentation**),
+l'appui sur `Entrée` suspend le TUI et ouvre le fichier dans un éditeur externe :
+
+- **Choix de l'éditeur** : `--editor COMMANDE` prioritaire, puis variable `VISUAL`, puis `EDITOR`, avec repli sur `nano`.
+- **Fichier temporaire sécurisé** : créé dans `$XDG_RUNTIME_DIR` (ou le dossier temporaire système) avec des droits stricts `0600` et une extension adaptée (`.js` pour les scripts/tests, `.md` pour la documentation). Le fichier est systématiquement supprimé dès la fermeture de l'éditeur.
+- **Prise en compte des modifications** : le texte relu devient une modification en attente dans la session. Si le texte est vidé, le bloc correspondant est retiré à l'enregistrement.
+- **Formatage Bruno** : lors de la sauvegarde (`Ctrl+S`), le contenu est réindenté à 2 espaces conformément au format Bruno.
 
 Saisie : `Entrée` ou `Tab` valide (`Entrée` insère un saut de ligne dans le
 corps), `Échap` annule, `Ctrl+S` valide puis enregistre ; pendant la saisie

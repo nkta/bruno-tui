@@ -170,7 +170,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Entrée",
-                effect: "modifier la valeur (ou ouvrir sélecteur de méthode)",
+                effect: "modifier la valeur (ou sélecteur de méthode / éditeur externe pour scripts, tests, docs)",
             },
             HelpEntry {
                 key: "Espace",

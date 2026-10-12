@@ -238,23 +238,39 @@ fn mouse_click_on_tree_header_selects_collection() {
 }
 
 #[test]
-fn read_only_no_editing_on_folder_or_collection() {
+fn editing_on_bruno_folder_and_collection_and_read_only_on_opencollection() {
     let mut model = fixture_model("tests/fixtures/collections/folder-content");
     select_row(&mut model, "group");
     update(&mut model, Message::NextFocus);
     assert_eq!(model.focus, Focus::Detail);
 
-    // 'e' (StartEdit) sur un dossier ne fait rien
+    // 'e' (StartEdit) sur un dossier Bruno ouvre la session
     update(&mut model, Message::StartEdit);
-    assert!(model.editing.is_none());
+    assert!(model.editing.is_some());
+    assert_eq!(
+        model.editing.as_ref().unwrap().path,
+        std::path::PathBuf::from("group/folder.bru")
+    );
+    model.editing = None;
 
-    // Sur la collection
+    // Sur la collection Bruno
     update(&mut model, Message::FocusTree);
     update(&mut model, Message::Rename);
     assert!(model.selected_collection);
     update(&mut model, Message::NextFocus);
     update(&mut model, Message::StartEdit);
-    assert!(model.editing.is_none());
+    assert!(model.editing.is_some());
+    assert_eq!(
+        model.editing.as_ref().unwrap().path,
+        std::path::PathBuf::from("collection.bru")
+    );
+
+    // Sur une collection OpenCollection : toujours lecture seule
+    let mut oc_model = oc_fixture_model("tests/fixtures/collections/oc-probe");
+    select_row(&mut oc_model, "data");
+    update(&mut oc_model, Message::NextFocus);
+    update(&mut oc_model, Message::StartEdit);
+    assert!(oc_model.editing.is_none());
 }
 
 #[test]

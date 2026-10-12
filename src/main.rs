@@ -20,27 +20,29 @@ use tokio::sync::mpsc;
 const USAGE_ERROR: u8 = 2;
 
 fn main() -> ExitCode {
-    let (path, secrets, mouse, watch, history) = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(Command::Run {
-            path,
-            secrets,
-            mouse,
-            watch,
-            history,
-        }) => (path, secrets, mouse, watch, history),
-        Ok(Command::Help) => {
-            print!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        Ok(Command::Version) => {
-            println!("{VERSION}");
-            return ExitCode::SUCCESS;
-        }
-        Err(error) => {
-            eprintln!("bruno-tui : {error}\n\n{USAGE}");
-            return ExitCode::from(USAGE_ERROR);
-        }
-    };
+    let (path, secrets, mouse, watch, history, editor) =
+        match cli::parse(std::env::args_os().skip(1)) {
+            Ok(Command::Run {
+                path,
+                secrets,
+                mouse,
+                watch,
+                history,
+                editor,
+            }) => (path, secrets, mouse, watch, history, editor),
+            Ok(Command::Help) => {
+                print!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            Ok(Command::Version) => {
+                println!("{VERSION}");
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => {
+                eprintln!("bruno-tui : {error}\n\n{USAGE}");
+                return ExitCode::from(USAGE_ERROR);
+            }
+        };
 
     // Vérifié avant toute modification de l'état du terminal.
     if !io::stdout().is_terminal() {
@@ -105,6 +107,7 @@ fn main() -> ExitCode {
             suspended,
             watch,
             history,
+            editor,
         )),
         Err(error) => Ok(Exit::TerminalError(error)),
     };
