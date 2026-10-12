@@ -12851,7 +12851,7 @@ mod mouse_tests {
     fn test_run_finished_multi_iterations_aggregates_and_stores_last_outcome() {
         let mut model = runner_probe_model();
         let report: crate::runner::report::Report = serde_json::from_str(include_str!(
-            "../../tests/fixtures/reports/csv-iterations.json"
+            "../../../tests/fixtures/reports/csv-iterations.json"
         ))
         .expect("rapport csv-iterations valide");
 
@@ -13087,13 +13087,13 @@ mod series_tests {
 
     fn up_report() -> Report {
         report(include_str!(
-            "../../tests/fixtures/reports/multi-env-up.json"
+            "../../../tests/fixtures/reports/multi-env-up.json"
         ))
     }
 
     fn down_report() -> Report {
         report(include_str!(
-            "../../tests/fixtures/reports/multi-env-down.json"
+            "../../../tests/fixtures/reports/multi-env-down.json"
         ))
     }
 
@@ -13784,7 +13784,7 @@ mod series_tests {
         model.focus = Focus::Campaign;
         started(update(&mut model, Message::RunSelected));
         mark_active(&mut model, 1);
-        let report = report(include_str!("../../tests/fixtures/reports/grpc-ws.json"));
+        let report = report(include_str!("../../../tests/fixtures/reports/grpc-ws.json"));
         finish(&mut model, 1, completed(report));
         model.focus = Focus::Campaign;
         // Seuls les échecs gRPC/WS : rien n'est relancé.
