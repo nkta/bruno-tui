@@ -578,7 +578,8 @@ pub(crate) fn with_edit(pending: &[FieldEdit], edit: FieldEdit) -> Vec<FieldEdit
         | (Some(FieldEdit::ScriptPreRequest(_)), FieldEdit::ScriptPreRequest(_))
         | (Some(FieldEdit::ScriptPostResponse(_)), FieldEdit::ScriptPostResponse(_))
         | (Some(FieldEdit::Tests(_)), FieldEdit::Tests(_))
-        | (Some(FieldEdit::Docs(_)), FieldEdit::Docs(_)) => true,
+        | (Some(FieldEdit::Docs(_)), FieldEdit::Docs(_))
+        | (Some(FieldEdit::AuthMode(_)), FieldEdit::AuthMode(_)) => true,
         (
             Some(FieldEdit::HeaderValue { index: a, .. }),
             FieldEdit::HeaderValue { index: b, .. },
@@ -590,6 +591,10 @@ pub(crate) fn with_edit(pending: &[FieldEdit], edit: FieldEdit) -> Vec<FieldEdit
         | (
             Some(FieldEdit::PathParamValue { index: a, .. }),
             FieldEdit::PathParamValue { index: b, .. },
+        )
+        | (
+            Some(FieldEdit::AuthParamValue { index: a, .. }),
+            FieldEdit::AuthParamValue { index: b, .. },
         ) => a == b,
         _ => false,
     };

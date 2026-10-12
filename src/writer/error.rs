@@ -67,6 +67,10 @@ pub enum EditError {
     #[error("méthode inconnue")]
     UnknownMethod,
 
+    /// Mode d'authentification inconnu.
+    #[error("mode d'authentification inconnu")]
+    UnknownAuthMode,
+
     #[error("bloc `{block}` non modifiable structurellement")]
     ImmutableBlock { block: &'static str },
 
