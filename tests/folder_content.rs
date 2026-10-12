@@ -238,20 +238,50 @@ fn mouse_click_on_tree_header_selects_collection() {
 }
 
 #[test]
-fn read_only_no_editing_on_folder_or_collection() {
+fn editing_allowed_on_bru_folder_and_collection() {
     let mut model = fixture_model("tests/fixtures/collections/folder-content");
     select_row(&mut model, "group");
     update(&mut model, Message::NextFocus);
     assert_eq!(model.focus, Focus::Detail);
 
-    // 'e' (StartEdit) sur un dossier ne fait rien
+    // 'e' (StartEdit) sur un dossier .bru ouvre la session
     update(&mut model, Message::StartEdit);
+    assert!(model.editing.is_some());
+    assert_eq!(
+        model.editing.as_ref().unwrap().path,
+        PathBuf::from("group/folder.bru")
+    );
+    update(&mut model, Message::FocusTree);
     assert!(model.editing.is_none());
 
-    // Sur la collection
+    // Sur la collection .bru
     update(&mut model, Message::FocusTree);
     update(&mut model, Message::Rename);
     assert!(model.selected_collection);
+    update(&mut model, Message::NextFocus);
+    update(&mut model, Message::StartEdit);
+    assert!(model.editing.is_some());
+    assert_eq!(
+        model.editing.as_ref().unwrap().path,
+        PathBuf::from("collection.bru")
+    );
+    update(&mut model, Message::FocusTree);
+    assert!(model.editing.is_none());
+}
+
+#[test]
+fn read_only_no_editing_on_opencollection() {
+    let mut model = oc_fixture_model("tests/fixtures/collections/oc-probe");
+    // Sur la collection OpenCollection (YAML)
+    update(&mut model, Message::Rename);
+    assert!(model.selected_collection);
+    update(&mut model, Message::NextFocus);
+    update(&mut model, Message::StartEdit);
+    assert!(model.editing.is_none());
+
+    // Sur un dossier OpenCollection
+    update(&mut model, Message::Rename);
+    select_row(&mut model, "data");
     update(&mut model, Message::NextFocus);
     update(&mut model, Message::StartEdit);
     assert!(model.editing.is_none());

@@ -211,14 +211,13 @@ pub async fn run<B: Backend>(
                                             ),
                                         },
                                     )?;
-                                    let view = crate::collection::RequestView::from_ast(&ast)
-                                        .map_err(|source| writer::WriteError::Io {
-                                            path: full_path.clone(),
-                                            source: io::Error::new(
-                                                io::ErrorKind::InvalidData,
-                                                source,
-                                            ),
-                                        })?;
+                                    let view = match crate::collection::RequestView::from_ast(&ast)
+                                    {
+                                        Ok(v) => v,
+                                        Err(_) => {
+                                            crate::collection::RequestView::from_file_ast(&ast)
+                                        }
+                                    };
                                     Ok(model::SavedEdit {
                                         stamp: new_stamp,
                                         ast,

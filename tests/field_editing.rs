@@ -564,3 +564,101 @@ async fn environment_editing_flow_saves_to_disk_and_secrets_never_appear() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn folder_and_collection_kv_editing_and_save() {
+    let dir = workdir("folder-collection-edit");
+    fs::write(
+        dir.join("bruno.json"),
+        r#"{"version":"1","name":"test","type":"collection"}"#,
+    )
+    .expect("bruno.json");
+    fs::write(
+        dir.join("collection.bru"),
+        "headers {\n  X-Root: root-val\n}\n",
+    )
+    .expect("collection.bru");
+    fs::create_dir_all(dir.join("grp")).expect("grp dir");
+    fs::write(
+        dir.join("grp/folder.bru"),
+        "meta {\n  name: grp\n}\n\nheaders {\n  X-Folder: old-folder-val\n}\n",
+    )
+    .expect("folder.bru");
+
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let (clipboard, _rx) = SpyClipboard::new();
+    let handle = spawn_run(
+        dir.clone(),
+        sender.clone(),
+        events,
+        Arc::new(BruWriter),
+        clipboard,
+    );
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Sur le dossier grp dans l'arbre : passer au détail (Tab)
+    sender.send(key(KeyCode::Tab)).await.expect("send");
+    // 2. Ouvrir la session d'édition ('e')
+    sender.send(key(KeyCode::Char('e'))).await.expect("send");
+    // 3. Entrée sur le champ Header(0) pour modifier la valeur
+    sender.send(key(KeyCode::Enter)).await.expect("send");
+    for _ in 0..15 {
+        sender.send(key(KeyCode::Backspace)).await.expect("send");
+    }
+    for c in "new-folder-val".chars() {
+        sender.send(key(KeyCode::Char(c))).await.expect("send");
+    }
+    sender.send(key(KeyCode::Enter)).await.expect("send");
+    // Sauvegarder avec Ctrl+S
+    sender.send(ctrl('s')).await.expect("send");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // 4. Fermer la session propre avec Échap, revenir à l'arbre
+    sender.send(key(KeyCode::Esc)).await.expect("send");
+    sender.send(key(KeyCode::Esc)).await.expect("send");
+
+    // 5. Sélectionner la collection avec 'c'
+    sender.send(key(KeyCode::Char('c'))).await.expect("send");
+    // Passer au détail (Tab)
+    sender.send(key(KeyCode::Tab)).await.expect("send");
+    // Ouvrir la session d'édition ('e')
+    sender.send(key(KeyCode::Char('e'))).await.expect("send");
+    // Entrée sur le champ Header(0)
+    sender.send(key(KeyCode::Enter)).await.expect("send");
+    for _ in 0..15 {
+        sender.send(key(KeyCode::Backspace)).await.expect("send");
+    }
+    for c in "new-root-val".chars() {
+        sender.send(key(KeyCode::Char(c))).await.expect("send");
+    }
+    sender.send(key(KeyCode::Enter)).await.expect("send");
+    // Sauvegarder avec Ctrl+S
+    sender.send(ctrl('s')).await.expect("send");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Quitter
+    sender.send(key(KeyCode::Esc)).await.expect("send");
+    sender.send(key(KeyCode::Char('q'))).await.expect("send");
+
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("fermeture normale")
+        .expect("join handle");
+    assert!(matches!(exit, Exit::Normal));
+
+    // Vérifier les fichiers sauvegardés sur disque
+    let folder_content = fs::read_to_string(dir.join("grp/folder.bru")).expect("read folder");
+    assert!(
+        folder_content.contains("X-Folder: new-folder-val"),
+        "{folder_content}"
+    );
+
+    let coll_content = fs::read_to_string(dir.join("collection.bru")).expect("read collection");
+    assert!(
+        coll_content.contains("X-Root: new-root-val"),
+        "{coll_content}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -608,15 +608,7 @@ fn render_insert_cursor(model: &Model, frame: &mut Frame, detail_area: Rect) {
     if !matches!(session.state, EditState::Input(_)) {
         return;
     }
-    let Some(TreeNode::Request(req)) = model.selected_node() else {
-        return;
-    };
-    if req.path != session.path {
-        return;
-    }
-    let Some((line_index, col_index)) =
-        detail::cursor_position_in_detail(req, session, model.shown_request_tab())
-    else {
+    let Some((line_index, col_index)) = detail::cursor_position_for_model(model) else {
         return;
     };
     let inner_area = inner(detail_area);

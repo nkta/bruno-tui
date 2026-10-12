@@ -52,49 +52,47 @@ fn lines_to_strings(text: &Text<'static>) -> Vec<String> {
         .collect()
 }
 
-/// Texte du détail du nœud sélectionné (ou de la collection racine) ; vide sans sélection.
-/// Ne contient plus le résultat d'exécution d'une requête, affiché séparément par
-/// [`response_text`] (`split-request-response-panels`).
-pub fn detail_text(model: &Model) -> Text<'static> {
+/// Texte, lignes de champs éditables et boîtes de section du détail du nœud sélectionné (ou de la collection).
+pub fn detail_text_and_fields(model: &Model) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     if model.selected_collection {
         if let Some(collection) = model.loaded() {
-            return collection_text_and_boxes(collection, model.shown_request_tab()).0;
+            let session = model
+                .editing
+                .as_ref()
+                .filter(|s| s.path == std::path::Path::new("collection.bru"));
+            return collection_text_and_boxes(collection, session, model.shown_request_tab());
         }
-        return Text::default();
+        return (Text::default(), Vec::new(), Vec::new());
     }
     match model.selected_node() {
         Some(TreeNode::Request(request)) => {
             let session = model.editing.as_ref().filter(|s| s.path == request.path);
-            request_text_and_fields(request, session, model.shown_request_tab()).0
+            request_text_and_fields(request, session, model.shown_request_tab())
         }
         Some(TreeNode::Folder(folder)) => {
-            folder_text_and_boxes(folder, model.shown_request_tab()).0
+            let session = model
+                .editing
+                .as_ref()
+                .filter(|s| s.path == folder.path.join("folder.bru"));
+            folder_text_and_boxes(folder, session, model.shown_request_tab())
         }
-        Some(TreeNode::Error(error)) => error_text(error),
-        None => Text::default(),
+        Some(TreeNode::Error(error)) => (error_text(error), Vec::new(), Vec::new()),
+        None => (Text::default(), Vec::new(), Vec::new()),
     }
+}
+
+/// Texte du détail du nœud sélectionné (ou de la collection racine) ; vide sans sélection.
+/// Ne contient plus le résultat d'exécution d'une requête, affiché séparément par
+/// [`response_text`] (`split-request-response-panels`).
+pub fn detail_text(model: &Model) -> Text<'static> {
+    detail_text_and_fields(model).0
 }
 
 /// Boîtes de section du détail de la requête, du dossier ou de la collection
 /// sélectionné ; vide hors sélection ou pour un nœud en erreur
 /// (`add-boxed-detail-sections`).
 pub fn detail_section_boxes(model: &Model) -> Vec<SectionBox> {
-    if model.selected_collection {
-        if let Some(collection) = model.loaded() {
-            return collection_text_and_boxes(collection, model.shown_request_tab()).1;
-        }
-        return Vec::new();
-    }
-    match model.selected_node() {
-        Some(TreeNode::Request(request)) => {
-            let session = model.editing.as_ref().filter(|s| s.path == request.path);
-            request_text_and_fields(request, session, model.shown_request_tab()).2
-        }
-        Some(TreeNode::Folder(folder)) => {
-            folder_text_and_boxes(folder, model.shown_request_tab()).1
-        }
-        _ => Vec::new(),
-    }
+    detail_text_and_fields(model).2
 }
 
 /// Texte de la réponse du nœud sélectionné : le résultat de la dernière
@@ -1152,6 +1150,8 @@ pub fn folder_tab_is_empty(meta: &FileMeta, tab: RequestTab) -> bool {
         }
         RequestTab::Tests => meta.tests().is_none_or(|t| t.trim().is_empty()),
         RequestTab::Docs => meta.docs().is_none_or(|d| d.trim().is_empty()),
+        RequestTab::Assert => meta.assertions().is_empty(),
+        RequestTab::Settings => meta.settings().is_empty(),
         _ => true,
     }
 }
@@ -1303,20 +1303,34 @@ pub fn folder_tab_at(shown: RequestTab, width: u16, offset: u16) -> Option<Reque
         .map(|(tab, _)| tab)
 }
 
-/// Champ éditable affiché à la ligne logique `line` du détail de la
-/// requête sélectionnée, en tenant compte de la session d'édition
-/// (`mouse-support`, D4) ; `None` hors champ ou hors requête.
+/// Champ éditable affiché à la ligne logique `line` du détail sélectionné,
+/// en tenant compte de la session d'édition (`mouse-support`, D4) ;
+/// `None` hors champ.
 pub fn field_at_line(model: &Model, line: u16) -> Option<EditableField> {
-    let Some(TreeNode::Request(request)) = model.selected_node() else {
-        return None;
-    };
-    let session = model.editing.as_ref().filter(|s| s.path == request.path);
-    let (_, fields, _) = request_text_and_fields(request, session, model.shown_request_tab());
+    let (_, fields, _) = detail_text_and_fields(model);
     let line = usize::from(line);
     fields
         .into_iter()
         .find(|location| (location.line..location.line + location.count).contains(&line))
         .map(|location| location.field)
+}
+
+/// Position du curseur de texte pendant une saisie dans le détail du modèle.
+pub fn cursor_position_for_model(model: &Model) -> Option<(usize, usize)> {
+    let session = model.editing.as_ref()?;
+    let EditState::Input(input) = &session.state else {
+        return None;
+    };
+    let field = session.current_field()?;
+    let (_, field_lines, _) = detail_text_and_fields(model);
+    let location = field_lines.iter().find(|l| l.field == field)?;
+    let (line, _) = input.cursor_line_col();
+    let before = input.text_before_cursor_on_line();
+    let (visible, _) = skip_columns(&before, usize::from(session.hscroll));
+    Some((
+        location.line + line,
+        location.prefix_width + Line::raw(visible).width(),
+    ))
 }
 
 /// Position du curseur de texte pendant une saisie : ligne logique dans le
@@ -1806,9 +1820,10 @@ pub fn tab_bar(active: ResponseTab) -> Line<'static> {
 
 fn meta_tab_content(
     meta: &FileMeta,
+    session: Option<&EditSession>,
     tab: RequestTab,
     scope: &str,
-) -> (Vec<Line<'static>>, Vec<SectionBox>) {
+) -> (Vec<Line<'static>>, Vec<FieldLine>, Vec<SectionBox>) {
     let mut lines = vec![field("Portée", scope), Line::default()];
     let mut field_lines = Vec::new();
     let mut boxes = Vec::new();
@@ -1820,8 +1835,11 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "En-têtes".to_owned(),
-                |lines, _| {
-                    entries(lines, meta.headers());
+                |lines, field_lines| {
+                    let headers = session
+                        .map(|s| s.preview.headers.as_slice())
+                        .unwrap_or_else(|| meta.headers());
+                    editable_entries(lines, field_lines, headers, session, EntrySection::Headers);
                 },
             );
         }
@@ -1851,8 +1869,17 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "Variables pré-requête".to_owned(),
-                |lines, _| {
-                    entries(lines, meta.vars_pre_request());
+                |lines, field_lines| {
+                    let vars_pre = session
+                        .map(|s| s.preview.vars_pre_request())
+                        .unwrap_or_else(|| meta.vars_pre_request());
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        vars_pre,
+                        session,
+                        EntrySection::VarsPreRequest,
+                    );
                 },
             );
             boxed_section(
@@ -1860,8 +1887,17 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "Variables post-réponse".to_owned(),
-                |lines, _| {
-                    entries(lines, meta.vars_post_response());
+                |lines, field_lines| {
+                    let vars_post = session
+                        .map(|s| s.preview.vars_post_response())
+                        .unwrap_or_else(|| meta.vars_post_response());
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        vars_post,
+                        session,
+                        EntrySection::VarsPostResponse,
+                    );
                 },
             );
         }
@@ -1882,6 +1918,46 @@ fn meta_tab_content(
                 "Script post-réponse".to_owned(),
                 |lines, _| {
                     render_code_block(lines, meta.script_post_response());
+                },
+            );
+        }
+        RequestTab::Assert => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Assertions".to_owned(),
+                |lines, field_lines| {
+                    let assertions = session
+                        .map(|s| s.preview.assertions())
+                        .unwrap_or_else(|| meta.assertions());
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        assertions,
+                        session,
+                        EntrySection::Assert,
+                    );
+                },
+            );
+        }
+        RequestTab::Settings => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Settings".to_owned(),
+                |lines, field_lines| {
+                    let settings = session
+                        .map(|s| s.preview.settings())
+                        .unwrap_or_else(|| meta.settings());
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        settings,
+                        session,
+                        EntrySection::Settings,
+                    );
                 },
             );
         }
@@ -1915,21 +1991,32 @@ fn meta_tab_content(
         _ => {}
     }
 
-    (lines, boxes)
+    (lines, field_lines, boxes)
 }
 
-fn folder_text_and_boxes(folder: &FolderNode, tab: RequestTab) -> (Text<'static>, Vec<SectionBox>) {
+fn folder_text_and_boxes(
+    folder: &FolderNode,
+    session: Option<&EditSession>,
+    tab: RequestTab,
+) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     match &folder.meta {
         Some(Ok(meta)) => {
             let mut lines = vec![title(folder.name.clone()), Line::default()];
             let offset = lines.len();
-            let (tab_lines, mut boxes) =
-                meta_tab_content(meta, tab, "déclaré dans ce dossier (sans héritage)");
+            let (tab_lines, mut field_lines, mut boxes) = meta_tab_content(
+                meta,
+                session,
+                tab,
+                "déclaré dans ce dossier (sans héritage)",
+            );
+            for fl in &mut field_lines {
+                fl.line += offset;
+            }
             for b in &mut boxes {
                 b.first_line += offset;
             }
             lines.extend(tab_lines);
-            (Text::from(lines), boxes)
+            (Text::from(lines), field_lines, boxes)
         }
         Some(Err(error)) => {
             let lines = vec![
@@ -1946,7 +2033,7 @@ fn folder_text_and_boxes(folder: &FolderNode, tab: RequestTab) -> (Text<'static>
                 field("folder.bru", "en erreur"),
                 Line::raw(format!("  {error}")),
             ];
-            (Text::from(lines), Vec::new())
+            (Text::from(lines), Vec::new(), Vec::new())
         }
         None => {
             let lines = vec![
@@ -1962,26 +2049,34 @@ fn folder_text_and_boxes(folder: &FolderNode, tab: RequestTab) -> (Text<'static>
                 Line::default(),
                 field("folder.bru", "absent"),
             ];
-            (Text::from(lines), Vec::new())
+            (Text::from(lines), Vec::new(), Vec::new())
         }
     }
 }
 
 fn collection_text_and_boxes(
     collection: &Collection,
+    session: Option<&EditSession>,
     tab: RequestTab,
-) -> (Text<'static>, Vec<SectionBox>) {
+) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     match &collection.settings {
         Some(Ok(meta)) => {
             let mut lines = vec![title(collection.name.clone()), Line::default()];
             let offset = lines.len();
-            let (tab_lines, mut boxes) =
-                meta_tab_content(meta, tab, "déclaré au niveau collection (sans héritage)");
+            let (tab_lines, mut field_lines, mut boxes) = meta_tab_content(
+                meta,
+                session,
+                tab,
+                "déclaré au niveau collection (sans héritage)",
+            );
+            for fl in &mut field_lines {
+                fl.line += offset;
+            }
             for b in &mut boxes {
                 b.first_line += offset;
             }
             lines.extend(tab_lines);
-            (Text::from(lines), boxes)
+            (Text::from(lines), field_lines, boxes)
         }
         Some(Err(error)) => {
             let lines = vec![
@@ -1991,7 +2086,7 @@ fn collection_text_and_boxes(
                 field("Paramètres de collection", "en erreur"),
                 Line::raw(format!("  {error}")),
             ];
-            (Text::from(lines), Vec::new())
+            (Text::from(lines), Vec::new(), Vec::new())
         }
         None => {
             let lines = vec![
@@ -2000,7 +2095,7 @@ fn collection_text_and_boxes(
                 Line::default(),
                 field("Paramètres de collection", "absents"),
             ];
-            (Text::from(lines), Vec::new())
+            (Text::from(lines), Vec::new(), Vec::new())
         }
     }
 }

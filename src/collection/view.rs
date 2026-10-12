@@ -531,6 +531,11 @@ impl RequestView {
             }),
         }
     }
+
+    /// Vrai si cette vue représente un fichier de dossier ou collection (sans méthode HTTP).
+    pub fn is_file_meta(&self) -> bool {
+        self.method.is_empty()
+    }
 }
 
 /// Contenu détaillé des onglets de `folder.bru` ou `collection.bru`,

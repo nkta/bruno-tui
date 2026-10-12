@@ -1059,19 +1059,25 @@ impl EditableField {
     /// chaque section suivie de sa ligne d'ajout, puis le corps s'il est
     /// éditable.
     pub fn list_for(view: &RequestView) -> Vec<Self> {
-        let mut fields = vec![Self::Method, Self::Url];
+        let mut fields = Vec::new();
+        if !view.is_file_meta() {
+            fields.push(Self::Method);
+            fields.push(Self::Url);
+        }
         for index in 0..view.headers.len() {
             fields.push(Self::HeaderValue(index));
         }
         fields.push(Self::AddRow(EntrySection::Headers));
-        for index in 0..view.query_params.len() {
-            fields.push(Self::QueryParamValue(index));
+        if !view.is_file_meta() {
+            for index in 0..view.query_params.len() {
+                fields.push(Self::QueryParamValue(index));
+            }
+            fields.push(Self::AddRow(EntrySection::QueryParams));
+            for index in 0..view.path_params.len() {
+                fields.push(Self::PathParamValue(index));
+            }
+            fields.push(Self::AddRow(EntrySection::PathParams));
         }
-        fields.push(Self::AddRow(EntrySection::QueryParams));
-        for index in 0..view.path_params.len() {
-            fields.push(Self::PathParamValue(index));
-        }
-        fields.push(Self::AddRow(EntrySection::PathParams));
         for index in 0..view.extra.vars_pre_request.len() {
             fields.push(Self::VarsPreRequestValue(index));
         }
@@ -1083,7 +1089,9 @@ impl EditableField {
         for index in 0..view.extra.assertions.len() {
             fields.push(Self::AssertValue(index));
         }
-        fields.push(Self::AddRow(EntrySection::Assert));
+        if !view.is_file_meta() || !view.extra.assertions.is_empty() {
+            fields.push(Self::AddRow(EntrySection::Assert));
+        }
         for index in 0..view.extra.settings.len() {
             fields.push(Self::SettingsValue(index));
         }
@@ -2090,22 +2098,20 @@ impl Model {
     /// l'onglet choisi restreint à [`FOLDER_TABS`] (défaut [`RequestTab::Headers`]) ;
     /// sinon l'onglet choisi.
     pub fn shown_request_tab(&self) -> RequestTab {
+        let session_tab = self
+            .editing
+            .as_ref()
+            .and_then(EditSession::current_field)
+            .and_then(RequestTab::of_field);
         if self.is_folder_or_collection_selected() {
-            if FOLDER_TABS.contains(&self.request_tab) {
-                self.request_tab
-            } else {
-                RequestTab::Headers
-            }
+            session_tab.unwrap_or_else(|| {
+                if FOLDER_TABS.contains(&self.request_tab) {
+                    self.request_tab
+                } else {
+                    RequestTab::Headers
+                }
+            })
         } else {
-            let session_tab = match self.selected_node() {
-                Some(TreeNode::Request(request)) => self
-                    .editing
-                    .as_ref()
-                    .filter(|session| session.path == request.path)
-                    .and_then(EditSession::current_field)
-                    .and_then(RequestTab::of_field),
-                _ => None,
-            };
             session_tab.unwrap_or(self.request_tab)
         }
     }
@@ -2218,6 +2224,24 @@ impl Model {
         replace_request_in_tree(&mut collection.tree, path, &mut ast, &mut view)
     }
 
+    /// Remplace les métadonnées d'un dossier ou de la collection après sauvegarde.
+    pub fn replace_meta_node(
+        &mut self,
+        path: &std::path::Path,
+        ast: crate::collection::BruFile,
+    ) -> bool {
+        let Some(collection) = self.loaded_mut() else {
+            return false;
+        };
+        let meta = crate::collection::FileMeta::from_ast(ast);
+        if path == std::path::Path::new("collection.bru") {
+            collection.settings = Some(Ok(meta));
+            return true;
+        }
+        let folder_path = path.parent().unwrap_or(path);
+        replace_folder_meta_in_tree(&mut collection.tree, folder_path, meta)
+    }
+
     /// Nœud désigné par une adresse.
     pub fn node_at(&self, address: &[usize]) -> Option<&TreeNode> {
         tree_node_at(&self.loaded()?.tree, address)
@@ -2279,6 +2303,26 @@ pub fn replace_request_in_tree(
                 }
             }
             _ => {}
+        }
+    }
+    false
+}
+
+/// Retourne `true` si le dossier a été trouvé et ses métadonnées remplacées.
+pub fn replace_folder_meta_in_tree(
+    tree: &mut [TreeNode],
+    folder_path: &std::path::Path,
+    meta: crate::collection::FileMeta,
+) -> bool {
+    for node in tree.iter_mut() {
+        if let TreeNode::Folder(folder) = node {
+            if folder.path == folder_path {
+                folder.meta = Some(Ok(meta));
+                return true;
+            }
+            if replace_folder_meta_in_tree(&mut folder.children, folder_path, meta.clone()) {
+                return true;
+            }
         }
     }
     false

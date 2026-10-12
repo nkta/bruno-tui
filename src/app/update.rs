@@ -2497,35 +2497,58 @@ fn read_only_collection(model: &Model) -> bool {
         .is_some_and(|collection| !collection.format.is_editable())
 }
 
-/// Ouvre une session d'édition sur la requête sélectionnée, dans l'état
-/// Sélection de champ.
+/// Ouvre une session d'édition sur la requête, le dossier ou la collection sélectionné,
+/// dans l'état Sélection de champ.
 fn start_edit(model: &mut Model) {
     if model.focus != Focus::Detail || model.editing.is_some() {
-        return;
-    }
-    let Some(TreeNode::Request(request)) = model.selected_node() else {
-        return;
-    };
-    if let Some(kind) = request.view.non_http_label() {
-        model.last_status = Some(StatusMessage::ReadOnlyRequestType(kind));
         return;
     }
     if read_only_collection(model) {
         model.last_status = Some(StatusMessage::ReadOnlyCollection);
         return;
     }
-    let Some(root) = model.loaded().map(|c| &c.root) else {
+    let Some(collection) = model.loaded() else {
         return;
     };
-    let full_path = root.join(&request.path);
+    let root = &collection.root;
+
+    let (path, view) = if model.selected_collection {
+        let meta = match &collection.settings {
+            Some(Ok(meta)) if meta.ast.is_some() => meta,
+            _ => return,
+        };
+        (
+            std::path::PathBuf::from("collection.bru"),
+            crate::collection::RequestView::from_file_meta(meta),
+        )
+    } else {
+        match model.selected_node() {
+            Some(TreeNode::Request(request)) => {
+                if let Some(kind) = request.view.non_http_label() {
+                    model.last_status = Some(StatusMessage::ReadOnlyRequestType(kind));
+                    return;
+                }
+                (request.path.clone(), request.view.clone())
+            }
+            Some(TreeNode::Folder(folder)) => {
+                let meta = match &folder.meta {
+                    Some(Ok(meta)) if meta.ast.is_some() => meta,
+                    _ => return,
+                };
+                (
+                    folder.path.join("folder.bru"),
+                    crate::collection::RequestView::from_file_meta(meta),
+                )
+            }
+            _ => return,
+        }
+    };
+
+    let full_path = root.join(&path);
     let Ok(stamp) = FileStamp::capture(&full_path) else {
         return;
     };
-    model.editing = Some(EditSession::new(
-        request.path.clone(),
-        stamp,
-        request.view.clone(),
-    ));
+    model.editing = Some(EditSession::new(path, stamp, view));
     model.last_status = None;
     scroll_edit_into_view(model);
 }
@@ -3128,9 +3151,29 @@ fn check_edit(
         .editing
         .as_ref()
         .ok_or(crate::writer::EditError::Unreadable)?;
-    let ast = match model.selected_node() {
-        Some(TreeNode::Request(request)) if request.path == session.path => request.ast.as_ref(),
-        _ => None,
+    let ast = if model.selected_collection {
+        if session.path != std::path::Path::new("collection.bru") {
+            return Err(crate::writer::EditError::Unreadable);
+        }
+        model
+            .loaded()
+            .and_then(|c| c.settings.as_ref())
+            .and_then(|res| res.as_ref().ok())
+            .and_then(|meta| meta.ast.as_ref())
+    } else {
+        match model.selected_node() {
+            Some(TreeNode::Request(request)) if request.path == session.path => {
+                request.ast.as_ref()
+            }
+            Some(TreeNode::Folder(folder)) if folder.path.join("folder.bru") == session.path => {
+                folder
+                    .meta
+                    .as_ref()
+                    .and_then(|res| res.as_ref().ok())
+                    .and_then(|meta| meta.ast.as_ref())
+            }
+            _ => None,
+        }
     }
     .ok_or(crate::writer::EditError::Unreadable)?;
     let edits = with_edit(&session.pending, edit);
@@ -3177,17 +3220,10 @@ fn scroll_edit_into_view(model: &mut Model) {
     let Some(session) = &model.editing else {
         return;
     };
-    let Some(TreeNode::Request(request)) = model.selected_node() else {
-        return;
-    };
-    if request.path != session.path {
-        return;
-    }
     let Some(field) = session.current_field() else {
         return;
     };
-    let (_, field_lines, _) =
-        request_text_and_fields(request, Some(session), model.shown_request_tab());
+    let (_, field_lines, _) = crate::app::view::detail::detail_text_and_fields(model);
     let Some(location) = field_lines.iter().find(|l| l.field == field) else {
         return;
     };
@@ -3236,18 +3272,34 @@ fn save_edit(model: &mut Model) -> Command {
     if !session.dirty {
         return Command::None;
     }
-    let Some(TreeNode::Request(req)) = model.selected_node() else {
-        return Command::None;
+    let ast = if model.selected_collection {
+        if session.path != std::path::Path::new("collection.bru") {
+            return Command::None;
+        }
+        model
+            .loaded()
+            .and_then(|c| c.settings.as_ref())
+            .and_then(|res| res.as_ref().ok())
+            .and_then(|meta| meta.ast.clone())
+    } else {
+        match model.selected_node() {
+            Some(TreeNode::Request(req)) if req.path == session.path => req.ast.clone(),
+            Some(TreeNode::Folder(folder)) if folder.path.join("folder.bru") == session.path => {
+                folder
+                    .meta
+                    .as_ref()
+                    .and_then(|res| res.as_ref().ok())
+                    .and_then(|meta| meta.ast.clone())
+            }
+            _ => None,
+        }
     };
-    if req.path != session.path {
-        return Command::None;
-    }
-    let Some(ast) = &req.ast else {
+    let Some(ast) = ast else {
         return Command::None;
     };
     Command::SaveEdit {
         path: session.path.clone(),
-        ast: ast.clone(),
+        ast,
         stamp: session.stamp,
         edits: session.pending.clone(),
     }
@@ -3273,7 +3325,11 @@ fn edit_saved(
             session.dirty = false;
             session.set_preview(saved.view.clone());
             model.last_saved_stamps.insert(path.clone(), saved.stamp);
-            model.replace_request_node(&path, saved.ast, saved.view);
+            if path == std::path::Path::new("collection.bru") || path.ends_with("folder.bru") {
+                model.replace_meta_node(&path, saved.ast);
+            } else {
+                model.replace_request_node(&path, saved.ast, saved.view);
+            }
         }
         Err(error) => {
             model.last_status = Some(super::model::StatusMessage::SaveError(error.to_string()));
@@ -7335,8 +7391,8 @@ mod tests {
         update(&mut model, Message::StartEdit);
         assert!(model.editing.is_none());
 
-        // 2. Sur un dossier avec Focus::Detail : sans effet
-        select(&mut model, "grp");
+        // 2. Sur un dossier sans folder.bru avec Focus::Detail : sans effet
+        select(&mut model, "misc");
         update(&mut model, Message::NextFocus);
         assert_eq!(model.focus, Focus::Detail);
         update(&mut model, Message::StartEdit);
@@ -8120,9 +8176,9 @@ mod tests {
         update(&mut model, Message::StartEdit);
         assert_eq!(session(&model).state, EditState::FieldSelect);
 
-        // Sans effet sur un dossier ni sur un nœud en erreur.
+        // Sans effet sur un dossier sans meta ni sur un nœud en erreur.
         let mut model = loaded_model((100, 30));
-        select(&mut model, "grp");
+        select(&mut model, "misc");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::Enter);
         assert!(model.editing.is_none());
