@@ -1128,21 +1128,35 @@ mod tests {
 
     #[test]
     fn click_on_a_non_editable_body_starts_no_input() {
-        use crate::collection::{BruLoader, CollectionLoader};
+        use crate::collection::{
+            BodyContent, BodyKind, BodyView, BruLoader, CollectionLoader, TreeNode,
+        };
         let root =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/writer-cases");
         let mut model = Model::new(root.clone(), (140, 60));
         update(&mut model, Message::CollectionLoaded(BruLoader.load(&root)));
         model.mouse.capture = true;
         select(&mut model, "form-body.bru");
+        let (path, ast) = match model.selected_node().unwrap() {
+            TreeNode::Request(r) => (r.path.clone(), r.ast.clone().unwrap()),
+            _ => panic!("requête attendue"),
+        };
+        let mut view = match model.selected_node().unwrap() {
+            TreeNode::Request(r) => r.view.clone(),
+            _ => panic!("requête attendue"),
+        };
+        view.body = Some(BodyView {
+            kind: BodyKind::File,
+            content: BodyContent::Text("/tmp/upload.bin".into()),
+        });
+        model.replace_request_node(&path, ast, view);
         model.request_tab = RequestTab::Body;
         let lines = plain_lines(&model);
-        let body = lines
+        let file_line = lines
             .iter()
-            .position(|l| l.contains("Corps"))
-            .expect("corps");
-        assert!(lines[body + 1].trim_start().contains(':'), "{lines:?}");
-        let point = line_point(&model, true, u16::try_from(body + 1).expect("petit"));
+            .position(|l| l.contains("/tmp/upload.bin"))
+            .expect("ligne de fichier");
+        let point = line_point(&model, true, u16::try_from(file_line).expect("petit"));
         click(&mut model, point);
         assert_eq!(model.focus, Focus::Detail);
         assert!(model.editing.is_none());
