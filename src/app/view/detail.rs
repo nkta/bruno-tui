@@ -537,12 +537,14 @@ fn editable_entries(
     section: EntrySection,
 ) {
     if values.is_empty() && session.is_none() {
-        field_lines.push(FieldLine {
-            field: EditableField::AddRow(section),
-            line: lines.len(),
-            count: 1,
-            prefix_width: 2,
-        });
+        if section != EntrySection::Settings {
+            field_lines.push(FieldLine {
+                field: EditableField::AddRow(section),
+                line: lines.len(),
+                count: 1,
+                prefix_width: 2,
+            });
+        }
         lines.push(Line::raw("  aucun"));
         return;
     }
@@ -551,6 +553,10 @@ fn editable_entries(
             EntrySection::Headers => EditableField::HeaderValue(i),
             EntrySection::QueryParams => EditableField::QueryParamValue(i),
             EntrySection::PathParams => EditableField::PathParamValue(i),
+            EntrySection::VarsPreRequest => EditableField::VarsPreRequestValue(i),
+            EntrySection::VarsPostResponse => EditableField::VarsPostResponseValue(i),
+            EntrySection::Assert => EditableField::AssertValue(i),
+            EntrySection::Settings => EditableField::SettingsValue(i),
         };
         let hscroll = value_hscroll(session, &field);
         let renamed = input_for(session, |target| {
@@ -595,6 +601,9 @@ fn editable_entries(
     let Some(session) = session else {
         return;
     };
+    if section == EntrySection::Settings {
+        return;
+    }
     let field = EditableField::AddRow(section);
     let hscroll = value_hscroll(Some(session), &field);
     let new_key = input_for(

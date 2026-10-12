@@ -154,6 +154,17 @@ impl RequestTab {
             | EditableField::AddRow(EntrySection::QueryParams | EntrySection::PathParams) => {
                 Some(RequestTab::Params)
             }
+            EditableField::VarsPreRequestValue(_)
+            | EditableField::VarsPostResponseValue(_)
+            | EditableField::AddRow(
+                EntrySection::VarsPreRequest | EntrySection::VarsPostResponse,
+            ) => Some(RequestTab::Vars),
+            EditableField::AssertValue(_) | EditableField::AddRow(EntrySection::Assert) => {
+                Some(RequestTab::Assert)
+            }
+            EditableField::SettingsValue(_) | EditableField::AddRow(EntrySection::Settings) => {
+                Some(RequestTab::Settings)
+            }
             EditableField::BodyText => Some(RequestTab::Body),
         }
     }
@@ -1034,6 +1045,10 @@ pub enum EditableField {
     HeaderValue(usize),
     QueryParamValue(usize),
     PathParamValue(usize),
+    VarsPreRequestValue(usize),
+    VarsPostResponseValue(usize),
+    AssertValue(usize),
+    SettingsValue(usize),
     /// Ligne « + Ajouter » d'une section.
     AddRow(EntrySection),
     BodyText,
@@ -1057,6 +1072,21 @@ impl EditableField {
             fields.push(Self::PathParamValue(index));
         }
         fields.push(Self::AddRow(EntrySection::PathParams));
+        for index in 0..view.extra.vars_pre_request.len() {
+            fields.push(Self::VarsPreRequestValue(index));
+        }
+        fields.push(Self::AddRow(EntrySection::VarsPreRequest));
+        for index in 0..view.extra.vars_post_response.len() {
+            fields.push(Self::VarsPostResponseValue(index));
+        }
+        fields.push(Self::AddRow(EntrySection::VarsPostResponse));
+        for index in 0..view.extra.assertions.len() {
+            fields.push(Self::AssertValue(index));
+        }
+        fields.push(Self::AddRow(EntrySection::Assert));
+        for index in 0..view.extra.settings.len() {
+            fields.push(Self::SettingsValue(index));
+        }
         if let Some(body) = &view.body
             && matches!(
                 body.kind,
@@ -1078,6 +1108,10 @@ impl EditableField {
             Self::HeaderValue(index) => Some((EntrySection::Headers, *index)),
             Self::QueryParamValue(index) => Some((EntrySection::QueryParams, *index)),
             Self::PathParamValue(index) => Some((EntrySection::PathParams, *index)),
+            Self::VarsPreRequestValue(index) => Some((EntrySection::VarsPreRequest, *index)),
+            Self::VarsPostResponseValue(index) => Some((EntrySection::VarsPostResponse, *index)),
+            Self::AssertValue(index) => Some((EntrySection::Assert, *index)),
+            Self::SettingsValue(index) => Some((EntrySection::Settings, *index)),
             Self::Method | Self::Url | Self::AddRow(_) | Self::BodyText => None,
         }
     }
@@ -1107,6 +1141,28 @@ impl EditableField {
                 "Paramètre de chemin {}",
                 view.path_params.get(*index).map_or("", |p| &p.key)
             ),
+            Self::VarsPreRequestValue(index) => format!(
+                "Variable {}",
+                view.extra
+                    .vars_pre_request
+                    .get(*index)
+                    .map_or("", |v| &v.key)
+            ),
+            Self::VarsPostResponseValue(index) => format!(
+                "Variable {}",
+                view.extra
+                    .vars_post_response
+                    .get(*index)
+                    .map_or("", |v| &v.key)
+            ),
+            Self::AssertValue(index) => format!(
+                "Assertion {}",
+                view.extra.assertions.get(*index).map_or("", |a| &a.key)
+            ),
+            Self::SettingsValue(index) => format!(
+                "Paramètre {}",
+                view.extra.settings.get(*index).map_or("", |s| &s.key)
+            ),
             Self::AddRow(section) => add_row_label(*section).to_owned(),
             Self::BodyText => "Corps".to_owned(),
         }
@@ -1119,6 +1175,10 @@ pub fn add_row_label(section: EntrySection) -> &'static str {
         EntrySection::Headers => "+ Ajouter un en-tête",
         EntrySection::QueryParams => "+ Ajouter un paramètre de requête",
         EntrySection::PathParams => "+ Ajouter un paramètre de chemin",
+        EntrySection::VarsPreRequest => "+ Ajouter une variable pre-request",
+        EntrySection::VarsPostResponse => "+ Ajouter une variable post-response",
+        EntrySection::Assert => "+ Ajouter une assertion",
+        EntrySection::Settings => "+ Ajouter un paramètre",
     }
 }
 
@@ -1128,6 +1188,10 @@ pub fn section_label(section: EntrySection) -> &'static str {
         EntrySection::Headers => "En-têtes",
         EntrySection::QueryParams => "Paramètres de requête",
         EntrySection::PathParams => "Paramètres de chemin",
+        EntrySection::VarsPreRequest => "Variables pre-request",
+        EntrySection::VarsPostResponse => "Variables post-response",
+        EntrySection::Assert => "Assertions",
+        EntrySection::Settings => "Paramètres",
     }
 }
 
@@ -1140,6 +1204,10 @@ pub fn section_entries(
         EntrySection::Headers => &view.headers,
         EntrySection::QueryParams => &view.query_params,
         EntrySection::PathParams => &view.path_params,
+        EntrySection::VarsPreRequest => &view.extra.vars_pre_request,
+        EntrySection::VarsPostResponse => &view.extra.vars_post_response,
+        EntrySection::Assert => &view.extra.assertions,
+        EntrySection::Settings => &view.extra.settings,
     }
 }
 
@@ -2525,9 +2593,11 @@ mod tests {
 
     #[test]
     fn editable_field_list_for_request_view() {
-        use crate::writer::EntrySection::{Headers, PathParams, QueryParams};
+        use crate::writer::EntrySection::{
+            Assert, Headers, PathParams, QueryParams, VarsPostResponse, VarsPreRequest,
+        };
 
-        // Méthode + URL + 2 en-têtes + corps json -> 8 positions dans l'ordre
+        // Méthode + URL + 2 en-têtes + vars/assert add-rows + corps json
         let fields = EditableField::list_for(&make_view(Some(BodyKind::Json), 2));
         assert_eq!(
             fields,
@@ -2539,6 +2609,9 @@ mod tests {
                 EditableField::AddRow(Headers),
                 EditableField::AddRow(QueryParams),
                 EditableField::AddRow(PathParams),
+                EditableField::AddRow(VarsPreRequest),
+                EditableField::AddRow(VarsPostResponse),
+                EditableField::AddRow(Assert),
                 EditableField::BodyText,
             ]
         );
@@ -2553,6 +2626,9 @@ mod tests {
                 EditableField::AddRow(Headers),
                 EditableField::AddRow(QueryParams),
                 EditableField::AddRow(PathParams),
+                EditableField::AddRow(VarsPreRequest),
+                EditableField::AddRow(VarsPostResponse),
+                EditableField::AddRow(Assert),
             ]
         );
 

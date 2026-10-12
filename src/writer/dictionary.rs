@@ -56,6 +56,22 @@ pub(crate) fn block_node<'f>(ast: &'f BruFile, name: &str) -> Option<(Range<usiz
     })
 }
 
+/// Tranche et entrées pour une section, avec repli sur `vars` pour `VarsPreRequest`.
+pub(crate) fn section_block_node(
+    ast: &BruFile,
+    section: super::edit::EntrySection,
+) -> Option<(Range<usize>, &[Entry])> {
+    if let Some(node) = block_node(ast, section.block_name()) {
+        return Some(node);
+    }
+    if section == super::edit::EntrySection::VarsPreRequest
+        && let Some(node) = block_node(ast, "vars")
+    {
+        return Some(node);
+    }
+    None
+}
+
 fn format_added(section: &DictSection, eol: &str) -> String {
     section
         .entries

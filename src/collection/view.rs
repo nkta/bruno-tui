@@ -493,6 +493,44 @@ impl RequestView {
             }),
         }
     }
+
+    /// Construit une vue pour un fichier sans méthode HTTP (`folder.bru`, `collection.bru`).
+    pub fn from_file_ast(file: &BruFile) -> Self {
+        let meta = FileMeta::from_ast(file.clone());
+        Self::from_file_meta(&meta)
+    }
+
+    /// Construit une vue de requête minimale à partir d'un `FileMeta`.
+    pub fn from_file_meta(meta: &FileMeta) -> Self {
+        Self {
+            name: meta.name.clone(),
+            kind: None,
+            seq: meta.seq,
+            method: String::new(),
+            url: String::new(),
+            headers: meta.headers().to_vec(),
+            query_params: Vec::new(),
+            path_params: Vec::new(),
+            body: None,
+            auth: meta.auth().cloned(),
+            has_pre_request_script: meta.has_pre_request_script,
+            has_post_response_script: meta.has_post_response_script,
+            has_tests: meta.has_tests,
+            has_assert: !meta.assertions().is_empty(),
+            extra: Box::new(ExtraTabs {
+                vars_pre_request: meta.vars_pre_request().to_vec(),
+                vars_post_response: meta.vars_post_response().to_vec(),
+                script_pre_request: meta.script_pre_request().map(|s| s.to_owned()),
+                script_post_response: meta.script_post_response().map(|s| s.to_owned()),
+                tests: meta.tests().map(|s| s.to_owned()),
+                docs: meta.docs().map(|s| s.to_owned()),
+                settings: meta.settings().to_vec(),
+                assertions: meta.assertions().to_vec(),
+                grpc: None,
+                auth_params: meta.auth_params().to_vec(),
+            }),
+        }
+    }
 }
 
 /// Contenu détaillé des onglets de `folder.bru` ou `collection.bru`,
@@ -509,6 +547,8 @@ pub struct FileMetaContent {
     pub script_post_response: Option<String>,
     pub tests: Option<String>,
     pub docs: Option<String>,
+    pub settings: Vec<KeyValue>,
+    pub assertions: Vec<KeyValue>,
 }
 
 /// Méta-données et contenu de `collection.bru` ou `folder.bru`.
@@ -548,6 +588,14 @@ impl FileMeta {
 
     pub fn vars_post_response(&self) -> &[KeyValue] {
         &self.content.vars_post_response
+    }
+
+    pub fn settings(&self) -> &[KeyValue] {
+        &self.content.settings
+    }
+
+    pub fn assertions(&self) -> &[KeyValue] {
+        &self.content.assertions
     }
 
     pub fn script_pre_request(&self) -> Option<&str> {
@@ -598,6 +646,8 @@ impl FileMeta {
         let script_post_response = file.text("script:post-response");
         let tests = file.text("tests");
         let docs = file.text("docs");
+        let settings = key_values(&file, "settings");
+        let assertions = key_values(&file, "assert");
 
         let has_auth = auth
             .as_ref()
@@ -629,6 +679,8 @@ impl FileMeta {
                 script_post_response,
                 tests,
                 docs,
+                settings,
+                assertions,
             }),
         }
     }

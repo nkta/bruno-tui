@@ -67,6 +67,9 @@ pub enum EditError {
     #[error("méthode inconnue")]
     UnknownMethod,
 
+    #[error("bloc `{block}` non modifiable structurellement")]
+    ImmutableBlock { block: &'static str },
+
     #[error("bloc `{block}`{} : {problem}", at_index(.index))]
     InvalidEntry {
         block: &'static str,

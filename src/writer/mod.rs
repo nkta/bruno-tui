@@ -38,7 +38,11 @@ pub fn preview(ast: &BruFile, edits: &[FieldEdit]) -> Result<RequestView, EditEr
     let bytes = format::serialize(ast, edits)?;
     let source = String::from_utf8(bytes).map_err(|_| EditError::Unreadable)?;
     let file = BruFile::parse(source).map_err(|_| EditError::Unreadable)?;
-    RequestView::from_ast(&file).map_err(|_| EditError::Unreadable)
+    let view = match RequestView::from_ast(&file) {
+        Ok(view) => view,
+        Err(_) => RequestView::from_file_ast(&file),
+    };
+    Ok(view)
 }
 
 /// Instantané de fraîcheur d'un fichier (taille et date de modification),

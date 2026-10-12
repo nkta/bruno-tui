@@ -2616,7 +2616,15 @@ fn toggle_field(model: &mut Model) {
         EditableField::HeaderValue(index) => FieldEdit::HeaderEnabled { index, enabled },
         EditableField::QueryParamValue(index) => FieldEdit::QueryParamEnabled { index, enabled },
         EditableField::PathParamValue(index) => FieldEdit::PathParamEnabled { index, enabled },
-        EditableField::Method
+        EditableField::VarsPreRequestValue(index) => {
+            FieldEdit::VarsPreRequestEnabled { index, enabled }
+        }
+        EditableField::VarsPostResponseValue(index) => {
+            FieldEdit::VarsPostResponseEnabled { index, enabled }
+        }
+        EditableField::AssertValue(index) => FieldEdit::AssertEnabled { index, enabled },
+        EditableField::SettingsValue(_)
+        | EditableField::Method
         | EditableField::Url
         | EditableField::AddRow(_)
         | EditableField::BodyText => return,
@@ -2728,6 +2736,9 @@ fn add_entry(model: &mut Model) {
     else {
         return;
     };
+    if section == EntrySection::Settings {
+        return;
+    }
     start_add(model, section);
 }
 
@@ -2743,6 +2754,9 @@ fn delete_entry(model: &mut Model) {
     else {
         return;
     };
+    if section == EntrySection::Settings {
+        return;
+    }
     try_commit(model, FieldEdit::RemoveEntry { section, index });
     scroll_edit_into_view(model);
 }
@@ -2760,6 +2774,9 @@ fn start_rename(model: &mut Model) {
     let Some((section, index)) = session.current_field().and_then(|field| field.entry()) else {
         return;
     };
+    if section == EntrySection::Settings {
+        return;
+    }
     let Some(key) = section_entries(&session.preview, section)
         .get(index)
         .map(|kv| kv.key.clone())
@@ -2886,6 +2903,14 @@ fn finish_add(model: &mut Model, section: EntrySection) {
             EntrySection::Headers => EditableField::HeaderValue(count.saturating_sub(1)),
             EntrySection::QueryParams => EditableField::QueryParamValue(count.saturating_sub(1)),
             EntrySection::PathParams => EditableField::PathParamValue(count.saturating_sub(1)),
+            EntrySection::VarsPreRequest => {
+                EditableField::VarsPreRequestValue(count.saturating_sub(1))
+            }
+            EntrySection::VarsPostResponse => {
+                EditableField::VarsPostResponseValue(count.saturating_sub(1))
+            }
+            EntrySection::Assert => EditableField::AssertValue(count.saturating_sub(1)),
+            EntrySection::Settings => EditableField::SettingsValue(count.saturating_sub(1)),
         };
         if let Some(position) = session.fields.iter().position(|f| *f == field) {
             session.cursor = position;
@@ -2901,6 +2926,14 @@ fn value_edit(field: EditableField, value: String) -> Option<FieldEdit> {
         EditableField::HeaderValue(index) => FieldEdit::HeaderValue { index, value },
         EditableField::QueryParamValue(index) => FieldEdit::QueryParamValue { index, value },
         EditableField::PathParamValue(index) => FieldEdit::PathParamValue { index, value },
+        EditableField::VarsPreRequestValue(index) => {
+            FieldEdit::VarsPreRequestValue { index, value }
+        }
+        EditableField::VarsPostResponseValue(index) => {
+            FieldEdit::VarsPostResponseValue { index, value }
+        }
+        EditableField::AssertValue(index) => FieldEdit::AssertValue { index, value },
+        EditableField::SettingsValue(index) => FieldEdit::SettingsValue { index, value },
         EditableField::BodyText => FieldEdit::BodyText(value),
         EditableField::Method | EditableField::AddRow(_) => return None,
     })
