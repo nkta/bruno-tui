@@ -166,6 +166,11 @@ impl RequestTab {
                 Some(RequestTab::Settings)
             }
             EditableField::BodyText => Some(RequestTab::Body),
+            EditableField::ScriptPreRequest | EditableField::ScriptPostResponse => {
+                Some(RequestTab::Script)
+            }
+            EditableField::Tests => Some(RequestTab::Tests),
+            EditableField::Docs => Some(RequestTab::Docs),
         }
     }
 }
@@ -1052,12 +1057,18 @@ pub enum EditableField {
     /// Ligne « + Ajouter » d'une section.
     AddRow(EntrySection),
     BodyText,
+    ScriptPreRequest,
+    ScriptPostResponse,
+    Tests,
+    Docs,
 }
 
 impl EditableField {
     /// Positions du curseur pour une vue de requête : la méthode, l'URL,
     /// chaque section suivie de sa ligne d'ajout, puis le corps s'il est
-    /// éditable.
+    /// éditable, et les blocs de texte (scripts, tests, docs). Pour un dossier
+    /// ou la collection (sans méthode), seuls les en-têtes et les blocs de
+    /// texte sont exposés.
     pub fn list_for(view: &RequestView) -> Vec<Self> {
         let mut fields = Vec::new();
         if !view.is_file_meta() {
@@ -1107,6 +1118,10 @@ impl EditableField {
         {
             fields.push(Self::BodyText);
         }
+        fields.push(Self::ScriptPreRequest);
+        fields.push(Self::ScriptPostResponse);
+        fields.push(Self::Tests);
+        fields.push(Self::Docs);
         fields
     }
 
@@ -1120,7 +1135,14 @@ impl EditableField {
             Self::VarsPostResponseValue(index) => Some((EntrySection::VarsPostResponse, *index)),
             Self::AssertValue(index) => Some((EntrySection::Assert, *index)),
             Self::SettingsValue(index) => Some((EntrySection::Settings, *index)),
-            Self::Method | Self::Url | Self::AddRow(_) | Self::BodyText => None,
+            Self::Method
+            | Self::Url
+            | Self::AddRow(_)
+            | Self::BodyText
+            | Self::ScriptPreRequest
+            | Self::ScriptPostResponse
+            | Self::Tests
+            | Self::Docs => None,
         }
     }
 
@@ -1173,6 +1195,10 @@ impl EditableField {
             ),
             Self::AddRow(section) => add_row_label(*section).to_owned(),
             Self::BodyText => "Corps".to_owned(),
+            Self::ScriptPreRequest => "Script pré-requête".to_owned(),
+            Self::ScriptPostResponse => "Script post-réponse".to_owned(),
+            Self::Tests => "Tests".to_owned(),
+            Self::Docs => "Documentation".to_owned(),
         }
     }
 }
@@ -1295,6 +1321,10 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
             },
             None => "",
         },
+        EditableField::ScriptPreRequest => view.script_pre_request().unwrap_or(""),
+        EditableField::ScriptPostResponse => view.script_post_response().unwrap_or(""),
+        EditableField::Tests => view.tests().unwrap_or(""),
+        EditableField::Docs => view.docs().unwrap_or(""),
         entry => entry
             .entry()
             .and_then(|(section, index)| section_entries(view, section).get(index))
@@ -1420,6 +1450,8 @@ pub struct Model {
     pub export_input: Option<ExportInputState>,
     /// Persistance de l'historique active (désactivée par `--no-history`).
     pub history_enabled: bool,
+    /// Commande de l'éditeur externe configurée au lancement (`--editor`).
+    pub editor: Option<String>,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -2059,6 +2091,7 @@ impl Model {
             selected_collection: false,
             export_input: None,
             history_enabled: false,
+            editor: None,
         }
     }
 
@@ -2209,8 +2242,9 @@ impl Model {
         }
     }
 
-    /// Remplace l'AST et la vue d'une requête identifiée par son chemin (D7, Risks).
-    pub fn replace_request_node(
+    /// Remplace l'AST et la vue d'une requête, d'un dossier (`folder.bru`) ou de la
+    /// collection (`collection.bru`) identifié par son chemin relatif.
+    pub fn replace_file_meta_or_request_node(
         &mut self,
         path: &std::path::Path,
         ast: crate::collection::BruFile,
@@ -2219,27 +2253,23 @@ impl Model {
         let Some(collection) = self.loaded_mut() else {
             return false;
         };
+        if path == std::path::Path::new("collection.bru") {
+            collection.settings = Some(Ok(crate::collection::FileMeta::from_ast(ast)));
+            return true;
+        }
         let mut ast = Some(ast);
         let mut view = Some(view);
-        replace_request_in_tree(&mut collection.tree, path, &mut ast, &mut view)
+        replace_node_in_tree(&mut collection.tree, path, &mut ast, &mut view)
     }
 
-    /// Remplace les métadonnées d'un dossier ou de la collection après sauvegarde.
-    pub fn replace_meta_node(
+    /// Remplace l'AST et la vue d'une requête identifiée par son chemin (D7, Risks).
+    pub fn replace_request_node(
         &mut self,
         path: &std::path::Path,
         ast: crate::collection::BruFile,
+        view: RequestView,
     ) -> bool {
-        let Some(collection) = self.loaded_mut() else {
-            return false;
-        };
-        let meta = crate::collection::FileMeta::from_ast(ast);
-        if path == std::path::Path::new("collection.bru") {
-            collection.settings = Some(Ok(meta));
-            return true;
-        }
-        let folder_path = path.parent().unwrap_or(path);
-        replace_folder_meta_in_tree(&mut collection.tree, folder_path, meta)
+        self.replace_file_meta_or_request_node(path, ast, view)
     }
 
     /// Nœud désigné par une adresse.
@@ -2280,9 +2310,9 @@ pub fn selected_response_body(model: &Model) -> Option<String> {
     }
 }
 
-/// Remplace l'AST et la vue de la requête désignée par `path` dans l'arbre.
+/// Remplace l'AST et la vue de la requête ou du dossier désigné par `path` dans l'arbre.
 /// Retourne `true` si le nœud a été trouvé et remplacé (D7, Risks).
-pub fn replace_request_in_tree(
+pub fn replace_node_in_tree(
     tree: &mut [TreeNode],
     path: &std::path::Path,
     ast: &mut Option<crate::collection::BruFile>,
@@ -2298,7 +2328,13 @@ pub fn replace_request_in_tree(
                 return true;
             }
             TreeNode::Folder(folder) => {
-                if replace_request_in_tree(&mut folder.children, path, ast, view) {
+                if folder.path.join("folder.bru") == path {
+                    if let Some(ast) = ast.take() {
+                        folder.meta = Some(Ok(crate::collection::FileMeta::from_ast(ast)));
+                    }
+                    return true;
+                }
+                if replace_node_in_tree(&mut folder.children, path, ast, view) {
                     return true;
                 }
             }
@@ -2308,24 +2344,14 @@ pub fn replace_request_in_tree(
     false
 }
 
-/// Retourne `true` si le dossier a été trouvé et ses métadonnées remplacées.
-pub fn replace_folder_meta_in_tree(
+/// Remplace l'AST et la vue de la requête désignée par `path` dans l'arbre.
+pub fn replace_request_in_tree(
     tree: &mut [TreeNode],
-    folder_path: &std::path::Path,
-    meta: crate::collection::FileMeta,
+    path: &std::path::Path,
+    ast: &mut Option<crate::collection::BruFile>,
+    view: &mut Option<RequestView>,
 ) -> bool {
-    for node in tree.iter_mut() {
-        if let TreeNode::Folder(folder) = node {
-            if folder.path == folder_path {
-                folder.meta = Some(Ok(meta));
-                return true;
-            }
-            if replace_folder_meta_in_tree(&mut folder.children, folder_path, meta.clone()) {
-                return true;
-            }
-        }
-    }
-    false
+    replace_node_in_tree(tree, path, ast, view)
 }
 
 /// Nom de l'environnement à l'indice donné dans le panneau de sélection :
@@ -2641,7 +2667,7 @@ mod tests {
             Assert, Headers, PathParams, QueryParams, VarsPostResponse, VarsPreRequest,
         };
 
-        // Méthode + URL + 2 en-têtes + vars/assert add-rows + corps json
+        // Méthode + URL + 2 en-têtes + vars/assert add-rows + corps json + blocs texte
         let fields = EditableField::list_for(&make_view(Some(BodyKind::Json), 2));
         assert_eq!(
             fields,
@@ -2657,10 +2683,14 @@ mod tests {
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),
                 EditableField::BodyText,
+                EditableField::ScriptPreRequest,
+                EditableField::ScriptPostResponse,
+                EditableField::Tests,
+                EditableField::Docs,
             ]
         );
 
-        // corps formUrlEncoded -> corps exclu
+        // corps formUrlEncoded -> corps exclu, blocs texte inclus
         let fields_form = EditableField::list_for(&make_view(Some(BodyKind::FormUrlEncoded), 0));
         assert_eq!(
             fields_form,
@@ -2673,6 +2703,10 @@ mod tests {
                 EditableField::AddRow(VarsPreRequest),
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),
+                EditableField::ScriptPreRequest,
+                EditableField::ScriptPostResponse,
+                EditableField::Tests,
+                EditableField::Docs,
             ]
         );
 
@@ -2728,7 +2762,7 @@ mod tests {
             session
                 .current_field()
                 .map(|f| f.display_name(&session.preview)),
-            Some("Corps".to_owned())
+            Some("Documentation".to_owned())
         );
 
         // En saisie sur un champ : le tampon est affiché pour ce champ seul.

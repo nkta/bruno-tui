@@ -494,44 +494,6 @@ impl RequestView {
         }
     }
 
-    /// Construit une vue pour un fichier sans méthode HTTP (`folder.bru`, `collection.bru`).
-    pub fn from_file_ast(file: &BruFile) -> Self {
-        let meta = FileMeta::from_ast(file.clone());
-        Self::from_file_meta(&meta)
-    }
-
-    /// Construit une vue de requête minimale à partir d'un `FileMeta`.
-    pub fn from_file_meta(meta: &FileMeta) -> Self {
-        Self {
-            name: meta.name.clone(),
-            kind: None,
-            seq: meta.seq,
-            method: String::new(),
-            url: String::new(),
-            headers: meta.headers().to_vec(),
-            query_params: Vec::new(),
-            path_params: Vec::new(),
-            body: None,
-            auth: meta.auth().cloned(),
-            has_pre_request_script: meta.has_pre_request_script,
-            has_post_response_script: meta.has_post_response_script,
-            has_tests: meta.has_tests,
-            has_assert: !meta.assertions().is_empty(),
-            extra: Box::new(ExtraTabs {
-                vars_pre_request: meta.vars_pre_request().to_vec(),
-                vars_post_response: meta.vars_post_response().to_vec(),
-                script_pre_request: meta.script_pre_request().map(|s| s.to_owned()),
-                script_post_response: meta.script_post_response().map(|s| s.to_owned()),
-                tests: meta.tests().map(|s| s.to_owned()),
-                docs: meta.docs().map(|s| s.to_owned()),
-                settings: meta.settings().to_vec(),
-                assertions: meta.assertions().to_vec(),
-                grpc: None,
-                auth_params: meta.auth_params().to_vec(),
-            }),
-        }
-    }
-
     /// Vrai si cette vue représente un fichier de dossier ou collection (sans méthode HTTP).
     pub fn is_file_meta(&self) -> bool {
         self.method.is_empty()
@@ -686,6 +648,40 @@ impl FileMeta {
                 docs,
                 settings,
                 assertions,
+            }),
+        }
+    }
+
+    /// Convertit les métadonnées et le contenu du fichier (`folder.bru` ou `collection.bru`)
+    /// en une [`RequestView`] sans méthode ni URL, permettant de réutiliser la session
+    /// d'édition et le writer.
+    pub fn to_request_view(&self) -> RequestView {
+        RequestView {
+            name: self.name.clone(),
+            kind: None,
+            seq: self.seq,
+            method: String::new(),
+            url: String::new(),
+            headers: self.content.headers.clone(),
+            query_params: Vec::new(),
+            path_params: Vec::new(),
+            body: None,
+            auth: self.content.auth.clone(),
+            has_pre_request_script: self.has_pre_request_script,
+            has_post_response_script: self.has_post_response_script,
+            has_tests: self.has_tests,
+            has_assert: !self.content.assertions.is_empty(),
+            extra: Box::new(ExtraTabs {
+                vars_pre_request: self.content.vars_pre_request.clone(),
+                vars_post_response: self.content.vars_post_response.clone(),
+                script_pre_request: self.content.script_pre_request.clone(),
+                script_post_response: self.content.script_post_response.clone(),
+                tests: self.content.tests.clone(),
+                docs: self.content.docs.clone(),
+                settings: self.content.settings.clone(),
+                assertions: self.content.assertions.clone(),
+                grpc: None,
+                auth_params: self.content.auth_params.clone(),
             }),
         }
     }

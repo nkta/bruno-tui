@@ -127,6 +127,14 @@ pub enum FieldEdit {
         value: String,
     },
     BodyText(String),
+    /// Contenu du bloc script:pre-request ; vide pour retirer le bloc.
+    ScriptPreRequest(String),
+    /// Contenu du bloc script:post-response ; vide pour retirer le bloc.
+    ScriptPostResponse(String),
+    /// Contenu du bloc tests ; vide pour retirer le bloc.
+    Tests(String),
+    /// Contenu du bloc docs ; vide pour retirer le bloc.
+    Docs(String),
     /// Ajout d'une entrée en fin de section.
     AddEntry {
         section: EntrySection,

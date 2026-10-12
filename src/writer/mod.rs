@@ -28,21 +28,21 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use crate::collection::{BruFile, RequestView};
+use crate::collection::{BruFile, FileMeta, ParseError, RequestView};
 
-/// Vue qu'exposerait la requête après application de `edits`, sans aucun
-/// accès disque : même application ordonnée, mêmes refus et même
-/// synchronisation de l'URL que l'écriture, puisque le fichier est
-/// sérialisé en mémoire puis relu par `bru-parser`.
+/// Vue qu'exposerait la requête (ou le dossier / la collection) après
+/// application de `edits`, sans aucun accès disque : même application ordonnée,
+/// mêmes refus et même synchronisation de l'URL que l'écriture, puisque le
+/// fichier est sérialisé en mémoire puis relu par `bru-parser`.
 pub fn preview(ast: &BruFile, edits: &[FieldEdit]) -> Result<RequestView, EditError> {
     let bytes = format::serialize(ast, edits)?;
     let source = String::from_utf8(bytes).map_err(|_| EditError::Unreadable)?;
     let file = BruFile::parse(source).map_err(|_| EditError::Unreadable)?;
-    let view = match RequestView::from_ast(&file) {
-        Ok(view) => view,
-        Err(_) => RequestView::from_file_ast(&file),
-    };
-    Ok(view)
+    match RequestView::from_ast(&file) {
+        Ok(view) => Ok(view),
+        Err(ParseError::MissingMethod) => Ok(FileMeta::from_ast(file).to_request_view()),
+        Err(_) => Err(EditError::Unreadable),
+    }
 }
 
 /// Instantané de fraîcheur d'un fichier (taille et date de modification),

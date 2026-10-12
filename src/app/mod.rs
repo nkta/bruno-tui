@@ -75,12 +75,14 @@ pub async fn run<B: Backend>(
     suspended: Arc<AtomicBool>,
     watch: bool,
     history: bool,
+    editor: Option<String>,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
     let mut model = Model::new(source.clone(), (size.width, size.height));
     model.secrets.mappings = secrets;
     model.mouse.capture = mouse.enabled;
     model.history_enabled = history;
+    model.editor = editor;
     if let Some(reason) = mouse.startup_error {
         model.last_status = Some(model::StatusMessage::MouseCaptureError(reason));
     }
@@ -214,8 +216,18 @@ pub async fn run<B: Backend>(
                                     let view = match crate::collection::RequestView::from_ast(&ast)
                                     {
                                         Ok(v) => v,
-                                        Err(_) => {
-                                            crate::collection::RequestView::from_file_ast(&ast)
+                                        Err(crate::collection::ParseError::MissingMethod) => {
+                                            crate::collection::FileMeta::from_ast(ast.clone())
+                                                .to_request_view()
+                                        }
+                                        Err(source) => {
+                                            return Err(writer::WriteError::Io {
+                                                path: full_path.clone(),
+                                                source: io::Error::new(
+                                                    io::ErrorKind::InvalidData,
+                                                    source,
+                                                ),
+                                            });
                                         }
                                     };
                                     Ok(model::SavedEdit {
@@ -325,6 +337,42 @@ pub async fn run<B: Backend>(
                             }
                             Ok(Ok(())) => {}
                         }
+                    }
+                    Command::EditTextInEditor {
+                        program,
+                        text,
+                        extension,
+                        field,
+                    } => {
+                        suspended.store(true, Ordering::SeqCst);
+                        let mouse_was_captured = model.mouse.capture;
+                        if mouse_was_captured {
+                            let _ = mouse.capture.set(false);
+                        }
+                        let _ = ratatui::try_restore();
+
+                        let result = tokio::task::spawn_blocking(move || {
+                            editor::edit_external_text(&program, &text, &extension)
+                        })
+                        .await;
+
+                        let _ = ratatui::try_init();
+                        let _ = terminal.clear();
+                        if mouse_was_captured {
+                            let _ = mouse.capture.set(true);
+                        }
+                        suspended.store(false, Ordering::SeqCst);
+
+                        let event_result = match result {
+                            Ok(res) => res.map_err(|e| e.to_string()),
+                            Err(join_error) => Err(join_error.to_string()),
+                        };
+                        let _ = sender
+                            .send(AppEvent::TextEditorClosed {
+                                field,
+                                result: event_result,
+                            })
+                            .await;
                     }
                     Command::ReloadCollection => {
                         let loader = Arc::clone(&loader);

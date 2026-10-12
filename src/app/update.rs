@@ -24,7 +24,7 @@ use super::search::{SearchScope, SearchState, find_detail_match, find_tree_match
 use super::text_input::TextInput;
 use super::tree_filter::{TreeFilterState, filtered_rows, find_node_by_path, matches_tree_filter};
 use super::view::detail::{
-    field_at_line, plain_lines, request_text_and_fields, response_plain_lines,
+    detail_text_fields_boxes, field_at_line, plain_lines, response_plain_lines,
 };
 use super::view::hit::{DragRow, Hit, drag_row, hit_test};
 use super::view::{
@@ -93,6 +93,15 @@ pub enum Command {
     OpenInEditor {
         program: String,
         text: String,
+    },
+    /// Ouvrir un bloc de texte dans un éditeur externe ; la boucle l'exécute
+    /// en suspendant ratatui et renvoie le contenu relu à `update` via
+    /// `Message::TextEditorClosed`.
+    EditTextInEditor {
+        program: String,
+        text: String,
+        extension: String,
+        field: EditableField,
     },
     /// Recharger la collection depuis `model.source` ; la boucle l'exécute
     /// dans `spawn_blocking` via `CollectionLoader::load` et renvoie le
@@ -782,8 +791,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
         }
         Message::Enter => {
             if model.focus == Focus::Detail {
-                enter_in_detail(model);
-                Command::None
+                enter_in_detail(model)
             } else if model.focus == Focus::EnvironmentPicker {
                 navigate_environment_picker(model, Message::Enter);
                 Command::None
@@ -822,6 +830,35 @@ fn apply(model: &mut Model, message: Message) -> Command {
             cancel_input(model);
             Command::None
         }
+        Message::TextEditorClosed { field, result } => {
+            match result {
+                Ok(new_text) => {
+                    let current = model
+                        .editing
+                        .as_ref()
+                        .map(|s| field_value_committed(s, &field))
+                        .unwrap_or("");
+                    if current != new_text {
+                        let edit = match field {
+                            EditableField::ScriptPreRequest => {
+                                FieldEdit::ScriptPreRequest(new_text)
+                            }
+                            EditableField::ScriptPostResponse => {
+                                FieldEdit::ScriptPostResponse(new_text)
+                            }
+                            EditableField::Tests => FieldEdit::Tests(new_text),
+                            EditableField::Docs => FieldEdit::Docs(new_text),
+                            _ => return Command::None,
+                        };
+                        try_commit(model, edit);
+                    }
+                }
+                Err(error) => {
+                    model.last_status = Some(StatusMessage::EditorError(error));
+                }
+            }
+            Command::None
+        }
         Message::SaveEdit => {
             if read_only_collection(model)
                 && matches!(model.focus, Focus::Detail | Focus::EnvironmentPicker)
@@ -853,7 +890,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
         }
         Message::OpenResponseInEditor => match selected_response_body(model) {
             Some(text) => Command::OpenInEditor {
-                program: resolve_editor(),
+                program: resolve_editor(model.editor.as_deref()),
                 text,
             },
             None => {
@@ -978,8 +1015,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 model.mouse.drag = None;
                 return run_selected(model);
             }
-            mouse(model, input);
-            Command::None
+            mouse(model, input)
         }
         Message::ToggleMouseCapture => Command::SetMouseCapture(!model.mouse.capture),
         Message::WatchReload(paths) => handle_watch_reload(model, paths),
@@ -2511,16 +2547,12 @@ fn start_edit(model: &mut Model) {
         return;
     };
     let root = &collection.root;
-
     let (path, view) = if model.selected_collection {
-        let meta = match &collection.settings {
-            Some(Ok(meta)) if meta.ast.is_some() => meta,
-            _ => return,
+        let path = std::path::PathBuf::from("collection.bru");
+        let Some(Ok(meta)) = collection.settings.as_ref() else {
+            return;
         };
-        (
-            std::path::PathBuf::from("collection.bru"),
-            crate::collection::RequestView::from_file_meta(meta),
-        )
+        (path, meta.to_request_view())
     } else {
         match model.selected_node() {
             Some(TreeNode::Request(request)) => {
@@ -2531,19 +2563,15 @@ fn start_edit(model: &mut Model) {
                 (request.path.clone(), request.view.clone())
             }
             Some(TreeNode::Folder(folder)) => {
-                let meta = match &folder.meta {
-                    Some(Ok(meta)) if meta.ast.is_some() => meta,
-                    _ => return,
+                let path = folder.path.join("folder.bru");
+                let Some(Ok(meta)) = folder.meta.as_ref() else {
+                    return;
                 };
-                (
-                    folder.path.join("folder.bru"),
-                    crate::collection::RequestView::from_file_meta(meta),
-                )
+                (path, meta.to_request_view())
             }
             _ => return,
         }
     };
-
     let full_path = root.join(&path);
     let Ok(stamp) = FileStamp::capture(&full_path) else {
         return;
@@ -2554,15 +2582,20 @@ fn start_edit(model: &mut Model) {
 }
 
 /// `Entrée` dans le détail : ouvre la session, ou commence la saisie du
-/// champ sous le curseur (`improve-direct-editing`, D3).
-fn enter_in_detail(model: &mut Model) {
+/// champ sous le curseur (`improve-direct-editing`, D3), ou ouvre l'éditeur
+/// externe pour un bloc de texte.
+fn enter_in_detail(model: &mut Model) -> Command {
     match &model.editing {
-        None => start_edit(model),
+        None => {
+            start_edit(model);
+            Command::None
+        }
         Some(session) if session.state == EditState::FieldSelect => begin_input(model),
         Some(session) if matches!(session.state, EditState::MethodPicker { .. }) => {
             confirm_method_picker(model);
+            Command::None
         }
-        Some(_) => {}
+        Some(_) => Command::None,
     }
 }
 
@@ -2650,36 +2683,63 @@ fn toggle_field(model: &mut Model) {
         | EditableField::Method
         | EditableField::Url
         | EditableField::AddRow(_)
-        | EditableField::BodyText => return,
+        | EditableField::BodyText
+        | EditableField::ScriptPreRequest
+        | EditableField::ScriptPostResponse
+        | EditableField::Tests
+        | EditableField::Docs => return,
     };
     try_commit(model, edit);
 }
 
 /// `Entrée` en sélection de champ : saisie de la valeur du champ sous le
-/// curseur, ou ajout d'une entrée sur une ligne « + Ajouter ».
-fn begin_input(model: &mut Model) {
+/// curseur, ajout d'une entrée sur une ligne « + Ajouter », ou ouverture
+/// de l'éditeur externe pour un bloc de texte.
+fn begin_input(model: &mut Model) -> Command {
     let Some(session) = &model.editing else {
-        return;
+        return Command::None;
     };
     if session.state != EditState::FieldSelect {
-        return;
+        return Command::None;
     }
     let Some(field) = session.current_field() else {
-        return;
+        return Command::None;
     };
-    if let EditableField::AddRow(section) = field {
-        start_add(model, section);
-        return;
+    match field {
+        EditableField::AddRow(section) => {
+            start_add(model, section);
+            Command::None
+        }
+        EditableField::Method => {
+            open_method_picker(model);
+            Command::None
+        }
+        EditableField::ScriptPreRequest
+        | EditableField::ScriptPostResponse
+        | EditableField::Tests
+        | EditableField::Docs => {
+            let extension = match field {
+                EditableField::Docs => "md",
+                _ => "js",
+            };
+            let text = field_value_committed(session, &field).to_string();
+            let program = resolve_editor(model.editor.as_deref());
+            Command::EditTextInEditor {
+                program,
+                text,
+                extension: extension.to_string(),
+                field,
+            }
+        }
+        _ => {
+            let input = TextInput::new(
+                field_value(session, &field),
+                field == EditableField::BodyText,
+            );
+            open_input(model, input, InputTarget::Field);
+            Command::None
+        }
     }
-    if field == EditableField::Method {
-        open_method_picker(model);
-        return;
-    }
-    let input = TextInput::new(
-        field_value(session, &field),
-        field == EditableField::BodyText,
-    );
-    open_input(model, input, InputTarget::Field);
 }
 
 /// Passe la session en saisie avec `target`.
@@ -2958,6 +3018,10 @@ fn value_edit(field: EditableField, value: String) -> Option<FieldEdit> {
         EditableField::AssertValue(index) => FieldEdit::AssertValue { index, value },
         EditableField::SettingsValue(index) => FieldEdit::SettingsValue { index, value },
         EditableField::BodyText => FieldEdit::BodyText(value),
+        EditableField::ScriptPreRequest => FieldEdit::ScriptPreRequest(value),
+        EditableField::ScriptPostResponse => FieldEdit::ScriptPostResponse(value),
+        EditableField::Tests => FieldEdit::Tests(value),
+        EditableField::Docs => FieldEdit::Docs(value),
         EditableField::Method | EditableField::AddRow(_) => return None,
     })
 }
@@ -3120,7 +3184,11 @@ fn with_edit(pending: &[FieldEdit], edit: FieldEdit) -> Vec<FieldEdit> {
     let mut edits = pending.to_vec();
     let same_value_target = match (edits.last(), &edit) {
         (Some(FieldEdit::Url(_)), FieldEdit::Url(_))
-        | (Some(FieldEdit::BodyText(_)), FieldEdit::BodyText(_)) => true,
+        | (Some(FieldEdit::BodyText(_)), FieldEdit::BodyText(_))
+        | (Some(FieldEdit::ScriptPreRequest(_)), FieldEdit::ScriptPreRequest(_))
+        | (Some(FieldEdit::ScriptPostResponse(_)), FieldEdit::ScriptPostResponse(_))
+        | (Some(FieldEdit::Tests(_)), FieldEdit::Tests(_))
+        | (Some(FieldEdit::Docs(_)), FieldEdit::Docs(_)) => true,
         (
             Some(FieldEdit::HeaderValue { index: a, .. }),
             FieldEdit::HeaderValue { index: b, .. },
@@ -3142,6 +3210,37 @@ fn with_edit(pending: &[FieldEdit], edit: FieldEdit) -> Vec<FieldEdit> {
     edits
 }
 
+/// Retourne l'AST du fichier actuellement édité (`request`, `folder.bru` ou `collection.bru`),
+/// si la sélection et le chemin correspondent à la session.
+fn current_editing_ast<'a>(
+    model: &'a Model,
+    session_path: &std::path::Path,
+) -> Option<&'a crate::collection::BruFile> {
+    if model.selected_collection {
+        if session_path == std::path::Path::new("collection.bru") {
+            return model
+                .loaded()?
+                .settings
+                .as_ref()?
+                .as_ref()
+                .ok()?
+                .ast
+                .as_ref();
+        }
+    } else {
+        match model.selected_node() {
+            Some(TreeNode::Request(request)) if request.path == session_path => {
+                return request.ast.as_ref();
+            }
+            Some(TreeNode::Folder(folder)) if folder.path.join("folder.bru") == session_path => {
+                return folder.meta.as_ref()?.as_ref().ok()?.ast.as_ref();
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Aperçu de la requête éditée avec `edit` ajouté au journal.
 fn check_edit(
     model: &Model,
@@ -3151,31 +3250,8 @@ fn check_edit(
         .editing
         .as_ref()
         .ok_or(crate::writer::EditError::Unreadable)?;
-    let ast = if model.selected_collection {
-        if session.path != std::path::Path::new("collection.bru") {
-            return Err(crate::writer::EditError::Unreadable);
-        }
-        model
-            .loaded()
-            .and_then(|c| c.settings.as_ref())
-            .and_then(|res| res.as_ref().ok())
-            .and_then(|meta| meta.ast.as_ref())
-    } else {
-        match model.selected_node() {
-            Some(TreeNode::Request(request)) if request.path == session.path => {
-                request.ast.as_ref()
-            }
-            Some(TreeNode::Folder(folder)) if folder.path.join("folder.bru") == session.path => {
-                folder
-                    .meta
-                    .as_ref()
-                    .and_then(|res| res.as_ref().ok())
-                    .and_then(|meta| meta.ast.as_ref())
-            }
-            _ => None,
-        }
-    }
-    .ok_or(crate::writer::EditError::Unreadable)?;
+    let ast =
+        current_editing_ast(model, &session.path).ok_or(crate::writer::EditError::Unreadable)?;
     let edits = with_edit(&session.pending, edit);
     let view = crate::writer::preview(ast, &edits)?;
     Ok((edits, view))
@@ -3223,7 +3299,7 @@ fn scroll_edit_into_view(model: &mut Model) {
     let Some(field) = session.current_field() else {
         return;
     };
-    let (_, field_lines, _) = crate::app::view::detail::detail_text_and_fields(model);
+    let (_, field_lines, _) = detail_text_fields_boxes(model);
     let Some(location) = field_lines.iter().find(|l| l.field == field) else {
         return;
     };
@@ -3272,34 +3348,12 @@ fn save_edit(model: &mut Model) -> Command {
     if !session.dirty {
         return Command::None;
     }
-    let ast = if model.selected_collection {
-        if session.path != std::path::Path::new("collection.bru") {
-            return Command::None;
-        }
-        model
-            .loaded()
-            .and_then(|c| c.settings.as_ref())
-            .and_then(|res| res.as_ref().ok())
-            .and_then(|meta| meta.ast.clone())
-    } else {
-        match model.selected_node() {
-            Some(TreeNode::Request(req)) if req.path == session.path => req.ast.clone(),
-            Some(TreeNode::Folder(folder)) if folder.path.join("folder.bru") == session.path => {
-                folder
-                    .meta
-                    .as_ref()
-                    .and_then(|res| res.as_ref().ok())
-                    .and_then(|meta| meta.ast.clone())
-            }
-            _ => None,
-        }
-    };
-    let Some(ast) = ast else {
+    let Some(ast) = current_editing_ast(model, &session.path) else {
         return Command::None;
     };
     Command::SaveEdit {
         path: session.path.clone(),
-        ast,
+        ast: ast.clone(),
         stamp: session.stamp,
         edits: session.pending.clone(),
     }
@@ -3325,11 +3379,7 @@ fn edit_saved(
             session.dirty = false;
             session.set_preview(saved.view.clone());
             model.last_saved_stamps.insert(path.clone(), saved.stamp);
-            if path == std::path::Path::new("collection.bru") || path.ends_with("folder.bru") {
-                model.replace_meta_node(&path, saved.ast);
-            } else {
-                model.replace_request_node(&path, saved.ast, saved.view);
-            }
+            model.replace_file_meta_or_request_node(&path, saved.ast, saved.view);
         }
         Err(error) => {
             model.last_status = Some(super::model::StatusMessage::SaveError(error.to_string()));
@@ -4471,17 +4521,29 @@ fn cancel_tree_filter(model: &mut Model) {
 const WHEEL_LINES: u16 = 3;
 
 /// Traite un événement souris déjà traduit par `to_message`.
-fn mouse(model: &mut Model, input: MouseInput) {
+fn mouse(model: &mut Model, input: MouseInput) -> Command {
     if !mouse_accepted(model) {
         model.mouse.drag = None;
-        return;
+        return Command::None;
     }
     match input.kind {
-        MouseKind::Press => mouse_press(model, input),
-        MouseKind::Drag => mouse_drag(model, input),
+        MouseKind::Press => {
+            mouse_press(model, input);
+            Command::None
+        }
+        MouseKind::Drag => {
+            mouse_drag(model, input);
+            Command::None
+        }
         MouseKind::Release => mouse_release(model),
-        MouseKind::WheelUp => mouse_wheel(model, input, true),
-        MouseKind::WheelDown => mouse_wheel(model, input, false),
+        MouseKind::WheelUp => {
+            mouse_wheel(model, input, true);
+            Command::None
+        }
+        MouseKind::WheelDown => {
+            mouse_wheel(model, input, false);
+            Command::None
+        }
     }
 }
 
@@ -4509,14 +4571,8 @@ fn input_field_lines(model: &Model) -> Option<std::ops::Range<usize>> {
     if !matches!(session.state, EditState::Input(_)) {
         return None;
     }
-    let Some(TreeNode::Request(request)) = model.selected_node() else {
-        return None;
-    };
-    if request.path != session.path {
-        return None;
-    }
     let field = session.current_field()?;
-    let (_, fields, _) = request_text_and_fields(request, Some(session), model.shown_request_tab());
+    let (_, fields, _) = detail_text_fields_boxes(model);
     let location = fields.into_iter().find(|l| l.field == field)?;
     Some(location.line..location.line + location.count)
 }
@@ -4616,7 +4672,9 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
         // Traité dans `update`, qui doit renvoyer la commande d'exécution.
         Hit::RunButton => {}
         // Clic sur la méthode ou l'URL : édition directe de ce champ.
-        Hit::UrlBar { field } => begin_input_at(model, field),
+        Hit::UrlBar { field } => {
+            begin_input_at(model, field);
+        }
         // Clic sur un onglet du détail, hors session d'édition.
         Hit::RequestTab(tab) => {
             model.focus = Focus::Detail;
@@ -4783,19 +4841,24 @@ fn mouse_drag(model: &mut Model, input: MouseInput) {
     });
 }
 
-fn mouse_release(model: &mut Model) {
+fn mouse_release(model: &mut Model) -> Command {
     let Some(drag) = model.mouse.drag.take() else {
-        return;
+        return Command::None;
     };
     if drag.moved {
-        return;
+        return Command::None;
     }
     match drag.panel {
-        DragPanel::Response => model.response_selection = None,
+        DragPanel::Response => {
+            model.response_selection = None;
+            Command::None
+        }
         DragPanel::Detail => {
             model.detail_selection = None;
             if let Some(field) = field_at_line(model, drag.anchor) {
-                begin_input_at(model, field);
+                begin_input_at(model, field)
+            } else {
+                Command::None
             }
         }
     }
@@ -4803,22 +4866,22 @@ fn mouse_release(model: &mut Model) {
 
 /// Clic sur un champ éditable : ouvre la session si besoin, place le
 /// curseur de champ et commence la saisie, comme `Entrée`.
-fn begin_input_at(model: &mut Model, field: EditableField) {
+fn begin_input_at(model: &mut Model, field: EditableField) -> Command {
     model.focus = Focus::Detail;
     if model.editing.is_none() {
         start_edit(model);
     }
     let Some(session) = &mut model.editing else {
-        return;
+        return Command::None;
     };
     if session.state != EditState::FieldSelect {
-        return;
+        return Command::None;
     }
     let Some(index) = session.fields.iter().position(|f| *f == field) else {
-        return;
+        return Command::None;
     };
     session.cursor = index;
-    begin_input(model);
+    begin_input(model)
 }
 
 fn mouse_wheel(model: &mut Model, input: MouseInput, up: bool) {
@@ -4992,15 +5055,21 @@ fn copy_curl_full(model: &mut Model) -> Command {
     }
 }
 
-/// Résout le programme éditeur à lancer : `VISUAL` si définie et non vide,
-/// sinon `EDITOR` si définie et non vide, sinon `"nano"`.
+/// Résout le programme éditeur à lancer :
+/// 1. `cli_editor` si défini et non vide ;
+/// 2. `VISUAL` si définie et non vide ;
+/// 3. `EDITOR` si définie et non vide ;
+/// 4. `"nano"`.
 ///
-/// Paramétrée par une fonction de recherche de variable d'environnement
-/// pour rester pure et testable sans dépendre de l'état du processus.
-pub fn resolve_editor_with<F>(lookup: F) -> String
+/// Paramétrée par une commande CLI optionnelle et une fonction de recherche
+/// de variable d'environnement pour rester pure et testable sans dépendre de l'état du processus.
+pub fn resolve_editor_with<F>(cli_editor: Option<&str>, lookup: F) -> String
 where
     F: Fn(&str) -> Option<String>,
 {
+    if let Some(cli) = cli_editor.filter(|c| !c.is_empty()) {
+        return cli.to_string();
+    }
     if let Some(visual) = lookup("VISUAL").filter(|v| !v.is_empty()) {
         return visual;
     }
@@ -5011,8 +5080,8 @@ where
 }
 
 /// Résout le programme éditeur à lancer depuis l'environnement réel du processus.
-pub fn resolve_editor() -> String {
-    resolve_editor_with(|key| std::env::var(key).ok())
+pub fn resolve_editor(cli_editor: Option<&str>) -> String {
+    resolve_editor_with(cli_editor, |key| std::env::var(key).ok())
 }
 
 /// Prépare l'exportation du corps de réponse et ouvre la saisie du chemin.
@@ -5063,6 +5132,7 @@ mod tests {
         StatusMessage,
     };
     use crate::app::test_support::{loaded_model, runner_probe_model, select, selected_name};
+    use crate::app::view::detail::request_text_and_fields;
 
     /// Le popup `O` reste utilisable sur un terminal de 80×24 : le champ
     /// sous le curseur est toujours visible, du premier au dernier.
@@ -5094,9 +5164,28 @@ mod tests {
 
     #[test]
     fn resolve_editor_precedence() {
+        // cli_editor est prioritaire sur VISUAL et EDITOR
+        assert_eq!(
+            resolve_editor_with(Some("subl -w"), |key| match key {
+                "VISUAL" => Some("code -w".into()),
+                "EDITOR" => Some("vim".into()),
+                _ => None,
+            }),
+            "subl -w"
+        );
+        // Si cli_editor est vide, VISUAL prend le relais
+        assert_eq!(
+            resolve_editor_with(Some(""), |key| match key {
+                "VISUAL" => Some("code -w".into()),
+                "EDITOR" => Some("vim".into()),
+                _ => None,
+            }),
+            "code -w"
+        );
+
         // VISUAL est prioritaire si définie et non vide
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => Some("code -w".into()),
                 "EDITOR" => Some("vim".into()),
                 _ => None,
@@ -5106,7 +5195,7 @@ mod tests {
 
         // EDITOR est utilisé si VISUAL n'est pas définie ou est vide
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => None,
                 "EDITOR" => Some("vim".into()),
                 _ => None,
@@ -5114,7 +5203,7 @@ mod tests {
             "vim"
         );
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => Some("".into()),
                 "EDITOR" => Some("vim".into()),
                 _ => None,
@@ -5124,7 +5213,7 @@ mod tests {
 
         // "nano" par défaut si ni VISUAL ni EDITOR ne sont définies ou sont vides
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => None,
                 "EDITOR" => None,
                 _ => None,
@@ -5132,7 +5221,7 @@ mod tests {
             "nano"
         );
         assert_eq!(
-            resolve_editor_with(|key| match key {
+            resolve_editor_with(None, |key| match key {
                 "VISUAL" => Some("".into()),
                 "EDITOR" => Some("".into()),
                 _ => None,
@@ -5149,7 +5238,7 @@ mod tests {
         select(&mut model, "ok.bru");
         match update(&mut model, Message::OpenResponseInEditor) {
             Command::OpenInEditor { program, text } => {
-                assert_eq!(program, resolve_editor());
+                assert_eq!(program, resolve_editor(model.editor.as_deref()));
                 assert_eq!(text, "<html><body>probe</body></html>\n");
             }
             other => panic!("Command::OpenInEditor attendu, obtenu {other:?}"),
@@ -7398,6 +7487,16 @@ mod tests {
         update(&mut model, Message::StartEdit);
         assert!(model.editing.is_none());
 
+        // Sur un dossier avec folder.bru valide : ouverture
+        select(&mut model, "grp");
+        update(&mut model, Message::StartEdit);
+        assert!(model.editing.is_some());
+        assert_eq!(
+            model.editing.as_ref().unwrap().path,
+            std::path::PathBuf::from("grp/folder.bru")
+        );
+        model.editing = None;
+
         // 3. Sur un nœud en erreur avec Focus::Detail : sans effet
         select(&mut model, "broken.bru");
         assert_eq!(model.focus, Focus::Detail);
@@ -8176,7 +8275,7 @@ mod tests {
         update(&mut model, Message::StartEdit);
         assert_eq!(session(&model).state, EditState::FieldSelect);
 
-        // Sans effet sur un dossier sans meta ni sur un nœud en erreur.
+        // Sans effet sur un dossier sans folder.bru ni sur un nœud en erreur.
         let mut model = loaded_model((100, 30));
         select(&mut model, "misc");
         update(&mut model, Message::NextFocus);
@@ -8185,6 +8284,15 @@ mod tests {
         select(&mut model, "broken.bru");
         update(&mut model, Message::Enter);
         assert!(model.editing.is_none());
+
+        // Ouvre la session sur un dossier doté de folder.bru.
+        select(&mut model, "grp");
+        update(&mut model, Message::Enter);
+        assert!(model.editing.is_some());
+        assert_eq!(
+            model.editing.as_ref().unwrap().path,
+            std::path::PathBuf::from("grp/folder.bru")
+        );
     }
 
     #[test]
@@ -10857,6 +10965,7 @@ mod mouse_tests {
     use super::*;
     use crate::app::model::{MouseState, PendingConfirm};
     use crate::app::test_support::{loaded_model, runner_probe_model, select, selected_name};
+    use crate::app::view::detail::request_text_and_fields;
     use crate::app::view::hit::{Hit, hit_test};
 
     fn model_on(path: &str, size: (u16, u16)) -> Model {

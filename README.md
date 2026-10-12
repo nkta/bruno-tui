@@ -19,6 +19,7 @@ Options :
 | Option | Effet |
 |---|---|
 | `--secret NOM[=CLÉ]` | variable secrète transmise à `bru` (répétable). Cherchée dans le `.env` de la collection puis le shell, sous `CLÉ` ou `NOM`/`NOM_EN_MAJUSCULES` ; une saisie dans le panneau Secrets prime. Jamais de valeur en clair sur la ligne de commande. |
+| `--editor COMMANDE` | commande d'éditeur externe pour l'édition de texte (scripts, tests, docs) et l'ouverture du corps (priorité sur `VISUAL` et `EDITOR`, repli sur `nano`) |
 | `--no-mouse` | n'active pas la capture souris (la sélection native du terminal reste disponible) |
 | `--no-watch` | désactive la surveillance et le rechargement automatique de la collection |
 | `--no-history` | désactive la persistance de l'historique des exécutions dans le fichier d'état |
@@ -162,30 +163,43 @@ fichiers `.bru` que pour les collections OpenCollection YAML.
 - **Masquage d'authentification** : les valeurs littérales sensibles (mots de passe, tokens,
   secrets, clés d'API) sont masquées (`********`) dans l'onglet Auth, tandis que les références
   de variables (`{{variable}}`) restent visibles en clair.
-- **Édition `.bru`** : pour les collections au format `.bru`, les dossiers (`folder.bru`) et
-  la collection racine (`collection.bru`) sont éditables (`Entrée` / `e`) pour leurs en-têtes,
-  variables, assertions et réglages. Pour les collections OpenCollection (YAML), ils restent
-  strictement en lecture seule.
+- **Édition** : pour les collections Bruno (`.bru`), les requêtes, les dossiers (`folder.bru`)
+  et la racine (`collection.bru`) sont éditables (`Entrée` / `e`) : en-têtes, variables
+  (`vars:pre-request`, `vars:post-response`), assertions, réglages (`settings`, valeurs seules)
+  et blocs de texte (scripts, tests, documentation). Les collections OpenCollection (YAML),
+  gRPC et WebSocket restent strictement en lecture seule.
 
 
-## Édition d'une requête
+## Édition (requêtes, dossiers, collection)
 
-Dans le panneau Détail, `Entrée` (ou `e`) ouvre une session d'édition de la
-requête sélectionnée. Rien n'est écrit sur disque avant `Ctrl+S`.
+Dans le panneau Détail, `Entrée` (ou `e`) ouvre une session d'édition de la requête,
+du dossier (`folder.bru`) ou de la collection (`collection.bru`) sélectionné. Rien n'est
+écrit sur disque avant `Ctrl+S`.
 
 Sélection de champ (URL, méthode, en-têtes, paramètres de requête et de
-chemin, corps) :
+chemin, corps, variables, assertions, réglages, scripts pré/post, tests,
+documentation) :
 
 | Touche | Effet |
 |---|---|
 | `↑`/`k`, `↓`/`j` | champ précédent, suivant |
-| `Entrée` | modifier la valeur ; sur la méthode, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur une ligne « + Ajouter », ajoute une entrée |
-| `Espace` | activer ou désactiver l'en-tête ou le paramètre |
+| `Entrée` | modifier la valeur ; sur la méthode, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur un bloc de texte (script, test, doc), ouvre l'éditeur externe ; sur une ligne « + Ajouter », ajoute une entrée |
+| `Espace` | activer ou désactiver l'en-tête, le paramètre, la variable ou l'assertion |
 | `a` | ajouter une entrée dans la section du champ (clé, puis valeur) |
-| `d` | supprimer l'en-tête ou le paramètre, sans confirmation |
-| `c` | renommer la clé de l'en-tête ou du paramètre |
-| `Ctrl+S` | enregistrer |
+| `d` | supprimer l'en-tête, le paramètre, la variable ou l'assertion, sans confirmation |
+| `c` | renommer la clé de l'en-tête, du paramètre, de la variable ou de l'assertion |
+| `Ctrl+S` | enregistrer sur le disque |
 | `Échap` | fermer la session (confirmation si modifiée) |
+
+### Édition externe des blocs de texte
+
+Sur un bloc de texte (**Script pré-requête**, **Script post-réponse**, **Tests**, **Documentation**),
+l'appui sur `Entrée` suspend le TUI et ouvre le fichier dans un éditeur externe :
+
+- **Choix de l'éditeur** : `--editor COMMANDE` prioritaire, puis variable `VISUAL`, puis `EDITOR`, avec repli sur `nano`.
+- **Fichier temporaire sécurisé** : créé dans `$XDG_RUNTIME_DIR` (ou le dossier temporaire système) avec des droits stricts `0600` et une extension adaptée (`.js` pour les scripts/tests, `.md` pour la documentation). Le fichier est systématiquement supprimé dès la fermeture de l'éditeur.
+- **Prise en compte des modifications** : le texte relu devient une modification en attente dans la session. Si le texte est vidé, le bloc correspondant est retiré à l'enregistrement.
+- **Formatage Bruno** : lors de la sauvegarde (`Ctrl+S`), le contenu est réindenté à 2 espaces conformément au format Bruno.
 
 Saisie : `Entrée` ou `Tab` valide (`Entrée` insère un saut de ligne dans le
 corps), `Échap` annule, `Ctrl+S` valide puis enregistre ; pendant la saisie
@@ -196,7 +210,9 @@ Comme dans Bruno, les paramètres de requête et l'URL restent cohérents :
 modifier un paramètre reconstruit la chaîne de requête de l'URL à partir
 des paramètres activés, et modifier l'URL recalcule les paramètres activés
 (les paramètres désactivés restent à leur place). Une clé vide, contenant
-un espace ou `:`, ou commençant par `~` ou `"` est refusée ; dans un
+un espace ou `:`, ou commençant par `~` ou `"` est refusée (les clés
+d'assertion acceptent les espaces, ex. `res.status`) ; les réglages
+(`settings`) n'acceptent que la modification de valeur ; dans un
 paramètre de requête, `&`, `#` et le saut de ligne sont refusés (ainsi que
 `=` dans la clé).
 

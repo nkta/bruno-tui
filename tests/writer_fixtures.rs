@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use bruno_tui::collection::{BruFile, BruLoader, CollectionLoader, RequestView, TreeNode};
+use bruno_tui::collection::{
+    BruFile, BruLoader, CollectionLoader, FileMeta, RequestView, TreeNode,
+};
 use bruno_tui::writer::{
     BruWriter, EditError, EntryProblem, EntrySection, EnvironmentVarEdit, FieldEdit, FileStamp,
     RequestWriter, WriteError, preview, write_environment,
@@ -657,7 +659,7 @@ fn entry_cases_match_after_fixtures_and_preview() {
 
         let reloaded = BruFile::parse(String::from_utf8(written).expect("utf-8")).expect("AST");
         let reloaded_view = RequestView::from_ast(&reloaded)
-            .unwrap_or_else(|_| RequestView::from_file_ast(&reloaded));
+            .unwrap_or_else(|_| FileMeta::from_ast(reloaded.clone()).to_request_view());
         assert_eq!(previewed, reloaded_view, "{name}");
 
         let _ = fs::remove_dir_all(&dir);
@@ -771,6 +773,86 @@ fn environment_vars_edit_matches_after_fixture() {
     let rewritten_text = String::from_utf8_lossy(&rewritten);
     assert!(rewritten_text.contains("  ~debug: true\n"));
     assert!(rewritten_text.contains("vars:secret [\n  token\n]\n"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn text_blocks_edit_creation_and_removal() {
+    let dir = workdir("text-blocks");
+    let path = dir.join("test-req.bru");
+    let initial = "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n}\n\nscript:pre-request {\n  console.log(\"old\");\n}\n";
+    fs::write(&path, initial).expect("écriture initiale");
+    let (ast, stamp) = load(&path);
+
+    // 1. Modification de script:pre-request, création de tests et de docs
+    let stamp2 = BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[
+                FieldEdit::ScriptPreRequest("console.log(\"new\");".into()),
+                FieldEdit::Tests("test(\"ok\", () => {});".into()),
+                FieldEdit::Docs("# Title\nDocumentation".into()),
+            ],
+        )
+        .expect("écriture");
+
+    let rewritten = fs::read_to_string(&path).expect("relecture");
+    assert_eq!(
+        rewritten,
+        "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n}\n\nscript:pre-request {\n  console.log(\"new\");\n}\n\ntests {\n  test(\"ok\", () => {});\n}\n\ndocs {\n  # Title\n  Documentation\n}\n"
+    );
+
+    // 2. Retrait de script:pre-request et de tests
+    let (ast2, _) = load(&path);
+    BruWriter
+        .write_request(
+            &path,
+            &ast2,
+            &stamp2,
+            &[
+                FieldEdit::ScriptPreRequest("".into()),
+                FieldEdit::Tests("   \n".into()),
+            ],
+        )
+        .expect("suppression");
+
+    let rewritten2 = fs::read_to_string(&path).expect("relecture 2");
+    assert_eq!(
+        rewritten2,
+        "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n}\n\ndocs {\n  # Title\n  Documentation\n}\n"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn folder_bru_text_blocks_and_headers_edit() {
+    let dir = workdir("folder-bru-edit");
+    let path = dir.join("folder.bru");
+    let initial = "meta {\n  name: Mon Dossier\n}\n";
+    fs::write(&path, initial).expect("écriture initiale");
+    let (ast, stamp) = load(&path);
+
+    BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[
+                add(EntrySection::Headers, "Authorization", "Bearer tok"),
+                FieldEdit::Docs("# Docs du dossier\nTexte".into()),
+            ],
+        )
+        .expect("écriture folder");
+
+    let rewritten = fs::read_to_string(&path).expect("relecture");
+    assert_eq!(
+        rewritten,
+        "meta {\n  name: Mon Dossier\n}\n\nheaders {\n  Authorization: Bearer tok\n}\n\ndocs {\n  # Docs du dossier\n  Texte\n}\n"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

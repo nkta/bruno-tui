@@ -202,6 +202,11 @@ pub enum Message {
     ValidateInput,
     /// `Échap` pendant une saisie de champ.
     CancelInput,
+    /// Renvoyé par la boucle après `Command::EditTextInEditor`.
+    TextEditorClosed {
+        field: super::model::EditableField,
+        result: Result<String, String>,
+    },
     /// Renvoyé par la boucle après `Command::SaveEdit`.
     EditSaved {
         path: PathBuf,
@@ -357,6 +362,9 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
         AppEvent::Run(event) => Some(Message::RunFinished(event)),
         AppEvent::ClipboardResult { token, result } => {
             Some(Message::ClipboardResult { token, result })
+        }
+        AppEvent::TextEditorClosed { field, result } => {
+            Some(Message::TextEditorClosed { field, result })
         }
         AppEvent::EditSaved { path, result } => Some(Message::EditSaved { path, result }),
         AppEvent::EnvironmentSaved { path, result } => {
