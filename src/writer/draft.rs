@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use super::dictionary::{
     DictEntry as DraftEntry, DictSection as Section, block_node, check_key_general,
-    dictionary_replacements,
+    dictionary_replacements, following_blank_line_len, preceding_blank_line_len,
 };
 use super::edit::{EntrySection, FieldEdit, Replacement};
 use super::error::{EditError, EntryProblem};
@@ -52,12 +52,55 @@ struct BodyState {
     text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextBlockKind {
+    ScriptPreRequest,
+    ScriptPostResponse,
+    Tests,
+    Docs,
+}
+
+impl TextBlockKind {
+    pub const ALL: [Self; 4] = [
+        Self::ScriptPreRequest,
+        Self::ScriptPostResponse,
+        Self::Tests,
+        Self::Docs,
+    ];
+
+    pub fn block_name(&self) -> &'static str {
+        match self {
+            Self::ScriptPreRequest => "script:pre-request",
+            Self::ScriptPostResponse => "script:post-response",
+            Self::Tests => "tests",
+            Self::Docs => "docs",
+        }
+    }
+
+    pub fn position(&self) -> usize {
+        match self {
+            Self::ScriptPreRequest => 0,
+            Self::ScriptPostResponse => 1,
+            Self::Tests => 2,
+            Self::Docs => 3,
+        }
+    }
+}
+
+/// État d'un bloc de texte libre (`script:*`, `tests`, `docs`).
+struct TextBlockState {
+    block_span: Option<Range<usize>>,
+    content_span: Option<Range<usize>>,
+    new_text: Option<String>,
+}
+
 pub(crate) struct Draft<'a> {
     ast: &'a BruFile,
     url: Result<UrlState, EditError>,
     method: Result<MethodState, EditError>,
     sections: [Section; 3],
     body: Option<BodyState>,
+    text_blocks: [TextBlockState; 4],
 }
 
 impl<'a> Draft<'a> {
@@ -75,12 +118,34 @@ impl<'a> Draft<'a> {
                 touched: false,
             }
         };
+        let text_block = |kind: TextBlockKind| {
+            let found = ast.nodes().iter().find_map(|node| match &node.kind {
+                NodeKind::Block(block) if block.name == kind.block_name() => match &block.body {
+                    BlockBody::Text { content } => Some((node.span.clone(), content.clone())),
+                    _ => None,
+                },
+                _ => None,
+            });
+            match found {
+                Some((block_span, content_span)) => TextBlockState {
+                    block_span: Some(block_span),
+                    content_span: Some(content_span),
+                    new_text: None,
+                },
+                None => TextBlockState {
+                    block_span: None,
+                    content_span: None,
+                    new_text: None,
+                },
+            }
+        };
         Self {
             ast,
             url: url_state(ast),
             method: method_state(ast),
             sections: EntrySection::ALL.map(section),
             body: None,
+            text_blocks: TextBlockKind::ALL.map(text_block),
         }
     }
 
@@ -129,6 +194,20 @@ impl<'a> Draft<'a> {
                 if let Some(body) = &mut self.body {
                     body.text = text.clone();
                 }
+            }
+            FieldEdit::ScriptPreRequest(text) => {
+                self.text_blocks[TextBlockKind::ScriptPreRequest.position()].new_text =
+                    Some(text.clone());
+            }
+            FieldEdit::ScriptPostResponse(text) => {
+                self.text_blocks[TextBlockKind::ScriptPostResponse.position()].new_text =
+                    Some(text.clone());
+            }
+            FieldEdit::Tests(text) => {
+                self.text_blocks[TextBlockKind::Tests.position()].new_text = Some(text.clone());
+            }
+            FieldEdit::Docs(text) => {
+                self.text_blocks[TextBlockKind::Docs.position()].new_text = Some(text.clone());
             }
             FieldEdit::AddEntry {
                 section,
@@ -295,7 +374,7 @@ impl<'a> Draft<'a> {
             let state = &self.sections[section.position()];
             let block = block_node(self.ast, section.block_name());
             let anchor = if block.is_none() && !state.entries.is_empty() {
-                creation_anchor(self.ast, section)
+                canonical_creation_anchor(self.ast, section.block_name())
             } else {
                 0
             };
@@ -314,6 +393,33 @@ impl<'a> Draft<'a> {
             ));
         }
 
+        for kind in TextBlockKind::ALL {
+            let state = &self.text_blocks[kind.position()];
+            let anchor = if state.block_span.is_none()
+                && state
+                    .new_text
+                    .as_ref()
+                    .is_some_and(|t| !t.trim().is_empty())
+            {
+                canonical_creation_anchor(self.ast, kind.block_name())
+            } else {
+                0
+            };
+            let separate = !prefixed_anchors.contains(&anchor);
+            if state.block_span.is_none()
+                && state
+                    .new_text
+                    .as_ref()
+                    .is_some_and(|t| !t.trim().is_empty())
+                && separate
+            {
+                prefixed_anchors.push(anchor);
+            }
+            replacements.extend(text_block_replacements(
+                raw, eol, kind, state, anchor, separate,
+            ));
+        }
+
         // Une insertion (tranche vide) passe avant un remplacement qui
         // commence au même endroit ; le tri stable garde l'ordre d'émission
         // entre insertions au même point.
@@ -327,6 +433,172 @@ impl<'a> Draft<'a> {
     }
 }
 
+/// Émet les remplacements pour un bloc de texte libre (`script:*`, `tests`, `docs`) :
+/// modification, suppression ou création.
+fn text_block_replacements(
+    raw: &str,
+    eol: &str,
+    kind: TextBlockKind,
+    state: &TextBlockState,
+    create_anchor: usize,
+    separate_from_previous: bool,
+) -> Vec<Replacement> {
+    let mut replacements = Vec::new();
+    let Some(new_text) = &state.new_text else {
+        return replacements;
+    };
+
+    let is_empty = new_text.trim().is_empty();
+
+    match state.block_span {
+        Some(ref span) => {
+            if is_empty {
+                let preceding = preceding_blank_line_len(raw, span.start);
+                let start = span.start - preceding;
+                let end = if preceding == 0 && start == 0 {
+                    span.end + following_blank_line_len(raw, span.end)
+                } else {
+                    span.end
+                };
+                replacements.push(Replacement {
+                    span: start..end,
+                    bytes: String::new(),
+                });
+            } else if let Some(ref content_span) = state.content_span {
+                replacements.push(Replacement {
+                    span: content_span.clone(),
+                    bytes: format::format_body_content(new_text, eol),
+                });
+            }
+        }
+        None => {
+            if !is_empty {
+                let mut bytes = String::new();
+                let anything_before = !raw[..create_anchor].is_empty();
+                if separate_from_previous
+                    && anything_before
+                    && !raw[..create_anchor].ends_with('\n')
+                {
+                    bytes.push_str(eol);
+                }
+                if anything_before {
+                    bytes.push_str(eol);
+                }
+                bytes.push_str(kind.block_name());
+                bytes.push_str(" {");
+                bytes.push_str(eol);
+                bytes.push_str(&format::format_body_content(new_text, eol));
+                bytes.push('}');
+                bytes.push_str(eol);
+                if !raw[create_anchor..].is_empty()
+                    && following_blank_line_len(raw, create_anchor) == 0
+                {
+                    bytes.push_str(eol);
+                }
+                replacements.push(Replacement {
+                    span: create_anchor..create_anchor,
+                    bytes,
+                });
+            }
+        }
+    }
+    replacements
+}
+
+/// Rang d'ordre canonique des blocs de Bruno (`jsonToBru.js`).
+fn canonical_block_rank(name: &str) -> Option<usize> {
+    if name == "meta" {
+        return Some(0);
+    }
+    if METHODS.contains(&name) || name == "http" || name == "grpc" || name == "ws" {
+        return Some(1);
+    }
+    if name == "params:query" {
+        return Some(2);
+    }
+    if name == "params:path" {
+        return Some(3);
+    }
+    if name == "headers" {
+        return Some(4);
+    }
+    if name == "metadata" {
+        return Some(5);
+    }
+    if name.starts_with("auth:") || name == "auth" {
+        return Some(6);
+    }
+    if name.starts_with("body:") || name == "body" {
+        return Some(7);
+    }
+    if name == "vars:pre-request" {
+        return Some(8);
+    }
+    if name == "vars:post-response" {
+        return Some(9);
+    }
+    if name == "assert" {
+        return Some(10);
+    }
+    if name == "script:pre-request" {
+        return Some(11);
+    }
+    if name == "script:post-response" {
+        return Some(12);
+    }
+    if name.starts_with("script:grpc:") || name == "script:grpc" {
+        return Some(13);
+    }
+    if name == "tests" {
+        return Some(14);
+    }
+    if name == "app" {
+        return Some(15);
+    }
+    if name == "settings" {
+        return Some(16);
+    }
+    if name == "docs" {
+        return Some(17);
+    }
+    if name == "example" {
+        return Some(18);
+    }
+    None
+}
+
+/// Point d'insertion d'un bloc absent selon l'ordre canonique de Bruno :
+/// fin du dernier bloc présent parmi ses prédécesseurs, sinon début du
+/// premier successeur présent, sinon fin du fichier.
+fn canonical_creation_anchor(ast: &BruFile, target_name: &str) -> usize {
+    let target_rank = match canonical_block_rank(target_name) {
+        Some(rank) => rank,
+        None => return ast.raw().len(),
+    };
+
+    let mut last_predecessor_end = None;
+    let mut first_successor_start = None;
+
+    for node in ast.nodes() {
+        if let NodeKind::Block(block) = &node.kind
+            && let Some(rank) = canonical_block_rank(&block.name)
+        {
+            if rank <= target_rank {
+                last_predecessor_end = Some(node.span.end);
+            } else if first_successor_start.is_none() {
+                first_successor_start = Some(node.span.start);
+            }
+        }
+    }
+
+    if let Some(end) = last_predecessor_end {
+        end
+    } else if let Some(start) = first_successor_start {
+        start
+    } else {
+        ast.raw().len()
+    }
+}
 /// Règles générales (`check_key_general`, `dictionary.rs`) plus la règle
 /// propre aux paramètres de requête (caractères réservés d'une chaîne de
 /// requête dans la clé).
@@ -351,30 +623,6 @@ fn check_query_value(value: &str, index: Option<usize>) -> Result<(), EditError>
         });
     }
     Ok(())
-}
-
-/// Tranche du premier bloc de méthode.
-fn method_node_span(ast: &BruFile) -> Option<Range<usize>> {
-    ast.nodes().iter().find_map(|node| match &node.kind {
-        NodeKind::Block(block) if METHODS.contains(&block.name.as_str()) => Some(node.span.clone()),
-        _ => None,
-    })
-}
-
-/// Point d'insertion d'un bloc absent : fin du dernier bloc présent parmi
-/// ses prédécesseurs dans l'ordre d'écriture de Bruno (méthode,
-/// `params:query`, `params:path`, `headers`), sinon fin du fichier.
-fn creation_anchor(ast: &BruFile, section: EntrySection) -> usize {
-    let mut anchor = method_node_span(ast).map(|span| span.end);
-    for previous in EntrySection::ALL
-        .iter()
-        .take_while(|candidate| **candidate != section)
-    {
-        if let Some((span, _)) = block_node(ast, previous.block_name()) {
-            anchor = Some(span.end);
-        }
-    }
-    anchor.unwrap_or(ast.raw().len())
 }
 
 fn url_state(ast: &BruFile) -> Result<UrlState, EditError> {
@@ -766,6 +1014,83 @@ mod tests {
         assert_eq!(
             out,
             "get {\r\n  url: http://a\r\n}\r\n\r\nheaders {\r\n  A: 1\r\n}\r\n"
+        );
+    }
+
+    #[test]
+    fn edit_existing_text_block_is_reindented() {
+        let source = "meta {\n  name: a\n}\n\nget {\n  url: http://a\n}\n\nscript:pre-request {\n  console.log(1);\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::ScriptPreRequest(
+                "console.log(2);\nconst x = 3;".into(),
+            )],
+        );
+        assert_eq!(
+            out,
+            "meta {\n  name: a\n}\n\nget {\n  url: http://a\n}\n\nscript:pre-request {\n  console.log(2);\n  const x = 3;\n}\n"
+        );
+    }
+
+    #[test]
+    fn remove_text_block_when_empty() {
+        let source = "meta {\n  name: a\n}\n\nget {\n  url: http://a\n}\n\ntests {\n  test(\"ok\", () => {});\n}\n\ndocs {\n  Documentation\n}\n";
+        let out = apply(source, &[FieldEdit::Tests("".into())]);
+        assert_eq!(
+            out,
+            "meta {\n  name: a\n}\n\nget {\n  url: http://a\n}\n\ndocs {\n  Documentation\n}\n"
+        );
+    }
+
+    #[test]
+    fn remove_text_block_when_whitespace_only() {
+        let source = "get {\n  url: http://a\n}\n\ndocs {\n  doc\n}\n";
+        let out = apply(source, &[FieldEdit::Docs("   \n  \t  \n".into())]);
+        assert_eq!(out, "get {\n  url: http://a\n}\n");
+    }
+
+    #[test]
+    fn create_absent_text_blocks_in_canonical_order() {
+        let source = "meta {\n  name: a\n}\n\nget {\n  url: http://a\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::Docs("Documentation finale".into()),
+                FieldEdit::ScriptPreRequest("req.setHeader(\"x\", 1);".into()),
+                FieldEdit::Tests("test(\"ok\", () => {});".into()),
+            ],
+        );
+        assert_eq!(
+            out,
+            "meta {\n  name: a\n}\n\nget {\n  url: http://a\n}\n\nscript:pre-request {\n  req.setHeader(\"x\", 1);\n}\n\ntests {\n  test(\"ok\", () => {});\n}\n\ndocs {\n  Documentation finale\n}\n"
+        );
+    }
+
+    #[test]
+    fn empty_text_on_absent_block_does_not_create() {
+        let source = "get {\n  url: http://a\n}\n";
+        let out = apply(source, &[FieldEdit::ScriptPreRequest("".into())]);
+        assert_eq!(out, source);
+    }
+
+    #[test]
+    fn create_docs_on_folder_bru() {
+        let source = "meta {\n  name: Mon Dossier\n}\n";
+        let out = apply(source, &[FieldEdit::Docs("# Dossier\nExplication".into())]);
+        assert_eq!(
+            out,
+            "meta {\n  name: Mon Dossier\n}\n\ndocs {\n  # Dossier\n  Explication\n}\n"
+        );
+    }
+
+    #[test]
+    fn text_block_with_braces_and_closing_syntax() {
+        let source = "get {\n  url: http://a\n}\n";
+        let script = "function test() {\n  if (true) {\n    return {};\n  }\n}";
+        let out = apply(source, &[FieldEdit::ScriptPostResponse(script.into())]);
+        assert_eq!(
+            out,
+            "get {\n  url: http://a\n}\n\nscript:post-response {\n  function test() {\n    if (true) {\n      return {};\n    }\n  }\n}\n"
         );
     }
 }

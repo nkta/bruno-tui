@@ -44,8 +44,16 @@ pub(crate) fn format_entry(key: &str, value: &str, disabled: bool, eol: &str) ->
 /// Réindente un contenu de corps texte de deux espaces par ligne, l'inverse
 /// de `dedent` à la lecture.
 pub(crate) fn format_body_content(text: &str, eol: &str) -> String {
+    let text = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text);
+    if text.is_empty() {
+        return String::new();
+    }
     let mut out = String::new();
     for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
         out.push_str("  ");
         out.push_str(line);
         out.push_str(eol);
@@ -118,6 +126,13 @@ mod tests {
         let source = format!("body:json {{\n{formatted}}}\n");
         let file = BruFile::parse(source).expect("source valide");
         assert_eq!(file.text("body:json").as_deref(), Some(text));
+    }
+
+    #[test]
+    fn body_content_with_trailing_newline_and_crlf() {
+        let text = "console.log(1);\r\nconsole.log(2);\n";
+        let formatted = format_body_content(text, "\n");
+        assert_eq!(formatted, "  console.log(1);\n  console.log(2);\n");
     }
 
     #[test]

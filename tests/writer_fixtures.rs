@@ -716,3 +716,83 @@ fn environment_vars_edit_matches_after_fixture() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn text_blocks_edit_creation_and_removal() {
+    let dir = workdir("text-blocks");
+    let path = dir.join("test-req.bru");
+    let initial = "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n}\n\nscript:pre-request {\n  console.log(\"old\");\n}\n";
+    fs::write(&path, initial).expect("écriture initiale");
+    let (ast, stamp) = load(&path);
+
+    // 1. Modification de script:pre-request, création de tests et de docs
+    let stamp2 = BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[
+                FieldEdit::ScriptPreRequest("console.log(\"new\");".into()),
+                FieldEdit::Tests("test(\"ok\", () => {});".into()),
+                FieldEdit::Docs("# Title\nDocumentation".into()),
+            ],
+        )
+        .expect("écriture");
+
+    let rewritten = fs::read_to_string(&path).expect("relecture");
+    assert_eq!(
+        rewritten,
+        "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n}\n\nscript:pre-request {\n  console.log(\"new\");\n}\n\ntests {\n  test(\"ok\", () => {});\n}\n\ndocs {\n  # Title\n  Documentation\n}\n"
+    );
+
+    // 2. Retrait de script:pre-request et de tests
+    let (ast2, _) = load(&path);
+    BruWriter
+        .write_request(
+            &path,
+            &ast2,
+            &stamp2,
+            &[
+                FieldEdit::ScriptPreRequest("".into()),
+                FieldEdit::Tests("   \n".into()),
+            ],
+        )
+        .expect("suppression");
+
+    let rewritten2 = fs::read_to_string(&path).expect("relecture 2");
+    assert_eq!(
+        rewritten2,
+        "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n}\n\ndocs {\n  # Title\n  Documentation\n}\n"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn folder_bru_text_blocks_and_headers_edit() {
+    let dir = workdir("folder-bru-edit");
+    let path = dir.join("folder.bru");
+    let initial = "meta {\n  name: Mon Dossier\n}\n";
+    fs::write(&path, initial).expect("écriture initiale");
+    let (ast, stamp) = load(&path);
+
+    BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[
+                add(EntrySection::Headers, "Authorization", "Bearer tok"),
+                FieldEdit::Docs("# Docs du dossier\nTexte".into()),
+            ],
+        )
+        .expect("écriture folder");
+
+    let rewritten = fs::read_to_string(&path).expect("relecture");
+    assert_eq!(
+        rewritten,
+        "meta {\n  name: Mon Dossier\n}\n\nheaders {\n  Authorization: Bearer tok\n}\n\ndocs {\n  # Docs du dossier\n  Texte\n}\n"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
