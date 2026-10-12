@@ -411,7 +411,9 @@ mod tests {
 
     use super::super::*;
     use super::*;
-    use crate::app::model::{MouseState, PendingConfirm, RequestTab};
+    use crate::app::model::{
+        EnvironmentEditSession, MouseState, PendingConfirm, RequestTab, ResponseTab,
+    };
     use crate::app::test_support::{loaded_model, runner_probe_model, select, selected_name};
     use crate::app::view::detail::request_text_and_fields;
     use crate::app::view::detail::{plain_lines, response_plain_lines};
