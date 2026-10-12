@@ -873,6 +873,16 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
         EditState::MethodPicker { .. } => {
             format!("Méthode · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler")
         }
+        EditState::AuthModePicker { .. } => {
+            format!(
+                "Mode d'auth · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler"
+            )
+        }
+        EditState::ApiKeyPlacementPicker { .. } => {
+            format!(
+                "Emplacement · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler"
+            )
+        }
     }
 }
 

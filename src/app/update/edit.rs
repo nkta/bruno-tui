@@ -78,6 +78,14 @@ pub(crate) fn enter_in_detail(model: &mut Model) -> Command {
             confirm_method_picker(model);
             Command::None
         }
+        Some(session) if matches!(session.state, EditState::AuthModePicker { .. }) => {
+            confirm_auth_mode_picker(model);
+            Command::None
+        }
+        Some(session) if matches!(session.state, EditState::ApiKeyPlacementPicker { .. }) => {
+            confirm_api_key_placement_picker(model);
+            Command::None
+        }
         Some(_) => Command::None,
     }
 }
@@ -114,6 +122,130 @@ pub(crate) fn confirm_method_picker(model: &mut Model) {
     };
     if !method.eq_ignore_ascii_case(&session.preview.method) {
         try_commit(model, FieldEdit::Method(method.to_owned()));
+    }
+    close_input(model);
+}
+
+/// Ouvre le sélecteur de mode d'authentification (`feat-edit-auth`).
+pub(crate) fn open_auth_mode_picker(model: &mut Model) {
+    let is_collection = model.selected_collection;
+    let modes = if is_collection {
+        vec![
+            "none", "basic", "bearer", "digest", "ntlm", "apikey", "awsv4", "wsse",
+        ]
+    } else {
+        vec![
+            "none", "inherit", "basic", "bearer", "digest", "ntlm", "apikey", "awsv4", "wsse",
+        ]
+    };
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let current = session.preview.auth.as_ref().map_or("none", |m| m.as_str());
+    let selected = modes
+        .iter()
+        .position(|&candidate| current.eq_ignore_ascii_case(candidate))
+        .unwrap_or(0);
+    session.state = EditState::AuthModePicker { selected, modes };
+    model.last_status = None;
+    scroll_edit_into_view(model);
+}
+
+/// Déplace la présélection du sélecteur de mode d'authentification.
+pub(crate) fn move_auth_mode_picker(model: &mut Model, delta: i8) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let EditState::AuthModePicker { selected, modes } = &mut session.state else {
+        return;
+    };
+    let count = modes.len();
+    if delta < 0 {
+        *selected = selected.saturating_sub(1);
+    } else if delta > 0 {
+        *selected = (*selected + 1).min(count - 1);
+    }
+}
+
+/// Valide la présélection du sélecteur de mode d'authentification.
+pub(crate) fn confirm_auth_mode_picker(model: &mut Model) {
+    let Some(session) = &model.editing else {
+        return;
+    };
+    let EditState::AuthModePicker { selected, modes } = &session.state else {
+        return;
+    };
+    let Some(&mode) = modes.get(*selected) else {
+        return;
+    };
+    let current = session.preview.auth.as_ref().map_or("none", |m| m.as_str());
+    if !mode.eq_ignore_ascii_case(current) {
+        try_commit(model, FieldEdit::AuthMode(mode.to_owned()));
+    }
+    close_input(model);
+}
+
+/// Ouvre le sélecteur d'emplacement de la clé API (`feat-edit-auth`).
+pub(crate) fn open_api_key_placement_picker(model: &mut Model, index: usize) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let current = session
+        .preview
+        .auth_params()
+        .get(index)
+        .map_or("", |kv| kv.value.as_str());
+    let selected = if current.eq_ignore_ascii_case("queryparams") {
+        1
+    } else {
+        0
+    };
+    session.state = EditState::ApiKeyPlacementPicker { selected };
+    model.last_status = None;
+    scroll_edit_into_view(model);
+}
+
+/// Déplace la présélection du sélecteur d'emplacement de la clé API.
+pub(crate) fn move_api_key_placement_picker(model: &mut Model, delta: i8) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let EditState::ApiKeyPlacementPicker { selected } = &mut session.state else {
+        return;
+    };
+    if delta < 0 {
+        *selected = selected.saturating_sub(1);
+    } else if delta > 0 {
+        *selected = (*selected + 1).min(1);
+    }
+}
+
+/// Valide la présélection du sélecteur d'emplacement de la clé API.
+pub(crate) fn confirm_api_key_placement_picker(model: &mut Model) {
+    let Some(session) = &model.editing else {
+        return;
+    };
+    let EditState::ApiKeyPlacementPicker { selected } = session.state else {
+        return;
+    };
+    let Some(EditableField::AuthParamValue(index)) = session.current_field() else {
+        close_input(model);
+        return;
+    };
+    let new_val = crate::app::model::APIKEY_PLACEMENTS[selected];
+    let current = session
+        .preview
+        .auth_params()
+        .get(index)
+        .map_or("", |kv| kv.value.as_str());
+    if current != new_val {
+        try_commit(
+            model,
+            FieldEdit::AuthParamValue {
+                index,
+                value: new_val.to_owned(),
+            },
+        );
     }
     close_input(model);
 }
@@ -165,6 +297,8 @@ pub(crate) fn toggle_field(model: &mut Model) {
         EditableField::SettingsValue(_)
         | EditableField::Method
         | EditableField::Url
+        | EditableField::AuthMode
+        | EditableField::AuthParamValue(_)
         | EditableField::AddRow(_)
         | EditableField::BodyText
         | EditableField::ScriptPreRequest
@@ -196,6 +330,25 @@ pub(crate) fn begin_input(model: &mut Model) -> Command {
         EditableField::Method => {
             open_method_picker(model);
             Command::None
+        }
+        EditableField::AuthMode => {
+            open_auth_mode_picker(model);
+            Command::None
+        }
+        EditableField::AuthParamValue(index) => {
+            let is_placement = session
+                .preview
+                .auth_params()
+                .get(index)
+                .is_some_and(|kv| kv.key == "placement");
+            if is_placement {
+                open_api_key_placement_picker(model, index);
+                Command::None
+            } else {
+                let input = TextInput::new(field_value(session, &field), false);
+                open_input(model, input, InputTarget::Field);
+                Command::None
+            }
         }
         EditableField::ScriptPreRequest
         | EditableField::ScriptPostResponse
@@ -505,6 +658,8 @@ pub(crate) fn value_edit(field: EditableField, value: String) -> Option<FieldEdi
         EditableField::ScriptPostResponse => FieldEdit::ScriptPostResponse(value),
         EditableField::Tests => FieldEdit::Tests(value),
         EditableField::Docs => FieldEdit::Docs(value),
+        EditableField::AuthMode => FieldEdit::AuthMode(value),
+        EditableField::AuthParamValue(index) => FieldEdit::AuthParamValue { index, value },
         EditableField::Method | EditableField::AddRow(_) => return None,
     })
 }
@@ -529,7 +684,9 @@ pub(crate) fn cancel_input(model: &mut Model) {
                 session.cursor = return_cursor.min(session.fields.len().saturating_sub(1));
             }
         }
-        EditState::MethodPicker { .. } => {}
+        EditState::MethodPicker { .. }
+        | EditState::AuthModePicker { .. }
+        | EditState::ApiKeyPlacementPicker { .. } => {}
         EditState::FieldSelect => return,
     }
     model.last_status = None;
@@ -699,7 +856,10 @@ pub(crate) fn scroll_edit_into_view(model: &mut Model) {
         return;
     };
     let (target_line, hscroll) = match &session.state {
-        EditState::FieldSelect | EditState::MethodPicker { .. } => (location.line, 0),
+        EditState::FieldSelect
+        | EditState::MethodPicker { .. }
+        | EditState::AuthModePicker { .. }
+        | EditState::ApiKeyPlacementPicker { .. } => (location.line, 0),
         EditState::Input(input) => {
             let (line, _) = input.cursor_line_col();
             let column = u16::try_from(Line::raw(input.text_before_cursor_on_line()).width())
@@ -1011,7 +1171,10 @@ mod tests {
                 assert_eq!(input.cursor(), expected_len);
                 assert_eq!(input.text(), initial_url);
             }
-            EditState::FieldSelect | EditState::MethodPicker { .. } => panic!("saisie attendue"),
+            EditState::FieldSelect
+            | EditState::MethodPicker { .. }
+            | EditState::AuthModePicker { .. }
+            | EditState::ApiKeyPlacementPicker { .. } => panic!("saisie attendue"),
         }
 
         // Validation sans frappe (Tab) : valeur conservée, pas de dirty
@@ -1107,7 +1270,10 @@ mod tests {
             EditState::Input(input) => {
                 assert!(input.text().ends_with('\n'), "saut de ligne inséré");
             }
-            EditState::FieldSelect | EditState::MethodPicker { .. } => {
+            EditState::FieldSelect
+            | EditState::MethodPicker { .. }
+            | EditState::AuthModePicker { .. }
+            | EditState::ApiKeyPlacementPicker { .. } => {
                 panic!("devrait rester en saisie sur le corps")
             }
         }
@@ -1433,7 +1599,10 @@ mod tests {
     fn input_of(model: &Model) -> &TextInput {
         match &model.editing.as_ref().expect("session").state {
             EditState::Input(input) => input,
-            EditState::FieldSelect | EditState::MethodPicker { .. } => panic!("saisie attendue"),
+            EditState::FieldSelect
+            | EditState::MethodPicker { .. }
+            | EditState::AuthModePicker { .. }
+            | EditState::ApiKeyPlacementPicker { .. } => panic!("saisie attendue"),
         }
     }
 
@@ -2314,5 +2483,114 @@ mod tests {
         assert!(!session.dirty);
         assert_eq!(session.preview, saved_view);
         assert!(session.fields.contains(&EditableField::HeaderValue(0)));
+    }
+
+    #[test]
+    fn auth_mode_picker_opens_navigates_and_changes_mode() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::AuthMode);
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "none");
+
+        // Ouverture du picker de mode
+        update(&mut model, Message::Enter);
+        assert!(matches!(
+            session(&model).state,
+            EditState::AuthModePicker { selected: 0, .. }
+        ));
+
+        // Navigation vers inherit (1), basic (2), bearer (3)
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Down);
+        assert!(matches!(
+            session(&model).state,
+            EditState::AuthModePicker { selected: 3, .. }
+        ));
+
+        // Validation
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "bearer");
+        assert!(session(&model).dirty);
+
+        // Les champs de la session contiennent désormais le token bearer !
+        assert!(
+            session(&model)
+                .fields
+                .contains(&EditableField::AuthParamValue(0))
+        );
+        assert_eq!(shown_value(&model, EditableField::AuthParamValue(0)), "");
+    }
+
+    #[test]
+    fn api_key_placement_picker_opens_and_changes_placement() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::AuthMode);
+
+        // Passer en mode apikey
+        update(&mut model, Message::Enter);
+        // "none", "inherit", "basic", "bearer", "digest", "ntlm", "apikey" -> indice 6
+        for _ in 0..6 {
+            update(&mut model, Message::Down);
+        }
+        update(&mut model, Message::Enter);
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "apikey");
+
+        // Les paramètres apikey sont: key (0), value (1), placement (2)
+        move_to_field(&mut model, EditableField::AuthParamValue(2));
+        assert_eq!(shown_value(&model, EditableField::AuthParamValue(2)), "");
+
+        // Appuyer sur Entrée sur placement ouvre ApiKeyPlacementPicker (pas TextInput !)
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            session(&model).state,
+            EditState::ApiKeyPlacementPicker { selected: 0 }
+        );
+
+        // Naviguer vers "queryparams" (1)
+        update(&mut model, Message::Down);
+        assert_eq!(
+            session(&model).state,
+            EditState::ApiKeyPlacementPicker { selected: 1 }
+        );
+
+        // Valider
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(
+            shown_value(&model, EditableField::AuthParamValue(2)),
+            "queryparams"
+        );
+        assert!(session(&model).dirty);
+    }
+
+    #[test]
+    fn auth_param_value_text_editing() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::AuthMode);
+
+        // Passer en mode bearer (indice 3)
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Down);
+        update(&mut model, Message::Enter);
+
+        // Naviguer sur le token (indice 0 des auth params)
+        move_to_field(&mut model, EditableField::AuthParamValue(0));
+
+        // Entrée ouvre la saisie texte
+        update(&mut model, Message::Enter);
+        assert!(matches!(session(&model).state, EditState::Input(_)));
+
+        // Taper la valeur
+        type_input(&mut model, "my-secret-token");
+        update(&mut model, Message::ValidateInput);
+
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(
+            shown_value(&model, EditableField::AuthParamValue(0)),
+            "my-secret-token"
+        );
     }
 }

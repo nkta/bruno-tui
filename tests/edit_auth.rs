@@ -1,0 +1,314 @@
+//! Tests d'intégration pour l'édition de l'authentification (mode et paramètres).
+#![cfg(unix)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use bruno_tui::app::clipboard::{Clipboard, ClipboardError};
+use bruno_tui::app::event::{AppEvent, EVENT_BUFFER};
+use bruno_tui::app::model::Exit;
+use bruno_tui::app::run;
+use bruno_tui::collection::BruLoader;
+use bruno_tui::writer::BruWriter;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use tokio::sync::mpsc;
+use tokio::time::timeout;
+
+struct DummyClipboard;
+
+impl Clipboard for DummyClipboard {
+    fn set_text(&self, _text: String) -> Result<(), ClipboardError> {
+        Ok(())
+    }
+}
+
+fn writer_cases() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/writer-cases")
+}
+
+fn workdir(tag: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("bruno-tui-edit-auth-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("répertoire de test");
+    dir
+}
+
+fn copy_single_case(case_file: &str, target_dir: &Path) {
+    let source_dir = writer_cases();
+    fs::copy(source_dir.join("bruno.json"), target_dir.join("bruno.json"))
+        .expect("copie bruno.json");
+    fs::copy(source_dir.join(case_file), target_dir.join(case_file)).expect("copie case_file");
+}
+
+fn key(code: KeyCode) -> AppEvent {
+    AppEvent::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+}
+
+fn ctrl(c: char) -> AppEvent {
+    AppEvent::Terminal(Event::Key(KeyEvent::new(
+        KeyCode::Char(c),
+        KeyModifiers::CONTROL,
+    )))
+}
+
+fn spawn_run(
+    source: PathBuf,
+    sender: mpsc::Sender<AppEvent>,
+    events: mpsc::Receiver<AppEvent>,
+) -> tokio::task::JoinHandle<(Terminal<TestBackend>, Exit)> {
+    tokio::spawn(async move {
+        let mut terminal = Terminal::new(TestBackend::new(120, 35)).expect("terminal");
+        let result = run(
+            &mut terminal,
+            Arc::new(BruLoader),
+            source,
+            sender,
+            events,
+            "bru".into(),
+            Arc::new(DummyClipboard),
+            Arc::new(BruWriter),
+            Vec::new(),
+            bruno_tui::app::mouse::MouseSetup::terminal(false),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            false,
+            false,
+            None,
+        )
+        .await;
+        let Ok(exit) = result;
+        (terminal, exit)
+    })
+}
+
+#[tokio::test]
+async fn edit_auth_mode_and_token_on_request_and_save() {
+    let dir = workdir("request-bearer");
+    copy_single_case("simple.bru", &dir);
+
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let handle = spawn_run(dir.clone(), sender.clone(), events);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Passer au détail (Tab) et ouvrir l'édition (Entrée)
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // 2. Naviguer vers AuthMode :
+    // Dans simple.bru : Method (0), Url (1), Headers (2..N, AddRow), Query/Path AddRow, AuthMode
+    // Utiliser Down pour atteindre AuthMode ou naviguer dans les champs
+    // Dans simple.bru :
+    // fields: [Method, Url, AddRow(Headers), AddRow(QueryParams), AddRow(PathParams), AuthMode, ...]
+    // Donc: Down 5 fois amène à AuthMode.
+    for _ in 0..5 {
+        sender.send(key(KeyCode::Down)).await.expect("down");
+    }
+
+    // 3. Ouvrir AuthModePicker (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Modes: ["none", "inherit", "basic", "bearer", ...]
+    // Descendre de 3 crans pour sélectionner "bearer"
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Down)).await.expect("down");
+
+    // Valider le mode bearer (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // 4. Naviguer vers le champ token (un cran vers le bas)
+    sender.send(key(KeyCode::Down)).await.expect("down");
+
+    // Ouvrir la saisie du token (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Saisir "secret-token-xyz"
+    for c in "secret-token-xyz".chars() {
+        sender.send(key(KeyCode::Char(c))).await.expect("char");
+    }
+
+    // Valider la saisie (Tab)
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+
+    // 5. Sauvegarder (Ctrl+S)
+    sender.send(ctrl('s')).await.expect("ctrl+s");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Quitter (q)
+    sender.send(key(KeyCode::Char('q'))).await.expect("quit");
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("timeout")
+        .expect("join");
+
+    assert!(matches!(exit, Exit::Normal));
+
+    // 6. Vérifier le fichier sauvegardé sur disque
+    let file_content = fs::read_to_string(dir.join("simple.bru")).expect("read simple.bru");
+    assert!(
+        file_content.contains("auth: bearer"),
+        "le bloc de méthode doit déclarer auth: bearer:\n{file_content}"
+    );
+    assert!(
+        file_content.contains("auth:bearer {\n  token: secret-token-xyz\n}"),
+        "le bloc auth:bearer doit contenir le token saisi:\n{file_content}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn edit_auth_apikey_placement_via_picker_and_save() {
+    let dir = workdir("request-apikey");
+    copy_single_case("simple.bru", &dir);
+
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let handle = spawn_run(dir.clone(), sender.clone(), events);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Passer au détail et ouvrir l'édition
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Naviguer vers AuthMode (5 crans)
+    for _ in 0..5 {
+        sender.send(key(KeyCode::Down)).await.expect("down");
+    }
+
+    // Ouvrir AuthModePicker
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Modes: ["none", "inherit", "basic", "bearer", "digest", "ntlm", "apikey"] -> 6 crans vers le bas
+    for _ in 0..6 {
+        sender.send(key(KeyCode::Down)).await.expect("down");
+    }
+    // Valider le mode apikey
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Les paramètres apikey sont: key, value, placement.
+    // Descendre de 3 crans pour atteindre placement
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Down)).await.expect("down");
+
+    // Entrée ouvre ApiKeyPlacementPicker
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Options: ["header", "queryparams"] -> descendre de 1 cran pour choisir "queryparams"
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Sauvegarder (Ctrl+S)
+    sender.send(ctrl('s')).await.expect("ctrl+s");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Quitter (q)
+    sender.send(key(KeyCode::Char('q'))).await.expect("quit");
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("timeout")
+        .expect("join");
+
+    assert!(matches!(exit, Exit::Normal));
+
+    // Vérifier le fichier sauvegardé sur disque
+    let file_content = fs::read_to_string(dir.join("simple.bru")).expect("read simple.bru");
+    assert!(
+        file_content.contains("auth: apikey"),
+        "le bloc get doit déclarer auth: apikey:\n{file_content}"
+    );
+    assert!(
+        file_content.contains("placement: queryparams"),
+        "placement doit valoir queryparams:\n{file_content}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn edit_auth_mode_on_folder_and_save() {
+    let dir = workdir("folder-basic");
+    fs::copy(writer_cases().join("bruno.json"), dir.join("bruno.json")).expect("copie bruno.json");
+    fs::create_dir_all(dir.join("grp")).expect("grp dir");
+    fs::write(
+        dir.join("grp/folder.bru"),
+        "meta {\n  name: grp\n}\n\nheaders {\n  X-Custom: 1\n}\n",
+    )
+    .expect("folder.bru");
+
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let handle = spawn_run(dir.clone(), sender.clone(), events);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Passer au détail (Tab) et ouvrir l'édition (Entrée)
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // 2. Dans un dossier avec 1 header :
+    // fields: [HeaderValue(0), AddRow(Headers), AuthMode, ...]
+    // Descendre de 2 crans pour atteindre AuthMode
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Down)).await.expect("down");
+
+    // 3. Ouvrir AuthModePicker (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Modes pour dossier: ["none", "inherit", "basic", ...]
+    // Descendre de 2 crans pour choisir "basic"
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // 4. Descendre sur username (1 cran) et saisir "admin"
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+    for c in "admin".chars() {
+        sender.send(key(KeyCode::Char(c))).await.expect("char");
+    }
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+
+    // 5. Descendre sur password (1 cran) et saisir "secret"
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+    for c in "secret".chars() {
+        sender.send(key(KeyCode::Char(c))).await.expect("char");
+    }
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+
+    // 6. Sauvegarder (Ctrl+S)
+    sender.send(ctrl('s')).await.expect("ctrl+s");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Quitter
+    sender.send(key(KeyCode::Char('q'))).await.expect("quit");
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("timeout")
+        .expect("join");
+
+    assert!(matches!(exit, Exit::Normal));
+
+    // Vérifier folder.bru
+    let folder_content = fs::read_to_string(dir.join("grp/folder.bru")).expect("read folder.bru");
+    assert!(
+        folder_content.contains("auth {\n  mode: basic\n}"),
+        "folder.bru doit contenir le bloc auth {{ mode: basic }}:\n{folder_content}"
+    );
+    assert!(
+        folder_content.contains("username: admin"),
+        "folder.bru doit contenir username: admin:\n{folder_content}"
+    );
+    assert!(
+        folder_content.contains("password: secret"),
+        "folder.bru doit contenir password: secret:\n{folder_content}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

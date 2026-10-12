@@ -704,9 +704,9 @@ async fn external_text_editor_flow_with_fake_editor() {
     // Ouvrir la session d'édition (Entrée)
     sender.send(key(KeyCode::Enter)).await.expect("enter");
 
-    // Naviguer jusqu'à ScriptPreRequest (8 fois bas : les lignes d'ajout
+    // Naviguer jusqu'à ScriptPreRequest (9 fois bas : le mode d'auth et les lignes d'ajout
     // vars:pre-request, vars:post-response et assert précèdent les scripts)
-    for _ in 0..8 {
+    for _ in 0..9 {
         sender.send(key(KeyCode::Down)).await.expect("down");
     }
 
@@ -781,10 +781,10 @@ async fn external_text_editor_flow_on_folder_bru() {
     sender.send(key(KeyCode::Tab)).await.expect("tab");
     sender.send(key(KeyCode::Enter)).await.expect("enter");
 
-    // Dans grp/folder.bru : pas de méthode/url, ajout d'en-tête à 0, ajouts
-    // vars:pre-request et vars:post-response à 1 et 2, ScriptPreRequest à 3
-    // (pas de ligne d'ajout assert sur un dossier sans assertion)
-    for _ in 0..3 {
+    // Dans grp/folder.bru : pas de méthode/url, ajout d'en-tête à 0, AuthMode à 1,
+    // AuthParamValue(token) à 2, ajouts vars:pre-request et vars:post-response à 3 et 4,
+    // ScriptPreRequest à 5
+    for _ in 0..5 {
         sender.send(key(KeyCode::Down)).await.expect("down");
     }
     sender

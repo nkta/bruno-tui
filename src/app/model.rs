@@ -154,6 +154,7 @@ impl RequestTab {
             | EditableField::AddRow(EntrySection::QueryParams | EntrySection::PathParams) => {
                 Some(RequestTab::Params)
             }
+            EditableField::AuthMode | EditableField::AuthParamValue(_) => Some(RequestTab::Auth),
             EditableField::VarsPreRequestValue(_)
             | EditableField::VarsPostResponseValue(_)
             | EditableField::AddRow(
@@ -800,7 +801,10 @@ impl EditSession {
     pub fn has_unsaved(&self) -> bool {
         self.dirty
             || match &self.state {
-                EditState::FieldSelect | EditState::MethodPicker { .. } => false,
+                EditState::FieldSelect
+                | EditState::MethodPicker { .. }
+                | EditState::AuthModePicker { .. }
+                | EditState::ApiKeyPlacementPicker { .. } => false,
                 EditState::Input(input) => {
                     input.is_modified() || matches!(self.target, InputTarget::NewValue { .. })
                 }
@@ -1019,7 +1023,19 @@ pub enum EditState {
     MethodPicker {
         selected: usize,
     },
+    /// Sélecteur de mode d'authentification ouvert (`feat-edit-auth`).
+    AuthModePicker {
+        selected: usize,
+        modes: Vec<&'static str>,
+    },
+    /// Sélecteur d'emplacement d'API key (`feat-edit-auth`).
+    ApiKeyPlacementPicker {
+        selected: usize,
+    },
 }
+
+/// Options de placement possibles pour l'authentification `apikey` dans Bruno.
+pub const APIKEY_PLACEMENTS: [&str; 2] = ["header", "queryparams"];
 
 /// Ce que produit la validation de la saisie en cours.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1050,6 +1066,10 @@ pub enum EditableField {
     HeaderValue(usize),
     QueryParamValue(usize),
     PathParamValue(usize),
+    /// Mode d'authentification (`feat-edit-auth`).
+    AuthMode,
+    /// Paramètre d'authentification d'indice `index` (`feat-edit-auth`).
+    AuthParamValue(usize),
     VarsPreRequestValue(usize),
     VarsPostResponseValue(usize),
     AssertValue(usize),
@@ -1088,6 +1108,10 @@ impl EditableField {
                 fields.push(Self::PathParamValue(index));
             }
             fields.push(Self::AddRow(EntrySection::PathParams));
+        }
+        fields.push(Self::AuthMode);
+        for index in 0..view.auth_params().len() {
+            fields.push(Self::AuthParamValue(index));
         }
         for index in 0..view.extra.vars_pre_request.len() {
             fields.push(Self::VarsPreRequestValue(index));
@@ -1137,6 +1161,8 @@ impl EditableField {
             Self::SettingsValue(index) => Some((EntrySection::Settings, *index)),
             Self::Method
             | Self::Url
+            | Self::AuthMode
+            | Self::AuthParamValue(_)
             | Self::AddRow(_)
             | Self::BodyText
             | Self::ScriptPreRequest
@@ -1170,6 +1196,11 @@ impl EditableField {
             Self::PathParamValue(index) => format!(
                 "Paramètre de chemin {}",
                 view.path_params.get(*index).map_or("", |p| &p.key)
+            ),
+            Self::AuthMode => "Mode d'authentification".to_owned(),
+            Self::AuthParamValue(index) => format!(
+                "Paramètre d'auth {}",
+                view.auth_params().get(*index).map_or("", |p| &p.key)
             ),
             Self::VarsPreRequestValue(index) => format!(
                 "Variable {}",
@@ -1325,6 +1356,11 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
         EditableField::ScriptPostResponse => view.script_post_response().unwrap_or(""),
         EditableField::Tests => view.tests().unwrap_or(""),
         EditableField::Docs => view.docs().unwrap_or(""),
+        EditableField::AuthMode => view.auth.as_ref().map_or("none", |m| m.as_str()),
+        EditableField::AuthParamValue(index) => view
+            .auth_params()
+            .get(*index)
+            .map_or("", |kv| kv.value.as_str()),
         entry => entry
             .entry()
             .and_then(|(section, index)| section_entries(view, section).get(index))
@@ -1334,10 +1370,18 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
 
 /// État d'activation d'un champ (en-tête ou paramètre), lu dans l'aperçu.
 pub fn field_enabled(session: &EditSession, field: &EditableField) -> bool {
-    field
-        .entry()
-        .and_then(|(section, index)| section_entries(&session.preview, section).get(index))
-        .is_none_or(|kv| kv.enabled)
+    match field {
+        EditableField::AuthMode => true,
+        EditableField::AuthParamValue(index) => session
+            .preview
+            .auth_params()
+            .get(*index)
+            .is_none_or(|kv| kv.enabled),
+        other => other
+            .entry()
+            .and_then(|(section, index)| section_entries(&session.preview, section).get(index))
+            .is_none_or(|kv| kv.enabled),
+    }
 }
 
 #[derive(Debug)]
@@ -2204,12 +2248,15 @@ impl Model {
         {
             return Some(TextCapture::Input);
         }
-        if self
-            .editing
-            .as_ref()
-            .is_some_and(|s| matches!(s.state, EditState::MethodPicker { .. }))
-        {
-            return Some(TextCapture::MethodPicker);
+        if let Some(session) = &self.editing {
+            match session.state {
+                EditState::MethodPicker { .. } => return Some(TextCapture::MethodPicker),
+                EditState::AuthModePicker { .. } => return Some(TextCapture::AuthModePicker),
+                EditState::ApiKeyPlacementPicker { .. } => {
+                    return Some(TextCapture::ApiKeyPlacementPicker);
+                }
+                _ => {}
+            }
         }
         if self.search.as_ref().is_some_and(SearchState::is_editing) {
             return Some(TextCapture::Search);
@@ -2667,7 +2714,7 @@ mod tests {
             Assert, Headers, PathParams, QueryParams, VarsPostResponse, VarsPreRequest,
         };
 
-        // Méthode + URL + 2 en-têtes + vars/assert add-rows + corps json + blocs texte
+        // Méthode + URL + 2 en-têtes + vars/assert add-rows + auth mode + corps json + blocs texte
         let fields = EditableField::list_for(&make_view(Some(BodyKind::Json), 2));
         assert_eq!(
             fields,
@@ -2679,6 +2726,7 @@ mod tests {
                 EditableField::AddRow(Headers),
                 EditableField::AddRow(QueryParams),
                 EditableField::AddRow(PathParams),
+                EditableField::AuthMode,
                 EditableField::AddRow(VarsPreRequest),
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),
@@ -2700,6 +2748,7 @@ mod tests {
                 EditableField::AddRow(Headers),
                 EditableField::AddRow(QueryParams),
                 EditableField::AddRow(PathParams),
+                EditableField::AuthMode,
                 EditableField::AddRow(VarsPreRequest),
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),

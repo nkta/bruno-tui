@@ -45,6 +45,10 @@ pub enum TextCapture {
     /// Sélecteur de méthode ouvert (`add-method-editing`) : seules la
     /// navigation, la validation et l'annulation ont un sens.
     MethodPicker,
+    /// Sélecteur de mode d'authentification ouvert (`feat-edit-auth`).
+    AuthModePicker,
+    /// Sélecteur d'emplacement d'API key (`feat-edit-auth`).
+    ApiKeyPlacementPicker,
     /// Recherche globale par nom, méthode, chemin et URL (`Ctrl+K`).
     GlobalSearch,
     /// Saisie du chemin pour l'exportation du corps de réponse.
@@ -485,7 +489,9 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::Filter => filter_capture_message(key),
         TextCapture::TreeFilter => tree_filter_capture_message(key),
         TextCapture::SecretName | TextCapture::SecretValue => secret_capture_message(key),
-        TextCapture::MethodPicker => method_picker_capture_message(key),
+        TextCapture::MethodPicker
+        | TextCapture::AuthModePicker
+        | TextCapture::ApiKeyPlacementPicker => method_picker_capture_message(key),
         TextCapture::GlobalSearch => global_search_capture_message(key),
         TextCapture::ExportPath => export_path_capture_message(key),
     }

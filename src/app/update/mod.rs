@@ -1059,6 +1059,16 @@ fn apply(model: &mut Model, message: Message) -> Command {
                         Message::Down => move_method_picker(model, 1),
                         _ => {}
                     },
+                    Some(EditState::AuthModePicker { .. }) => match navigation {
+                        Message::Up => move_auth_mode_picker(model, -1),
+                        Message::Down => move_auth_mode_picker(model, 1),
+                        _ => {}
+                    },
+                    Some(EditState::ApiKeyPlacementPicker { .. }) => match navigation {
+                        Message::Up => move_api_key_placement_picker(model, -1),
+                        Message::Down => move_api_key_placement_picker(model, 1),
+                        _ => {}
+                    },
                     // Hors session : ←/→ changent d'onglet de requête ou dossier/collection.
                     None => match navigation {
                         Message::Left => {

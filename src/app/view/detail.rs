@@ -837,6 +837,125 @@ fn push_method_and_url(
     lines.push(url_line);
 }
 
+fn render_auth_tab(
+    lines: &mut Vec<Line<'static>>,
+    field_lines: &mut Vec<FieldLine>,
+    boxes: &mut Vec<SectionBox>,
+    mode_label: &str,
+    auth_mode: Option<&AuthMode>,
+    auth_params: &[KeyValue],
+    session: Option<&EditSession>,
+) {
+    if let Some(session) = session {
+        let auth_field = EditableField::AuthMode;
+        let mode_val = field_value(session, &auth_field);
+        let label = Span::styled(format!("{mode_label} : "), theme::LABEL);
+        field_lines.push(FieldLine {
+            field: auth_field,
+            line: lines.len(),
+            count: 1,
+            prefix_width: label.width(),
+        });
+        let mut val_span = Span::raw(mode_val.to_owned());
+        if is_field_cursor(Some(session), &auth_field) {
+            val_span = val_span.patch_style(FIELD_CURSOR_STYLE);
+        }
+        lines.push(Line::from(vec![label, val_span]));
+
+        if let EditState::AuthModePicker { selected, modes } = &session.state {
+            boxed_section(
+                lines,
+                field_lines,
+                boxes,
+                "Mode d'authentification".to_owned(),
+                |lines, _| {
+                    for (index, mode) in modes.iter().enumerate() {
+                        let mut line = Line::raw(format!("  {}", mode));
+                        if index == *selected {
+                            line = tint_line(line, FIELD_CURSOR_STYLE);
+                        }
+                        lines.push(line);
+                    }
+                },
+            );
+        }
+
+        if !auth_params.is_empty() {
+            let section_title = auth_mode
+                .map(|m| format!("Paramètres ({})", auth_label(m)))
+                .unwrap_or_else(|| "Paramètres".to_owned());
+            boxed_section(
+                lines,
+                field_lines,
+                boxes,
+                section_title,
+                |lines, field_lines| {
+                    for (i, entry) in auth_params.iter().enumerate() {
+                        let field = EditableField::AuthParamValue(i);
+                        let is_cursor = is_field_cursor(Some(session), &field);
+                        let key_label = Span::styled(format!("  {}: ", entry.key), theme::LABEL);
+                        let prefix_width = key_label.width();
+                        let line_idx = lines.len();
+                        field_lines.push(FieldLine {
+                            field,
+                            line: line_idx,
+                            count: 1,
+                            prefix_width,
+                        });
+                        let raw_val = field_value(session, &field);
+                        let display_val = if matches!(session.state, EditState::Input(_))
+                            && session.current_field() == Some(field)
+                        {
+                            raw_val.to_owned()
+                        } else {
+                            crate::collection::auth::mask_auth_value(&entry.key, raw_val)
+                        };
+                        let mut val_span = Span::raw(display_val);
+                        if is_cursor {
+                            val_span = val_span.patch_style(FIELD_CURSOR_STYLE);
+                        }
+                        lines.push(Line::from(vec![key_label, val_span]));
+
+                        if let EditState::ApiKeyPlacementPicker { selected } = &session.state
+                            && session.current_field() == Some(field)
+                        {
+                            for (p_idx, placement) in
+                                crate::app::model::APIKEY_PLACEMENTS.iter().enumerate()
+                            {
+                                let mut p_line = Line::raw(format!("    {}", placement));
+                                if p_idx == *selected {
+                                    p_line = tint_line(p_line, FIELD_CURSOR_STYLE);
+                                }
+                                lines.push(p_line);
+                            }
+                        }
+                    }
+                },
+            );
+        }
+    } else {
+        lines.push(field(
+            mode_label,
+            auth_mode.map_or("non déclarée", auth_label),
+        ));
+        if auth_mode.is_some_and(|m| !matches!(m, AuthMode::NoAuth | AuthMode::Inherit))
+            || !auth_params.is_empty()
+        {
+            boxed_section(
+                lines,
+                field_lines,
+                boxes,
+                auth_mode
+                    .map(|m| format!("Paramètres ({})", auth_label(m)))
+                    .unwrap_or_else(|| "Paramètres".to_owned()),
+                |lines, _| {
+                    super::auth::render_auth_entries(lines, auth_params);
+                },
+            );
+        }
+    }
+}
+
 /// Nom affiché d'une requête : celui du bloc `meta`, sinon le nom du
 /// fichier sans extension.
 pub fn request_name(request: &RequestNode) -> String {
@@ -1009,32 +1128,15 @@ pub fn request_text_and_fields(
             );
         }
         RequestTab::Auth => {
-            lines.push(field(
+            render_auth_tab(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
                 "Auth",
-                view.auth
-                    .as_ref()
-                    .map_or("non déclarée", auth_label)
-                    .to_owned(),
-            ));
-            if view
-                .auth
-                .as_ref()
-                .is_some_and(|m| !matches!(m, AuthMode::NoAuth | AuthMode::Inherit))
-                || !view.auth_params().is_empty()
-            {
-                boxed_section(
-                    &mut lines,
-                    &mut field_lines,
-                    &mut boxes,
-                    view.auth
-                        .as_ref()
-                        .map(|m| format!("Paramètres ({})", auth_label(m)))
-                        .unwrap_or_else(|| "Paramètres".to_owned()),
-                    |lines, _| {
-                        super::auth::render_auth_entries(lines, view.auth_params());
-                    },
-                );
-            }
+                shown.auth.as_ref(),
+                shown.auth_params(),
+                session,
+            );
         }
         RequestTab::Vars => {
             boxed_section(
@@ -1941,24 +2043,42 @@ fn meta_tab_content(
             );
         }
         RequestTab::Auth => {
-            let masked = crate::collection::auth::mask_auth_params(meta.auth_params());
-            boxed_section(
-                &mut lines,
-                &mut field_lines,
-                &mut boxes,
-                "Authentification".to_owned(),
-                |lines, _| {
-                    lines.push(field(
-                        "Mode",
-                        meta.auth().map_or("non déclarée", auth_label),
-                    ));
-                    if !masked.is_empty() {
-                        lines.push(Line::default());
-                        lines.push(section("Paramètres"));
-                        entries(lines, &masked);
-                    }
-                },
-            );
+            if session.is_some() {
+                let auth_mode = session
+                    .and_then(|s| s.preview.auth.as_ref())
+                    .or_else(|| meta.auth());
+                let auth_params = session
+                    .map(|s| s.preview.auth_params())
+                    .unwrap_or_else(|| meta.auth_params());
+                render_auth_tab(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    "Mode",
+                    auth_mode,
+                    auth_params,
+                    session,
+                );
+            } else {
+                let masked = crate::collection::auth::mask_auth_params(meta.auth_params());
+                boxed_section(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    "Authentification".to_owned(),
+                    |lines, _| {
+                        lines.push(field(
+                            "Mode",
+                            meta.auth().map_or("non déclarée", auth_label),
+                        ));
+                        if !masked.is_empty() {
+                            lines.push(Line::default());
+                            lines.push(section("Paramètres"));
+                            entries(lines, &masked);
+                        }
+                    },
+                );
+            }
         }
         RequestTab::Vars => {
             boxed_section(
