@@ -95,6 +95,17 @@ fn spawn_run(
     writer: Arc<dyn RequestWriter>,
     clipboard: Arc<dyn Clipboard>,
 ) -> tokio::task::JoinHandle<RunResult> {
+    spawn_run_with_editor(source, sender, events, writer, clipboard, None)
+}
+
+fn spawn_run_with_editor(
+    source: PathBuf,
+    sender: mpsc::Sender<AppEvent>,
+    events: mpsc::Receiver<AppEvent>,
+    writer: Arc<dyn RequestWriter>,
+    clipboard: Arc<dyn Clipboard>,
+    editor: Option<String>,
+) -> tokio::task::JoinHandle<RunResult> {
     tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
         let result = run(
@@ -111,7 +122,7 @@ fn spawn_run(
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             false,
             false,
-            None,
+            editor,
         )
         .await;
         let Ok(exit) = result;
@@ -561,6 +572,139 @@ async fn environment_editing_flow_saves_to_disk_and_secrets_never_appear() {
     assert!(
         written.contains("vars:secret [\n  apiKey,\n  jwtToken\n]"),
         "{written}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn external_text_editor_flow_with_fake_editor() {
+    let dir = workdir("fake-editor");
+    copy_single_case("simple.bru", &dir);
+
+    let log_path = dir.join("temp_seen.log");
+    let fake_editor_script = format!(
+        "sh -c 'echo \"$1\" > \"{}\"; echo \"console.log(\\\"hello\\\");\" > \"$1\"' --",
+        log_path.display()
+    );
+
+    let (clipboard, _) = SpyClipboard::new();
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let handle = spawn_run_with_editor(
+        dir.clone(),
+        sender.clone(),
+        events,
+        Arc::new(BruWriter),
+        clipboard,
+        Some(fake_editor_script),
+    );
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Aller sur le focus Détail (Tab)
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+    // Ouvrir la session d'édition (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Naviguer jusqu'à ScriptPreRequest (5 fois bas)
+    for _ in 0..5 {
+        sender.send(key(KeyCode::Down)).await.expect("down");
+    }
+
+    // Appuyer sur Entrée pour lancer le faux éditeur externe
+    sender
+        .send(key(KeyCode::Enter))
+        .await
+        .expect("enter to edit");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Sauvegarder la requête avec Ctrl+S
+    sender.send(ctrl('s')).await.expect("ctrl+s");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Quitter l'application avec 'q'
+    sender.send(key(KeyCode::Char('q'))).await.expect("quit");
+
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("fermeture normale")
+        .expect("join handle");
+    assert!(matches!(exit, Exit::Normal));
+
+    // 1. Vérifier que le faux éditeur a bien été appelé et que le fichier temporaire est supprimé
+    let temp_file_path_str = fs::read_to_string(&log_path).expect("lecture temp_seen.log");
+    let temp_file_path = PathBuf::from(temp_file_path_str.trim());
+    assert!(
+        !temp_file_path.exists(),
+        "Le fichier temporaire {} aurait dû être supprimé !",
+        temp_file_path.display()
+    );
+
+    // 2. Vérifier que simple.bru sur le disque contient bien le script réindenté
+    let saved_content = fs::read_to_string(dir.join("simple.bru")).expect("lecture simple.bru");
+    assert!(
+        saved_content.contains("script:pre-request {\n  console.log(\"hello\");\n}"),
+        "Contenu attendu non trouvé dans simple.bru:\n{saved_content}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn external_text_editor_flow_on_folder_bru() {
+    let dir = workdir("fake-editor-folder");
+    let source_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections/parser-cases");
+    fs::copy(source_dir.join("bruno.json"), dir.join("bruno.json")).expect("bruno.json");
+    fs::create_dir_all(dir.join("grp")).expect("grp dir");
+    fs::copy(
+        source_dir.join("grp/folder.bru"),
+        dir.join("grp/folder.bru"),
+    )
+    .expect("folder.bru");
+
+    let fake_editor_script = "sh -c 'echo \"console.log(\\\"folder-test\\\");\" > \"$1\"' --";
+
+    let (clipboard, _) = SpyClipboard::new();
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let handle = spawn_run_with_editor(
+        dir.clone(),
+        sender.clone(),
+        events,
+        Arc::new(BruWriter),
+        clipboard,
+        Some(fake_editor_script.to_string()),
+    );
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Aller sur le dossier grp dans le détail
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // Dans grp/folder.bru : pas de méthode/url, en-têtes à 0, ScriptPreRequest à 1
+    sender.send(key(KeyCode::Down)).await.expect("down");
+    sender
+        .send(key(KeyCode::Enter))
+        .await
+        .expect("enter to edit");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    sender.send(ctrl('s')).await.expect("ctrl+s");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    sender.send(key(KeyCode::Char('q'))).await.expect("quit");
+
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("fermeture")
+        .expect("join");
+    assert!(matches!(exit, Exit::Normal));
+
+    let saved_content = fs::read_to_string(dir.join("grp/folder.bru")).expect("lecture folder.bru");
+    assert!(
+        saved_content.contains("script:pre-request {\n  console.log(\"folder-test\");\n}"),
+        "Contenu attendu non trouvé dans folder.bru:\n{saved_content}"
     );
 
     let _ = fs::remove_dir_all(&dir);
