@@ -59,9 +59,7 @@ pub(crate) fn mouse_accepted(model: &Model) -> bool {
         && model.confirm.is_none()
         && matches!(
             model.text_capture(),
-            None | Some(TextCapture::Input)
-                | Some(TextCapture::MethodPicker)
-                | Some(TextCapture::BodyModePicker)
+            None | Some(TextCapture::Input) | Some(TextCapture::Picker)
         )
         && matches!(
             model.focus,
@@ -84,14 +82,13 @@ fn input_field_lines(model: &Model) -> Option<std::ops::Range<usize>> {
 }
 
 fn mouse_press(model: &mut Model, input: MouseInput) {
-    // Le sélecteur de méthode ou de mode de corps se pilote au clavier seulement :
-    // un clic ailleurs le referme sans rien changer, comme `Échap`.
-    if model.editing.as_ref().is_some_and(|s| {
-        matches!(
-            s.state,
-            EditState::MethodPicker { .. } | EditState::BodyModePicker { .. }
-        )
-    }) {
+    // Les sélecteurs se pilotent au clavier seulement : un clic ailleurs
+    // les referme sans rien changer, comme `Échap`.
+    if model
+        .editing
+        .as_ref()
+        .is_some_and(|s| matches!(s.state, EditState::Picker { .. }))
+    {
         cancel_input(model);
         return;
     }
@@ -556,8 +553,8 @@ mod tests {
         match &model.editing.as_ref()?.state {
             EditState::Input(input) => Some(input.text().to_owned()),
             EditState::FieldSelect
-            | EditState::MethodPicker { .. }
-            | EditState::BodyModePicker { .. } => None,
+            | EditState::Picker { .. }
+            | EditState::PlaintextSecretPrompt { .. } => None,
         }
     }
 
@@ -1034,7 +1031,7 @@ mod tests {
         click(&mut model, method_point);
         assert!(matches!(
             model.editing.as_ref().expect("session").state,
-            EditState::MethodPicker { .. }
+            EditState::Picker { .. }
         ));
 
         // Premier clic (même sur la ligne Méthode) : referme le sélecteur,

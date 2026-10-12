@@ -1,0 +1,17 @@
+{
+  "url": "https://{{host}}/secure",
+  "headers": [],
+  "params": [],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {},
+  "auth_mode": "bearer",
+  "auth_params": [
+    {
+      "name": "token",
+      "value": "updated_token",
+      "enabled": true
+    }
+  ]
+}

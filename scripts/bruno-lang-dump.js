@@ -57,4 +57,31 @@ const dump = {
   assertions: (json.assertions || []).map(entry),
   settings: json.settings || {},
 };
+
+let authMode = undefined;
+if (json.http && json.http.auth) {
+  authMode = json.http.auth;
+} else if (json.auth && json.auth.mode) {
+  authMode = json.auth.mode;
+}
+
+const authParams = [];
+if (json.auth) {
+  for (const [mode, params] of Object.entries(json.auth)) {
+    if (mode === 'mode') continue;
+    if (params && typeof params === 'object') {
+      for (const [key, val] of Object.entries(params)) {
+        authParams.push({ name: key, value: String(val ?? ''), enabled: true });
+      }
+    }
+  }
+}
+
+if (authMode !== undefined && authMode !== 'none') {
+  dump.auth_mode = authMode;
+}
+if (authParams.length > 0) {
+  dump.auth_params = authParams;
+}
+
 process.stdout.write(JSON.stringify(dump, null, 2) + '\n');

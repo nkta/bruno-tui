@@ -192,6 +192,13 @@ pub enum FieldEdit {
         index: usize,
         key: String,
     },
+    /// Mode d'authentification (`none`, `inherit`, `basic`, `bearer`, etc.).
+    AuthMode(String),
+    /// Valeur d'un paramètre d'auth du bloc `auth:<mode>` actif.
+    AuthParamValue {
+        index: usize,
+        value: String,
+    },
 }
 
 /// Remplacement résolu : une tranche du source et son texte de

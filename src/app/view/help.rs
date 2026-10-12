@@ -170,7 +170,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Entrée",
-                effect: "modifier la valeur (ou sélecteur de méthode/mode de corps / éditeur externe pour scripts, tests, docs)",
+                effect: "modifier la valeur (ou sélecteur de méthode/mode de corps/mode auth/placement apikey, éditeur externe pour scripts, tests, docs)",
             },
             HelpEntry {
                 key: "Espace",
@@ -189,8 +189,12 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "renommer la clé de l'en-tête, de la variable, du paramètre ou du champ de formulaire (hors @file)",
             },
             HelpEntry {
+                key: "Ctrl+R",
+                effect: "masquer / révéler les valeurs sensibles d'authentification",
+            },
+            HelpEntry {
                 key: "Ctrl+S",
-                effect: "enregistrer les modifications (collection .bru uniquement)",
+                effect: "enregistrer les modifications (confirmation si suppression d'un bloc auth non vide)",
             },
             HelpEntry {
                 key: "Échap",

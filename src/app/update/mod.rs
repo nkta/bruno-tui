@@ -186,6 +186,9 @@ fn apply(model: &mut Model, message: Message) -> Command {
                     super::model::PendingConfirm::OverwriteExport { path, bytes } => {
                         Command::ExportResponseBody { path, bytes }
                     }
+                    super::model::PendingConfirm::DeleteAuthBlock { .. } => {
+                        edit::force_save_edit(model)
+                    }
                 }
             }
             Message::ConfirmNo | Message::NextMatch | Message::FocusTree => {
@@ -841,6 +844,22 @@ fn apply(model: &mut Model, message: Message) -> Command {
             cancel_input(model);
             Command::None
         }
+        Message::ReplacePlaintextSecret => {
+            edit::replace_plaintext_secret(model);
+            Command::None
+        }
+        Message::KeepPlaintextSecret => {
+            edit::keep_plaintext_secret(model);
+            Command::None
+        }
+        Message::CancelPlaintextSecretPrompt => {
+            edit::cancel_plaintext_secret_prompt(model);
+            Command::None
+        }
+        Message::ToggleRevealSecret => {
+            edit::toggle_reveal_secret(model);
+            Command::None
+        }
         Message::TextEditorClosed { field, result } => {
             match result {
                 Ok(new_text) => {
@@ -1054,14 +1073,9 @@ fn apply(model: &mut Model, message: Message) -> Command {
                         Message::Down => move_field_cursor(model, 1),
                         other => scroll_detail(model, other),
                     },
-                    Some(EditState::MethodPicker { .. }) => match navigation {
-                        Message::Up => move_method_picker(model, -1),
-                        Message::Down => move_method_picker(model, 1),
-                        _ => {}
-                    },
-                    Some(EditState::BodyModePicker { .. }) => match navigation {
-                        Message::Up => move_body_mode_picker(model, -1),
-                        Message::Down => move_body_mode_picker(model, 1),
+                    Some(EditState::Picker { .. }) => match navigation {
+                        Message::Up => move_picker(model, -1),
+                        Message::Down => move_picker(model, 1),
                         _ => {}
                     },
                     // Hors session : ←/→ changent d'onglet de requête ou dossier/collection.
@@ -1269,6 +1283,7 @@ mod tests {
             .expect("vue"),
             dirty: true,
             hscroll: 0,
+            unmasked: false,
         });
 
         // 1. PendingConfirm::DiscardEdit
@@ -1324,6 +1339,7 @@ mod tests {
             .expect("vue"),
             dirty: true,
             hscroll: 0,
+            unmasked: false,
         });
         model.confirm = Some(PendingConfirm::QuitWithUnsavedEdit);
 

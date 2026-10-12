@@ -1,0 +1,19 @@
+meta {
+  name: auth-mode-switch
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://{{host}}/api
+  auth: basic
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:basic {
+  username: alice
+  password: secretpassword
+}

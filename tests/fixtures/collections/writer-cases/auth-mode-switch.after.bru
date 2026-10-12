@@ -1,0 +1,18 @@
+meta {
+  name: auth-mode-switch
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://{{host}}/api
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+}
+
+auth:bearer {
+  token: 
+}

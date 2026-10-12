@@ -26,7 +26,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{
-    CampaignView, CollectionState, EditState, Focus, Model, PendingConfirm, RunFailure,
+    CampaignView, CollectionState, EditState, Focus, Model, PendingConfirm, PickerKind, RunFailure,
     StatusMessage, section_entries,
 };
 use super::update::{active_tree_filter_pattern, is_tree_filtered};
@@ -403,6 +403,15 @@ pub fn view(model: &Model, frame: &mut Frame) {
         frame.render_widget(Clear, popup_area);
         frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
         render_global_search_popup(model, popup, frame, popup_area);
+    }
+
+    if let Some(session) = &model.editing
+        && let EditState::PlaintextSecretPrompt { var_name, .. } = &session.state
+    {
+        let popup_area = plaintext_secret_popup_area(frame.area());
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
+        render_plaintext_secret_popup(var_name, frame, popup_area);
     }
 
     frame.render_widget(
@@ -820,6 +829,9 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::ExportError(reason) => {
             format!("Échec de l'exportation : {reason}")
         }
+        StatusMessage::SecretVariableHint(var_name) => {
+            format!("Définis {var_name} dans .env ou avec --secret {var_name}")
+        }
     }
 }
 
@@ -880,14 +892,25 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
             };
             format!("Saisie · {label}{unsaved} — {keys}")
         }
-        EditState::MethodPicker { .. } => {
-            format!("Méthode · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler")
+        EditState::Picker { kind, .. } => {
+            let title = picker_title(*kind);
+            format!("{title} · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler")
         }
-        EditState::BodyModePicker { .. } => {
+        EditState::PlaintextSecretPrompt { var_name, .. } => {
             format!(
-                "Mode du corps · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler"
+                "Secret en clair — Entrée remplacer par {{{{{var_name}}}}}  g garder  Échap revenir"
             )
         }
+    }
+}
+
+/// Titre de la barre d'aide pendant un sélecteur.
+fn picker_title(kind: PickerKind) -> &'static str {
+    match kind {
+        PickerKind::Method => "Méthode",
+        PickerKind::BodyMode => "Mode du corps",
+        PickerKind::AuthMode | PickerKind::CollectionAuthMode => "Mode d'auth",
+        PickerKind::ApiKeyPlacement => "Emplacement",
     }
 }
 
@@ -935,6 +958,9 @@ fn status_line(model: &Model) -> String {
             }
             PendingConfirm::OverwriteExport { path, .. } => {
                 format!("Écraser {} existant ? (y/n)", path.display())
+            }
+            PendingConfirm::DeleteAuthBlock { former_mode } => {
+                format!("L'ancien bloc auth:{former_mode} sera supprimé. Continuer ? (y/n)")
             }
         };
     }
@@ -1291,6 +1317,48 @@ fn render_line_numbers(
         }
         row += height;
     }
+}
+
+/// Calcule la zone centrée du popup d'avertissement de secret en clair.
+pub fn plaintext_secret_popup_area(screen: Rect) -> Rect {
+    let width = 68.min(screen.width.saturating_sub(4)).max(40);
+    let height = 6.min(screen.height.saturating_sub(2)).max(5);
+    let x = screen.x + screen.width.saturating_sub(width) / 2;
+    let y = screen.y + screen.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// Rendu du popup d'avertissement de secret en clair (§ 5 spec).
+pub fn render_plaintext_secret_popup(var_name: &str, frame: &mut Frame, area: Rect) {
+    let block = Block::bordered()
+        .title(" Secret en clair ")
+        .border_style(Style::new().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let lines = vec![
+        Line::raw("Secret en clair dans le fichier .bru (souvent partagé via git)."),
+        Line::from(vec![
+            Span::styled("  Entrée  ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw(format!(
+                "remplacer par {{{{{var_name}}}}}",
+                var_name = var_name
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("  g       ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw("garder en clair"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Échap   ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw("revenir à la saisie"),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 #[cfg(test)]
@@ -1772,6 +1840,15 @@ mod tests {
         model.confirm = Some(PendingConfirm::QuitWithUnsavedEdit);
         let line = status_line(&model);
         assert!(line.contains("Quitter sans sauvegarder"), "{line}");
+
+        model.confirm = Some(PendingConfirm::DeleteAuthBlock {
+            former_mode: "basic".into(),
+        });
+        let line = status_line(&model);
+        assert_eq!(
+            line,
+            "L'ancien bloc auth:basic sera supprimé. Continuer ? (y/n)"
+        );
     }
 
     #[test]

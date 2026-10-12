@@ -1,0 +1,23 @@
+{
+  "url": "https://{{host}}/api",
+  "headers": [
+    {
+      "name": "Accept",
+      "value": "application/json",
+      "enabled": true
+    }
+  ],
+  "params": [],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {},
+  "auth_mode": "bearer",
+  "auth_params": [
+    {
+      "name": "token",
+      "value": "",
+      "enabled": true
+    }
+  ]
+}

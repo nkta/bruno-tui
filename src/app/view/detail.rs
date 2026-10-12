@@ -17,8 +17,8 @@ use super::theme;
 use super::tree::file_name;
 use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
-    EditSession, EditState, EditableField, FOLDER_TABS, InputTarget, Model, RequestOutcome,
-    RequestTab, ResponseTab, add_row_label, field_enabled, field_value,
+    EditSession, EditState, EditableField, FOLDER_TABS, InputTarget, Model, PickerKind,
+    RequestOutcome, RequestTab, ResponseTab, add_row_label, field_enabled, field_value,
 };
 use crate::app::update::{response_selection_range, selection_range};
 use crate::collection::{
@@ -851,22 +851,17 @@ fn push_method_and_url(
     lines.push(method_line);
 
     if let Some(session) = session
-        && let EditState::MethodPicker { selected } = &session.state
+        && let EditState::Picker {
+            kind: kind @ PickerKind::Method,
+            selected,
+        } = session.state
     {
         boxed_section(
             lines,
             field_lines,
             boxes,
             "Méthode".to_owned(),
-            |lines, _| {
-                for (index, name) in crate::collection::ast::METHODS.iter().enumerate() {
-                    let mut line = Line::raw(format!("  {}", name.to_ascii_uppercase()));
-                    if index == *selected {
-                        line = tint_line(line, FIELD_CURSOR_STYLE);
-                    }
-                    lines.push(line);
-                }
-            },
+            |lines, _| picker_lines(lines, kind, selected, "  "),
         );
     }
 
@@ -887,6 +882,139 @@ fn push_method_and_url(
     let mut url_line = Line::from(url_label);
     url_line.spans.extend(url_value.spans);
     lines.push(url_line);
+}
+
+/// Choix d'un sélecteur, la présélection surlignée. Les méthodes
+/// s'affichent en capitales, comme dans l'en-tête du détail.
+fn picker_lines(lines: &mut Vec<Line<'static>>, kind: PickerKind, selected: usize, indent: &str) {
+    for (index, option) in kind.options().iter().enumerate() {
+        let label = if kind == PickerKind::Method {
+            option.to_ascii_uppercase()
+        } else {
+            (*option).to_owned()
+        };
+        let mut line = Line::raw(format!("{indent}{label}"));
+        if index == selected {
+            line = tint_line(line, FIELD_CURSOR_STYLE);
+        }
+        lines.push(line);
+    }
+}
+
+fn render_auth_tab(
+    lines: &mut Vec<Line<'static>>,
+    field_lines: &mut Vec<FieldLine>,
+    boxes: &mut Vec<SectionBox>,
+    mode_label: &str,
+    auth_mode: Option<&AuthMode>,
+    auth_params: &[KeyValue],
+    session: Option<&EditSession>,
+) {
+    if let Some(session) = session {
+        let auth_field = EditableField::AuthMode;
+        let mode_val = field_value(session, &auth_field);
+        let label = Span::styled(format!("{mode_label} : "), theme::LABEL);
+        field_lines.push(FieldLine {
+            field: auth_field,
+            line: lines.len(),
+            count: 1,
+            prefix_width: label.width(),
+        });
+        let mut val_span = Span::raw(mode_val.to_owned());
+        if is_field_cursor(Some(session), &auth_field) {
+            val_span = val_span.patch_style(FIELD_CURSOR_STYLE);
+        }
+        lines.push(Line::from(vec![label, val_span]));
+
+        if let EditState::Picker {
+            kind: kind @ (PickerKind::AuthMode | PickerKind::CollectionAuthMode),
+            selected,
+        } = session.state
+        {
+            boxed_section(
+                lines,
+                field_lines,
+                boxes,
+                "Mode d'authentification".to_owned(),
+                |lines, _| picker_lines(lines, kind, selected, "  "),
+            );
+        }
+
+        if !auth_params.is_empty() {
+            let section_title = auth_mode
+                .map(|m| format!("Paramètres ({})", auth_label(m)))
+                .unwrap_or_else(|| "Paramètres".to_owned());
+            boxed_section(
+                lines,
+                field_lines,
+                boxes,
+                section_title,
+                |lines, field_lines| {
+                    for (i, entry) in auth_params.iter().enumerate() {
+                        let field = EditableField::AuthParamValue(i);
+                        let is_cursor = is_field_cursor(Some(session), &field);
+                        let key_label = Span::styled(format!("  {}: ", entry.key), theme::LABEL);
+                        let prefix_width = key_label.width();
+                        let line_idx = lines.len();
+                        field_lines.push(FieldLine {
+                            field,
+                            line: line_idx,
+                            count: 1,
+                            prefix_width,
+                        });
+                        let raw_val = field_value(session, &field);
+                        let is_sensitive =
+                            crate::collection::auth::is_sensitive_auth_key(&entry.key);
+                        let display_val = if matches!(session.state, EditState::Input(_))
+                            && session.current_field() == Some(field)
+                        {
+                            if is_sensitive && !session.unmasked {
+                                "•".repeat(raw_val.chars().count())
+                            } else {
+                                raw_val.to_owned()
+                            }
+                        } else {
+                            crate::collection::auth::mask_auth_value(&entry.key, raw_val)
+                        };
+                        let mut val_span = Span::raw(display_val);
+                        if is_cursor {
+                            val_span = val_span.patch_style(FIELD_CURSOR_STYLE);
+                        }
+                        lines.push(Line::from(vec![key_label, val_span]));
+
+                        if let EditState::Picker {
+                            kind: kind @ PickerKind::ApiKeyPlacement,
+                            selected,
+                        } = session.state
+                            && session.current_field() == Some(field)
+                        {
+                            picker_lines(lines, kind, selected, "    ");
+                        }
+                    }
+                },
+            );
+        }
+    } else {
+        lines.push(field(
+            mode_label,
+            auth_mode.map_or("non déclarée", auth_label),
+        ));
+        if auth_mode.is_some_and(|m| !matches!(m, AuthMode::NoAuth | AuthMode::Inherit))
+            || !auth_params.is_empty()
+        {
+            boxed_section(
+                lines,
+                field_lines,
+                boxes,
+                auth_mode
+                    .map(|m| format!("Paramètres ({})", auth_label(m)))
+                    .unwrap_or_else(|| "Paramètres".to_owned()),
+                |lines, _| {
+                    super::auth::render_auth_entries(lines, auth_params);
+                },
+            );
+        }
+    }
 }
 
 /// Nom affiché d'une requête : celui du bloc `meta`, sinon le nom du
@@ -1016,22 +1144,17 @@ pub fn request_text_and_fields(
                     lines.push(body_mode_line);
 
                     if let Some(session) = session
-                        && let EditState::BodyModePicker { selected } = &session.state
+                        && let EditState::Picker {
+                            kind: kind @ PickerKind::BodyMode,
+                            selected,
+                        } = session.state
                     {
                         boxed_section(
                             &mut lines,
                             &mut field_lines,
                             &mut boxes,
                             "Mode du corps".to_owned(),
-                            |lines, _| {
-                                for (index, mode) in crate::writer::BODY_MODES.iter().enumerate() {
-                                    let mut line = Line::raw(format!("  {mode}"));
-                                    if index == *selected {
-                                        line = tint_line(line, FIELD_CURSOR_STYLE);
-                                    }
-                                    lines.push(line);
-                                }
-                            },
+                            |lines, _| picker_lines(lines, kind, selected, "  "),
                         );
                     }
                 }
@@ -1254,32 +1377,15 @@ pub fn request_text_and_fields(
             );
         }
         RequestTab::Auth => {
-            lines.push(field(
+            render_auth_tab(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
                 "Auth",
-                view.auth
-                    .as_ref()
-                    .map_or("non déclarée", auth_label)
-                    .to_owned(),
-            ));
-            if view
-                .auth
-                .as_ref()
-                .is_some_and(|m| !matches!(m, AuthMode::NoAuth | AuthMode::Inherit))
-                || !view.auth_params().is_empty()
-            {
-                boxed_section(
-                    &mut lines,
-                    &mut field_lines,
-                    &mut boxes,
-                    view.auth
-                        .as_ref()
-                        .map(|m| format!("Paramètres ({})", auth_label(m)))
-                        .unwrap_or_else(|| "Paramètres".to_owned()),
-                    |lines, _| {
-                        super::auth::render_auth_entries(lines, view.auth_params());
-                    },
-                );
-            }
+                shown.auth.as_ref(),
+                shown.auth_params(),
+                session,
+            );
         }
         RequestTab::Vars => {
             boxed_section(
@@ -1653,10 +1759,20 @@ pub fn cursor_position_for_model(model: &Model) -> Option<(usize, usize)> {
     let (line, _) = input.cursor_line_col();
     let before = input.text_before_cursor_on_line();
     let (visible, _) = skip_columns(&before, usize::from(session.hscroll));
-    Some((
-        location.line + line,
-        location.prefix_width + Line::raw(visible).width(),
-    ))
+    let is_sensitive = match field {
+        EditableField::AuthParamValue(idx) => session
+            .preview
+            .auth_params()
+            .get(idx)
+            .is_some_and(|kv| crate::collection::auth::is_sensitive_auth_key(&kv.key)),
+        _ => false,
+    };
+    let text_width = if is_sensitive && !session.unmasked {
+        visible.chars().count()
+    } else {
+        Line::raw(visible).width()
+    };
+    Some((location.line + line, location.prefix_width + text_width))
 }
 
 /// Position du curseur de texte pendant une saisie : ligne logique dans le
@@ -1676,10 +1792,20 @@ pub fn cursor_position_in_detail(
     let (line, _) = input.cursor_line_col();
     let before = input.text_before_cursor_on_line();
     let (visible, _) = skip_columns(&before, usize::from(session.hscroll));
-    Some((
-        location.line + line,
-        location.prefix_width + Line::raw(visible).width(),
-    ))
+    let is_sensitive = match field {
+        EditableField::AuthParamValue(idx) => session
+            .preview
+            .auth_params()
+            .get(idx)
+            .is_some_and(|kv| crate::collection::auth::is_sensitive_auth_key(&kv.key)),
+        _ => false,
+    };
+    let text_width = if is_sensitive && !session.unmasked {
+        visible.chars().count()
+    } else {
+        Line::raw(visible).width()
+    };
+    Some((location.line + line, location.prefix_width + text_width))
 }
 
 /// Représentation d'une valeur JSON pour l'affichage : sans guillemets pour
@@ -2186,24 +2312,42 @@ fn meta_tab_content(
             );
         }
         RequestTab::Auth => {
-            let masked = crate::collection::auth::mask_auth_params(meta.auth_params());
-            boxed_section(
-                &mut lines,
-                &mut field_lines,
-                &mut boxes,
-                "Authentification".to_owned(),
-                |lines, _| {
-                    lines.push(field(
-                        "Mode",
-                        meta.auth().map_or("non déclarée", auth_label),
-                    ));
-                    if !masked.is_empty() {
-                        lines.push(Line::default());
-                        lines.push(section("Paramètres"));
-                        entries(lines, &masked);
-                    }
-                },
-            );
+            if session.is_some() {
+                let auth_mode = session
+                    .and_then(|s| s.preview.auth.as_ref())
+                    .or_else(|| meta.auth());
+                let auth_params = session
+                    .map(|s| s.preview.auth_params())
+                    .unwrap_or_else(|| meta.auth_params());
+                render_auth_tab(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    "Mode",
+                    auth_mode,
+                    auth_params,
+                    session,
+                );
+            } else {
+                let masked = crate::collection::auth::mask_auth_params(meta.auth_params());
+                boxed_section(
+                    &mut lines,
+                    &mut field_lines,
+                    &mut boxes,
+                    "Authentification".to_owned(),
+                    |lines, _| {
+                        lines.push(field(
+                            "Mode",
+                            meta.auth().map_or("non déclarée", auth_label),
+                        ));
+                        if !masked.is_empty() {
+                            lines.push(Line::default());
+                            lines.push(section("Paramètres"));
+                            entries(lines, &masked);
+                        }
+                    },
+                );
+            }
         }
         RequestTab::Vars => {
             boxed_section(
@@ -4230,7 +4374,7 @@ auth:basic {
         assert!(text.contains("Mode du corps : none"), "{text}");
         assert!(text.contains("aucun"), "{text}");
 
-        // Démarrer l'édition et ouvrir le BodyModePicker
+        // Démarrer l'édition et ouvrir le sélecteur de mode de corps
         update(&mut model, Message::NextFocus); // Focus Detail
         update(&mut model, Message::Enter); // Start Edit
         let body_mode_idx = model

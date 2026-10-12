@@ -183,13 +183,24 @@ documentation) :
 | Touche | Effet |
 |---|---|
 | `↑`/`k`, `↓`/`j` | champ précédent, suivant |
-| `Entrée` | modifier la valeur ; sur la méthode ou le mode du corps, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur un bloc de texte (script, test, doc), ouvre l'éditeur externe ; sur une ligne « + Ajouter », ajoute une entrée |
+| `Entrée` | modifier la valeur ; sur la méthode, le mode du corps, le mode d'authentification ou le placement d'API Key, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur un bloc de texte (script, test, doc), ouvre l'éditeur externe ; sur une ligne « + Ajouter », ajoute une entrée |
 | `Espace` | activer ou désactiver l'en-tête, le paramètre, la variable, l'assertion ou le champ de formulaire |
 | `a` | ajouter une entrée dans la section du champ (clé, puis valeur) |
 | `d` | supprimer l'en-tête, le paramètre, la variable, l'assertion ou le champ de formulaire, sans confirmation |
 | `c` | renommer la clé de l'en-tête, du paramètre, de la variable, de l'assertion ou du champ de formulaire (hors `@file(...)`) |
-| `Ctrl+S` | enregistrer sur le disque |
+| `Ctrl+R` | masquer / révéler les valeurs sensibles d'authentification |
+| `Ctrl+S` | enregistrer sur le disque (demande confirmation si un ancien bloc d'authentification non vide est supprimé) |
 | `Échap` | fermer la session (confirmation si modifiée) |
+
+### Édition de l'authentification et protection des secrets
+
+- **Modes supportés** : `none`, `inherit`, `basic`, `bearer`, `digest`, `ntlm`, `awsv4`, `wsse`, `oauth2`, `apikey`. Pour `apikey`, le placement (`header` ou `queryparams`) est sélectionnable via un sélecteur dédié.
+- **Masquage et `Ctrl+R`** : les clés sensibles (tokens, mots de passe, clés secrètes) sont masquées par des puces `•` lors de la saisie (les références `{{variable}}` restent visibles). `Ctrl+R` bascule l'affichage en clair ou masqué.
+- **Détection des secrets en clair** : valider une valeur littérale sur une clé sensible sans variable `{{...}}` ouvre un popup modal d'avertissement :
+  - `[Entrée]` **Remplacer** par la variable suggérée en camelCase (ex. `{{bearerToken}}`, `{{basicPassword}}`) : le secret en clair est immédiatement oublié (jamais écrit sur disque, jamais loggué), et la barre de statut rappelle la configuration `.env` ou `--secret`.
+  - `[g]` **Garder** la valeur en clair.
+  - `[Échap]` **Revenir** au mode de saisie.
+- **Confirmation au Ctrl+S** : changer de mode d'authentification retire l'ancien bloc `auth:<ancien>`. Si celui-ci contenait des valeurs non vides, `Ctrl+S` demande confirmation (`y`/`n`) avant d'écrire sur le disque.
 
 ### Édition externe des blocs de texte
 

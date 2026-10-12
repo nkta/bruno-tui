@@ -126,8 +126,8 @@ pub(crate) fn input_of(model: &Model) -> &TextInput {
     match &model.editing.as_ref().expect("session").state {
         EditState::Input(input) => input,
         EditState::FieldSelect
-        | EditState::MethodPicker { .. }
-        | EditState::BodyModePicker { .. } => panic!("saisie attendue"),
+        | EditState::Picker { .. }
+        | EditState::PlaintextSecretPrompt { .. } => panic!("saisie attendue"),
     }
 }
 

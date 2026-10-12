@@ -19,7 +19,7 @@ use bruno_tui::writer::RequestWriter;
 use serde_json::Value;
 
 /// Même liste que `CASES_NAMES` dans `scripts/gen-writer-bruno-fixtures.sh`.
-const ENTRY_CASES: [&str; 18] = [
+const ENTRY_CASES: [&str; 23] = [
     "add-header",
     "add-block",
     "add-path-between",
@@ -34,6 +34,11 @@ const ENTRY_CASES: [&str; 18] = [
     "settings-ops",
     "folder-ops",
     "collection-ops",
+    "auth-mode-switch",
+    "auth-param",
+    "auth-apikey",
+    "folder-auth",
+    "collection-auth",
     "body-mode-ops",
     "body-form-urlencoded-ops",
     "body-multipart-form-ops",
@@ -183,6 +188,20 @@ fn bru_parser_agrees_with_recorded_bruno_reading() {
                 }
             }
         }
+        if let Some(auth_mode) = bruno.get("auth_mode").and_then(Value::as_str) {
+            assert_eq!(
+                view.auth.as_ref().map(|m| m.as_str()),
+                Some(auth_mode),
+                "{name} auth_mode"
+            );
+        }
+        if let Some(auth_params) = bruno.get("auth_params").and_then(Value::as_array) {
+            assert_eq!(
+                view.extra.auth_params,
+                key_values(auth_params.iter()),
+                "{name} auth_params"
+            );
+        }
     }
 }
 
@@ -278,6 +297,53 @@ process.stdout.write(JSON.stringify({
     assert_eq!(
         parsed["docs"].as_str().unwrap().trim(),
         "# Doc\nDes accolades { } dans la doc"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "nécessite node et @usebruno/cli (bru) installés"]
+fn auth_mode_switch_matches_json_to_bru() {
+    let script_eval = r#"
+const fs = require('fs');
+const { execSync } = require('child_process');
+const path = require('path');
+function langDir() {
+  if (process.env.BRUNO_LANG_DIR) return process.env.BRUNO_LANG_DIR;
+  const globalRoot = execSync('npm root -g', { encoding: 'utf8' }).trim();
+  return path.join(globalRoot, '@usebruno', 'cli', 'node_modules', '@usebruno', 'lang');
+}
+const { bruToJsonV2, jsonToBruV2 } = require(langDir());
+const content = fs.readFileSync(process.argv[2], 'utf8');
+const json = bruToJsonV2(content);
+const regenerated = jsonToBruV2(json);
+process.stdout.write(regenerated);
+"#;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp-bruno-lang-auth-test");
+    fs::create_dir_all(&dir).expect("dossier créé");
+    let script_js = dir.join("json_to_bru.js");
+    fs::write(&script_js, script_eval).expect("script écrit");
+
+    let produced_path = cases().join("auth-mode-switch.after.bru");
+    let produced_content = fs::read_to_string(&produced_path).expect("fixture after");
+
+    let output = Command::new("node")
+        .arg(&script_js)
+        .arg(&produced_path)
+        .output()
+        .expect("node exécuté");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bruno_generated = String::from_utf8(output.stdout).expect("utf8");
+
+    // Le bloc auth:bearer produit par bru-writer a les mêmes clés, dans le même ordre, à la même place
+    assert_eq!(
+        produced_content, bruno_generated,
+        "Le fichier produit par bru-writer pour auth-mode-switch doit correspondre à celui écrit par jsonToBru"
     );
 
     let _ = fs::remove_dir_all(&dir);

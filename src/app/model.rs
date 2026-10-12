@@ -154,6 +154,7 @@ impl RequestTab {
             | EditableField::AddRow(EntrySection::QueryParams | EntrySection::PathParams) => {
                 Some(RequestTab::Params)
             }
+            EditableField::AuthMode | EditableField::AuthParamValue(_) => Some(RequestTab::Auth),
             EditableField::VarsPreRequestValue(_)
             | EditableField::VarsPostResponseValue(_)
             | EditableField::AddRow(
@@ -781,6 +782,8 @@ pub struct EditSession {
     /// Décalage horizontal, en colonnes d'affichage, de la valeur du champ
     /// en saisie (`improve-direct-editing`, D7).
     pub hscroll: u16,
+    /// Révélation temporaire des secrets masqués (Ctrl+R pendant la saisie).
+    pub unmasked: bool,
 }
 
 impl EditSession {
@@ -797,6 +800,7 @@ impl EditSession {
             preview: view,
             dirty: false,
             hscroll: 0,
+            unmasked: false,
         }
     }
 
@@ -807,9 +811,8 @@ impl EditSession {
     pub fn has_unsaved(&self) -> bool {
         self.dirty
             || match &self.state {
-                EditState::FieldSelect
-                | EditState::MethodPicker { .. }
-                | EditState::BodyModePicker { .. } => false,
+                EditState::FieldSelect | EditState::Picker { .. } => false,
+                EditState::PlaintextSecretPrompt { .. } => true,
                 EditState::Input(input) => {
                     input.is_modified() || matches!(self.target, InputTarget::NewValue { .. })
                 }
@@ -1017,23 +1020,69 @@ impl EnvironmentEditSession {
     }
 }
 
-/// État d'une session : choix du champ, saisie de sa valeur, ou sélecteur
-/// de méthode ouvert (`add-method-editing`).
+/// État d'une session : choix du champ, saisie de sa valeur, sélecteur
+/// ouvert (méthode, mode de corps, mode d'authentification, placement
+/// d'API key) ou avertissement de secret en clair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditState {
     FieldSelect,
     Input(TextInput),
-    /// Sélecteur de méthode ouvert, `selected` est l'indice présélectionné
-    /// dans `crate::collection::ast::METHODS`.
-    MethodPicker {
+    /// Sélecteur ouvert : `selected` est l'indice présélectionné dans
+    /// `kind.options()`.
+    Picker {
+        kind: PickerKind,
         selected: usize,
     },
-    /// Sélecteur de mode de corps ouvert, `selected` est l'indice présélectionné
-    /// dans `crate::writer::BODY_MODES`.
-    BodyModePicker {
-        selected: usize,
+    /// Avertissement de secret en clair dans un fichier .bru (§ 5 spec).
+    PlaintextSecretPrompt {
+        key: String,
+        var_name: String,
+        value: String,
+        index: usize,
     },
 }
+
+/// Liste proposée par un sélecteur de la session d'édition. Tous les
+/// sélecteurs partagent la même mécanique : `↑↓` choisir, `Entrée`
+/// valider, `Échap` ou un clic ailleurs annuler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerKind {
+    /// Méthode HTTP (`crate::collection::ast::METHODS`).
+    Method,
+    /// Mode du corps (`crate::writer::BODY_MODES`).
+    BodyMode,
+    /// Mode d'authentification d'une requête ou d'un dossier.
+    AuthMode,
+    /// Mode d'authentification de la collection (sans `inherit`).
+    CollectionAuthMode,
+    /// Placement de l'API key (`APIKEY_PLACEMENTS`).
+    ApiKeyPlacement,
+}
+
+impl PickerKind {
+    /// Choix proposés, dans l'ordre d'affichage.
+    pub fn options(self) -> &'static [&'static str] {
+        match self {
+            Self::Method => &crate::collection::ast::METHODS,
+            Self::BodyMode => &crate::writer::BODY_MODES,
+            Self::AuthMode => &AUTH_MODES,
+            Self::CollectionAuthMode => &COLLECTION_AUTH_MODES,
+            Self::ApiKeyPlacement => &APIKEY_PLACEMENTS,
+        }
+    }
+}
+
+/// Modes d'authentification proposés pour une requête ou un dossier.
+pub const AUTH_MODES: [&str; 9] = [
+    "none", "inherit", "basic", "bearer", "digest", "ntlm", "apikey", "awsv4", "wsse",
+];
+
+/// Modes d'authentification proposés pour la collection : rien à hériter.
+pub const COLLECTION_AUTH_MODES: [&str; 8] = [
+    "none", "basic", "bearer", "digest", "ntlm", "apikey", "awsv4", "wsse",
+];
+
+pub const APIKEY_PLACEMENTS: [&str; 2] = ["header", "queryparams"];
 
 /// Ce que produit la validation de la saisie en cours.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1064,6 +1113,10 @@ pub enum EditableField {
     HeaderValue(usize),
     QueryParamValue(usize),
     PathParamValue(usize),
+    /// Mode d'authentification (`feat-edit-auth`).
+    AuthMode,
+    /// Paramètre d'authentification d'indice `index` (`feat-edit-auth`).
+    AuthParamValue(usize),
     VarsPreRequestValue(usize),
     VarsPostResponseValue(usize),
     AssertValue(usize),
@@ -1108,6 +1161,10 @@ impl EditableField {
                 fields.push(Self::PathParamValue(index));
             }
             fields.push(Self::AddRow(EntrySection::PathParams));
+        }
+        fields.push(Self::AuthMode);
+        for index in 0..view.auth_params().len() {
+            fields.push(Self::AuthParamValue(index));
         }
         for index in 0..view.extra.vars_pre_request.len() {
             fields.push(Self::VarsPreRequestValue(index));
@@ -1184,6 +1241,8 @@ impl EditableField {
             Self::MultipartFormValue(index) => Some((EntrySection::MultipartForm, *index)),
             Self::Method
             | Self::Url
+            | Self::AuthMode
+            | Self::AuthParamValue(_)
             | Self::BodyMode
             | Self::AddRow(_)
             | Self::BodyText
@@ -1219,6 +1278,11 @@ impl EditableField {
             Self::PathParamValue(index) => format!(
                 "Paramètre de chemin {}",
                 view.path_params.get(*index).map_or("", |p| &p.key)
+            ),
+            Self::AuthMode => "Mode d'authentification".to_owned(),
+            Self::AuthParamValue(index) => format!(
+                "Paramètre d'auth {}",
+                view.auth_params().get(*index).map_or("", |p| &p.key)
             ),
             Self::VarsPreRequestValue(index) => format!(
                 "Variable {}",
@@ -1342,6 +1406,8 @@ pub enum PendingConfirm {
     CopyUnmaskedCurl,
     /// Écraser un fichier existant lors de l'export du corps de réponse.
     OverwriteExport { path: PathBuf, bytes: Vec<u8> },
+    /// Supprimer un ancien bloc d'authentification non vide lors du changement de mode.
+    DeleteAuthBlock { former_mode: String },
 }
 
 /// État de saisie du chemin pour l'export du corps de réponse.
@@ -1408,6 +1474,11 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
         EditableField::ScriptPostResponse => view.script_post_response().unwrap_or(""),
         EditableField::Tests => view.tests().unwrap_or(""),
         EditableField::Docs => view.docs().unwrap_or(""),
+        EditableField::AuthMode => view.auth.as_ref().map_or("none", |m| m.as_str()),
+        EditableField::AuthParamValue(index) => view
+            .auth_params()
+            .get(*index)
+            .map_or("", |kv| kv.value.as_str()),
         entry => entry
             .entry()
             .and_then(|(section, index)| section_entries(view, section).get(index))
@@ -1417,10 +1488,18 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
 
 /// État d'activation d'un champ (en-tête ou paramètre), lu dans l'aperçu.
 pub fn field_enabled(session: &EditSession, field: &EditableField) -> bool {
-    field
-        .entry()
-        .and_then(|(section, index)| section_entries(&session.preview, section).get(index))
-        .is_none_or(|kv| kv.enabled)
+    match field {
+        EditableField::AuthMode => true,
+        EditableField::AuthParamValue(index) => session
+            .preview
+            .auth_params()
+            .get(*index)
+            .is_none_or(|kv| kv.enabled),
+        other => other
+            .entry()
+            .and_then(|(section, index)| section_entries(&session.preview, section).get(index))
+            .is_none_or(|kv| kv.enabled),
+    }
 }
 
 #[derive(Debug)]
@@ -1667,6 +1746,8 @@ pub enum StatusMessage {
     ExportError(String),
     /// Cellule du tableau comparatif sans résultat pour cet environnement.
     NoEnvironmentResult(String),
+    /// Rappel pour définir la variable secrète remplacée (§ 5 spec).
+    SecretVariableHint(String),
 }
 
 /// Série de campagnes multi-environnements : un `bru run` par
@@ -2287,19 +2368,14 @@ impl Model {
         {
             return Some(TextCapture::Input);
         }
-        if self
-            .editing
-            .as_ref()
-            .is_some_and(|s| matches!(s.state, EditState::MethodPicker { .. }))
-        {
-            return Some(TextCapture::MethodPicker);
-        }
-        if self
-            .editing
-            .as_ref()
-            .is_some_and(|s| matches!(s.state, EditState::BodyModePicker { .. }))
-        {
-            return Some(TextCapture::BodyModePicker);
+        if let Some(session) = &self.editing {
+            match session.state {
+                EditState::Picker { .. } => return Some(TextCapture::Picker),
+                EditState::PlaintextSecretPrompt { .. } => {
+                    return Some(TextCapture::PlaintextSecretPrompt);
+                }
+                _ => {}
+            }
         }
         if self.search.as_ref().is_some_and(SearchState::is_editing) {
             return Some(TextCapture::Search);
@@ -2757,7 +2833,7 @@ mod tests {
             Assert, Headers, PathParams, QueryParams, VarsPostResponse, VarsPreRequest,
         };
 
-        // Méthode + URL + 2 en-têtes + vars/assert add-rows + corps json + blocs texte
+        // Méthode + URL + 2 en-têtes + vars/assert add-rows + auth mode + corps json + blocs texte
         let fields = EditableField::list_for(&make_view(Some(BodyKind::Json), 2));
         assert_eq!(
             fields,
@@ -2769,6 +2845,7 @@ mod tests {
                 EditableField::AddRow(Headers),
                 EditableField::AddRow(QueryParams),
                 EditableField::AddRow(PathParams),
+                EditableField::AuthMode,
                 EditableField::AddRow(VarsPreRequest),
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),
@@ -2791,6 +2868,7 @@ mod tests {
                 EditableField::AddRow(Headers),
                 EditableField::AddRow(QueryParams),
                 EditableField::AddRow(PathParams),
+                EditableField::AuthMode,
                 EditableField::AddRow(VarsPreRequest),
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),

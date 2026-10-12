@@ -1,0 +1,22 @@
+{
+  "url": "",
+  "headers": [],
+  "params": [],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {},
+  "auth_mode": "basic",
+  "auth_params": [
+    {
+      "name": "username",
+      "value": "admin",
+      "enabled": true
+    },
+    {
+      "name": "password",
+      "value": "{{secretPassword}}",
+      "enabled": true
+    }
+  ]
+}

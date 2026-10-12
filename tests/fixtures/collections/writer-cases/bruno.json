@@ -8,6 +8,10 @@
     "folder-ops.bru",
     "folder-ops.after.bru",
     "collection-ops.bru",
-    "collection-ops.after.bru"
+    "collection-ops.after.bru",
+    "folder-auth.bru",
+    "folder-auth.after.bru",
+    "collection-auth.bru",
+    "collection-auth.after.bru"
   ]
 }

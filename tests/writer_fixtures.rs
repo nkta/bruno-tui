@@ -628,6 +628,59 @@ fn entry_cases() -> Vec<(&'static str, Vec<FieldEdit>)> {
                 add(VarsPreRequest, "coll_var", "world"),
             ],
         ),
+        (
+            "auth-mode-switch",
+            vec![FieldEdit::AuthMode("bearer".into())],
+        ),
+        (
+            "auth-param",
+            vec![FieldEdit::AuthParamValue {
+                index: 0,
+                value: "updated_token".into(),
+            }],
+        ),
+        (
+            "auth-apikey",
+            vec![
+                FieldEdit::AuthMode("apikey".into()),
+                FieldEdit::AuthParamValue {
+                    index: 0,
+                    value: "X-API-KEY".into(),
+                },
+                FieldEdit::AuthParamValue {
+                    index: 1,
+                    value: "{{secretKey}}".into(),
+                },
+                FieldEdit::AuthParamValue {
+                    index: 2,
+                    value: "header".into(),
+                },
+            ],
+        ),
+        (
+            "folder-auth",
+            vec![
+                FieldEdit::AuthMode("basic".into()),
+                FieldEdit::AuthParamValue {
+                    index: 0,
+                    value: "admin".into(),
+                },
+                FieldEdit::AuthParamValue {
+                    index: 1,
+                    value: "{{secretPassword}}".into(),
+                },
+            ],
+        ),
+        (
+            "collection-auth",
+            vec![
+                FieldEdit::AuthMode("bearer".into()),
+                FieldEdit::AuthParamValue {
+                    index: 0,
+                    value: "{{collToken}}".into(),
+                },
+            ],
+        ),
         ("body-mode-ops", vec![FieldEdit::BodyMode("json".into())]),
         (
             "body-form-urlencoded-ops",
@@ -936,6 +989,87 @@ fn folder_bru_text_blocks_and_headers_edit() {
         rewritten,
         "meta {\n  name: Mon Dossier\n}\n\nheaders {\n  Authorization: Bearer tok\n}\n\ndocs {\n  # Docs du dossier\n  Texte\n}\n"
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn auth_mode_and_params_edit_on_request() {
+    let dir = workdir("auth-request-edit");
+    let path = dir.join("req.bru");
+    let initial = "meta {\n  name: Test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n  body: none\n  auth: none\n}\n";
+    fs::write(&path, initial).expect("écriture initiale");
+    let (ast, stamp) = load(&path);
+
+    let new_stamp = BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[
+                FieldEdit::AuthMode("bearer".into()),
+                FieldEdit::AuthParamValue {
+                    index: 0,
+                    value: "secret123".into(),
+                },
+            ],
+        )
+        .expect("écriture auth");
+
+    let rewritten = fs::read_to_string(&path).expect("relecture");
+    assert_eq!(
+        rewritten,
+        "meta {\n  name: Test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n  body: none\n  auth: bearer\n}\n\nauth:bearer {\n  token: secret123\n}\n"
+    );
+    assert_eq!(new_stamp, FileStamp::capture(&path).expect("stamp"));
+
+    // Relecture via RequestView
+    let reloaded = BruFile::parse(rewritten).expect("AST");
+    let view = RequestView::from_ast(&reloaded).expect("vue");
+    assert_eq!(view.auth, Some(bruno_tui::collection::AuthMode::Bearer));
+    assert_eq!(view.auth_params().len(), 1);
+    assert_eq!(view.auth_params()[0].key, "token");
+    assert_eq!(view.auth_params()[0].value, "secret123");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn auth_mode_and_params_edit_on_folder_and_collection() {
+    let dir = workdir("auth-folder-edit");
+    let path = dir.join("folder.bru");
+    let initial = "meta {\n  name: Group\n}\n\nauth {\n  mode: basic\n}\n\nauth:basic {\n  username: u\n  password: p\n}\n";
+    fs::write(&path, initial).expect("écriture initiale");
+    let (ast, stamp) = load(&path);
+
+    BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[
+                FieldEdit::AuthMode("bearer".into()),
+                FieldEdit::AuthParamValue {
+                    index: 0,
+                    value: "folder-token".into(),
+                },
+            ],
+        )
+        .expect("écriture folder auth");
+
+    let rewritten = fs::read_to_string(&path).expect("relecture");
+    assert_eq!(
+        rewritten,
+        "meta {\n  name: Group\n}\n\nauth {\n  mode: bearer\n}\n\nauth:bearer {\n  token: folder-token\n}\n"
+    );
+
+    // Relecture via FileMeta
+    let reloaded = BruFile::parse(rewritten).expect("AST");
+    let meta = FileMeta::from_ast(reloaded);
+    assert_eq!(meta.auth(), Some(&bruno_tui::collection::AuthMode::Bearer));
+    assert_eq!(meta.auth_params().len(), 1);
+    assert_eq!(meta.auth_params()[0].key, "token");
+    assert_eq!(meta.auth_params()[0].value, "folder-token");
 
     let _ = fs::remove_dir_all(&dir);
 }

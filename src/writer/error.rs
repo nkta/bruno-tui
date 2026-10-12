@@ -67,6 +67,9 @@ pub enum EditError {
     #[error("méthode inconnue")]
     UnknownMethod,
 
+    /// Mode d'authentification inconnu.
+    #[error("mode d'authentification inconnu")]
+    UnknownAuthMode,
     /// Mode du corps hors des 8 valeurs reconnues (`docs/edition-phase2.md` § 6).
     #[error("mode de corps inconnu")]
     UnknownBodyMode,
