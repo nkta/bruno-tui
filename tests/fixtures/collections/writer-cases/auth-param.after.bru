@@ -1,0 +1,14 @@
+meta {
+  name: auth-param
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://{{host}}/secure
+  auth: bearer
+}
+
+auth:bearer {
+  token: updated_token
+}

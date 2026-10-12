@@ -628,6 +628,59 @@ fn entry_cases() -> Vec<(&'static str, Vec<FieldEdit>)> {
                 add(VarsPreRequest, "coll_var", "world"),
             ],
         ),
+        (
+            "auth-mode-switch",
+            vec![FieldEdit::AuthMode("bearer".into())],
+        ),
+        (
+            "auth-param",
+            vec![FieldEdit::AuthParamValue {
+                index: 0,
+                value: "updated_token".into(),
+            }],
+        ),
+        (
+            "auth-apikey",
+            vec![
+                FieldEdit::AuthMode("apikey".into()),
+                FieldEdit::AuthParamValue {
+                    index: 0,
+                    value: "X-API-KEY".into(),
+                },
+                FieldEdit::AuthParamValue {
+                    index: 1,
+                    value: "{{secretKey}}".into(),
+                },
+                FieldEdit::AuthParamValue {
+                    index: 2,
+                    value: "header".into(),
+                },
+            ],
+        ),
+        (
+            "folder-auth",
+            vec![
+                FieldEdit::AuthMode("basic".into()),
+                FieldEdit::AuthParamValue {
+                    index: 0,
+                    value: "admin".into(),
+                },
+                FieldEdit::AuthParamValue {
+                    index: 1,
+                    value: "{{secretPassword}}".into(),
+                },
+            ],
+        ),
+        (
+            "collection-auth",
+            vec![
+                FieldEdit::AuthMode("bearer".into()),
+                FieldEdit::AuthParamValue {
+                    index: 0,
+                    value: "{{collToken}}".into(),
+                },
+            ],
+        ),
     ]
 }
 

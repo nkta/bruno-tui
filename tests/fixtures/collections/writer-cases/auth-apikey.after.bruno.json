@@ -1,0 +1,27 @@
+{
+  "url": "https://{{host}}/api",
+  "headers": [],
+  "params": [],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {},
+  "auth_mode": "apikey",
+  "auth_params": [
+    {
+      "name": "key",
+      "value": "X-API-KEY",
+      "enabled": true
+    },
+    {
+      "name": "value",
+      "value": "{{secretKey}}",
+      "enabled": true
+    },
+    {
+      "name": "placement",
+      "value": "header",
+      "enabled": true
+    }
+  ]
+}
