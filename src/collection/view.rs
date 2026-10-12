@@ -162,6 +162,7 @@ pub struct ExtraTabs {
     /// Champs propres à une requête gRPC ; `None` pour les autres types.
     pub grpc: Option<GrpcView>,
     pub auth_params: Vec<KeyValue>,
+    pub graphql_vars: Option<String>,
 }
 
 /// Champs propres à une requête gRPC (bloc `grpc` et scripts
@@ -315,6 +316,11 @@ impl RequestView {
         &self.extra.auth_params
     }
 
+    /// Contenu du bloc `body:graphql:vars` s'il existe.
+    pub fn graphql_vars(&self) -> Option<&str> {
+        self.extra.graphql_vars.as_deref()
+    }
+
     /// Champs gRPC ; `None` hors requête gRPC.
     pub fn grpc(&self) -> Option<&GrpcView> {
         self.extra.grpc.as_ref()
@@ -424,6 +430,7 @@ impl RequestView {
                 assertions: key_values(file, "assert"),
                 grpc: None,
                 auth_params,
+                graphql_vars: file.text("body:graphql:vars"),
             }),
         })
     }
@@ -490,6 +497,7 @@ impl RequestView {
                 assertions: key_values(file, "assert"),
                 grpc: None,
                 auth_params: auth_params_of(file, auth.as_ref()),
+                graphql_vars: None,
             }),
         }
     }
@@ -682,6 +690,7 @@ impl FileMeta {
                 assertions: self.content.assertions.clone(),
                 grpc: None,
                 auth_params: self.content.auth_params.clone(),
+                graphql_vars: None,
             }),
         }
     }
@@ -1426,5 +1435,20 @@ script:pre-request {
                 "▸ message 1\nhello\n\n▸ bye (text)\nbye".into()
             ))
         );
+    }
+
+    #[test]
+    fn graphql_body_and_vars() {
+        let source = "post {\n  url: http://graphql\n  body: graphql\n}\n\nbody:graphql {\n  query { user { id } }\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n";
+        let file = parse(source);
+        let view = RequestView::from_ast(&file).expect("vue");
+        assert_eq!(
+            view.body,
+            Some(BodyView {
+                kind: BodyKind::Graphql,
+                content: BodyContent::Text("query { user { id } }".into()),
+            })
+        );
+        assert_eq!(view.graphql_vars(), Some("{\n  \"id\": 1\n}"));
     }
 }

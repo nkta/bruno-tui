@@ -141,6 +141,8 @@ pub enum FieldEdit {
         value: String,
     },
     BodyText(String),
+    /// Contenu du bloc body:graphql:vars ; vide pour retirer le bloc.
+    GraphqlVars(String),
     /// Contenu du bloc script:pre-request ; vide pour retirer le bloc.
     ScriptPreRequest(String),
     /// Contenu du bloc script:post-response ; vide pour retirer le bloc.

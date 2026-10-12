@@ -68,14 +68,16 @@ pub(crate) enum TextBlockKind {
     ScriptPostResponse,
     Tests,
     Docs,
+    GraphqlVars,
 }
 
 impl TextBlockKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::ScriptPreRequest,
         Self::ScriptPostResponse,
         Self::Tests,
         Self::Docs,
+        Self::GraphqlVars,
     ];
 
     pub fn block_name(&self) -> &'static str {
@@ -84,6 +86,7 @@ impl TextBlockKind {
             Self::ScriptPostResponse => "script:post-response",
             Self::Tests => "tests",
             Self::Docs => "docs",
+            Self::GraphqlVars => "body:graphql:vars",
         }
     }
 
@@ -93,11 +96,12 @@ impl TextBlockKind {
             Self::ScriptPostResponse => 1,
             Self::Tests => 2,
             Self::Docs => 3,
+            Self::GraphqlVars => 4,
         }
     }
 }
 
-/// État d'un bloc de texte libre (`script:*`, `tests`, `docs`).
+/// État d'un bloc de texte libre (`script:*`, `tests`, `docs`, `body:graphql:vars`).
 struct TextBlockState {
     block_span: Option<Range<usize>>,
     content_span: Option<Range<usize>>,
@@ -111,7 +115,7 @@ pub(crate) struct Draft<'a> {
     body_mode: Result<BodyModeState, EditError>,
     sections: [Section; EntrySection::ALL.len()],
     body: Option<BodyState>,
-    text_blocks: [TextBlockState; 4],
+    text_blocks: [TextBlockState; TextBlockKind::ALL.len()],
 }
 
 impl<'a> Draft<'a> {
@@ -255,6 +259,10 @@ impl<'a> Draft<'a> {
             }
             FieldEdit::Docs(text) => {
                 self.text_blocks[TextBlockKind::Docs.position()].new_text = Some(text.clone());
+            }
+            FieldEdit::GraphqlVars(text) => {
+                self.text_blocks[TextBlockKind::GraphqlVars.position()].new_text =
+                    Some(text.clone());
             }
             FieldEdit::AddEntry {
                 section,
@@ -1578,6 +1586,42 @@ mod tests {
         assert_eq!(
             out,
             "post {\n  url: http://a\n  body: text\n}\n\nbody:text {\n  hello world\n}\n"
+        );
+    }
+
+    #[test]
+    fn graphql_vars_modifies_existing_block() {
+        let source = "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::GraphqlVars("{\n  \"id\": 2\n}".into())],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 2\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn graphql_vars_creates_missing_block_at_canonical_anchor() {
+        let source = "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::GraphqlVars("{\n  \"id\": 1\n}".into())],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn graphql_vars_removes_cleared_block() {
+        let source = "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n";
+        let out = apply(source, &[FieldEdit::GraphqlVars("".into())]);
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n"
         );
     }
 }
