@@ -20,5 +20,9 @@
       "enabled": true,
       "type": "path"
     }
-  ]
+  ],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {}
 }

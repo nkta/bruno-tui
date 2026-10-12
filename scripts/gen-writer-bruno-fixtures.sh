@@ -12,9 +12,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CASES="$ROOT/tests/fixtures/collections/writer-cases"
 
-# Même liste que `ENTRY_CASES` dans `tests/writer_bruno_lang.rs`.
 CASES_NAMES=(add-header add-block add-path-between remove-entry rename-disabled
-  duplicates query-sync url-sync crlf-add)
+  duplicates query-sync url-sync crlf-add
+  vars-ops assert-ops settings-ops folder-ops collection-ops)
 
 for name in "${CASES_NAMES[@]}"; do
   out="$CASES/$name.after.bruno.json"

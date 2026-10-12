@@ -8,8 +8,8 @@
 use std::ops::Range;
 
 use super::dictionary::{
-    DictEntry as DraftEntry, DictSection as Section, block_node, check_key_general,
-    dictionary_replacements, following_blank_line_len, preceding_blank_line_len,
+    DictEntry as DraftEntry, DictSection as Section, check_key_general, dictionary_replacements,
+    following_blank_line_len, preceding_blank_line_len, section_block_node,
 };
 use super::edit::{EntrySection, FieldEdit, Replacement};
 use super::error::{EditError, EntryProblem};
@@ -98,7 +98,7 @@ pub(crate) struct Draft<'a> {
     ast: &'a BruFile,
     url: Result<UrlState, EditError>,
     method: Result<MethodState, EditError>,
-    sections: [Section; 3],
+    sections: [Section; EntrySection::ALL.len()],
     body: Option<BodyState>,
     text_blocks: [TextBlockState; 4],
 }
@@ -106,7 +106,7 @@ pub(crate) struct Draft<'a> {
 impl<'a> Draft<'a> {
     pub(crate) fn from_ast(ast: &'a BruFile) -> Self {
         let section = |section: EntrySection| {
-            let entries = ast.dictionary(section.block_name());
+            let entries = section_block_node(ast, section).map(|(_, entries)| entries);
             Section {
                 entries: entries
                     .unwrap_or_default()
@@ -152,7 +152,9 @@ impl<'a> Draft<'a> {
     /// Applique une modification ; l'indice porté désigne la position dans
     /// l'état courant de la section.
     pub(crate) fn apply(&mut self, edit: &FieldEdit) -> Result<(), EditError> {
-        use EntrySection::{Headers, PathParams, QueryParams};
+        use EntrySection::{
+            Assert, Headers, PathParams, QueryParams, Settings, VarsPostResponse, VarsPreRequest,
+        };
         match edit {
             FieldEdit::Url(value) => {
                 let url = self.url.as_mut().map_err(|error| error.clone())?;
@@ -177,6 +179,18 @@ impl<'a> Draft<'a> {
                 self.entry_mut(QueryParams, *index)?.value = value.clone();
                 self.sync_url_from_params();
             }
+            FieldEdit::VarsPreRequestValue { index, value } => {
+                self.entry_mut(VarsPreRequest, *index)?.value = value.clone();
+            }
+            FieldEdit::VarsPostResponseValue { index, value } => {
+                self.entry_mut(VarsPostResponse, *index)?.value = value.clone();
+            }
+            FieldEdit::AssertValue { index, value } => {
+                self.entry_mut(Assert, *index)?.value = value.clone();
+            }
+            FieldEdit::SettingsValue { index, value } => {
+                self.entry_mut(Settings, *index)?.value = value.clone();
+            }
             FieldEdit::HeaderEnabled { index, enabled } => {
                 self.entry_mut(Headers, *index)?.disabled = !enabled;
             }
@@ -186,6 +200,15 @@ impl<'a> Draft<'a> {
             FieldEdit::QueryParamEnabled { index, enabled } => {
                 self.entry_mut(QueryParams, *index)?.disabled = !enabled;
                 self.sync_url_from_params();
+            }
+            FieldEdit::VarsPreRequestEnabled { index, enabled } => {
+                self.entry_mut(VarsPreRequest, *index)?.disabled = !enabled;
+            }
+            FieldEdit::VarsPostResponseEnabled { index, enabled } => {
+                self.entry_mut(VarsPostResponse, *index)?.disabled = !enabled;
+            }
+            FieldEdit::AssertEnabled { index, enabled } => {
+                self.entry_mut(Assert, *index)?.disabled = !enabled;
             }
             FieldEdit::BodyText(text) => {
                 if self.body.is_none() {
@@ -215,6 +238,11 @@ impl<'a> Draft<'a> {
                 value,
                 enabled,
             } => {
+                if *section == Settings {
+                    return Err(EditError::ImmutableBlock {
+                        block: Settings.block_name(),
+                    });
+                }
                 check_key(*section, key, None)?;
                 if *section == QueryParams {
                     check_query_value(value, None)?;
@@ -232,6 +260,11 @@ impl<'a> Draft<'a> {
                 }
             }
             FieldEdit::RemoveEntry { section, index } => {
+                if *section == Settings {
+                    return Err(EditError::ImmutableBlock {
+                        block: Settings.block_name(),
+                    });
+                }
                 self.entry_mut(*section, *index)?;
                 let target = &mut self.sections[section.position()];
                 target.entries.remove(*index);
@@ -245,6 +278,11 @@ impl<'a> Draft<'a> {
                 index,
                 key,
             } => {
+                if *section == Settings {
+                    return Err(EditError::ImmutableBlock {
+                        block: Settings.block_name(),
+                    });
+                }
                 self.entry_mut(*section, *index)?;
                 check_key(*section, key, Some(*index))?;
                 self.entry_mut(*section, *index)?.key = key.clone();
@@ -372,7 +410,7 @@ impl<'a> Draft<'a> {
         let mut prefixed_anchors: Vec<usize> = Vec::new();
         for section in EntrySection::ALL {
             let state = &self.sections[section.position()];
-            let block = block_node(self.ast, section.block_name());
+            let block = section_block_node(self.ast, section);
             let anchor = if block.is_none() && !state.entries.is_empty() {
                 canonical_creation_anchor(self.ast, section.block_name())
             } else {
@@ -531,7 +569,8 @@ fn canonical_block_rank(name: &str) -> Option<usize> {
     if name.starts_with("body:") || name == "body" {
         return Some(7);
     }
-    if name == "vars:pre-request" {
+    // `vars` est l'ancien nom de `vars:pre-request`, conservé tel quel.
+    if name == "vars:pre-request" || name == "vars" {
         return Some(8);
     }
     if name == "vars:post-response" {
@@ -601,8 +640,30 @@ fn canonical_creation_anchor(ast: &BruFile, target_name: &str) -> usize {
 }
 /// Règles générales (`check_key_general`, `dictionary.rs`) plus la règle
 /// propre aux paramètres de requête (caractères réservés d'une chaîne de
-/// requête dans la clé).
+/// requête dans la clé) et à assert (espaces autorisés).
 fn check_key(section: EntrySection, key: &str, index: Option<usize>) -> Result<(), EditError> {
+    if section == EntrySection::Assert {
+        let problem = if key.is_empty() {
+            Some(EntryProblem::EmptyKey)
+        } else if key.contains(['\n', '\r']) {
+            Some(EntryProblem::KeyWhitespace)
+        } else if key.contains(':') {
+            Some(EntryProblem::KeyColon)
+        } else if key.starts_with(['~', '"']) {
+            Some(EntryProblem::KeyLeadingMarker)
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            return Err(EditError::InvalidEntry {
+                block: section.block_name(),
+                index,
+                problem,
+            });
+        }
+        return Ok(());
+    }
+
     check_key_general(key, section.block_name(), index)?;
     if section == EntrySection::QueryParams && key.contains(['&', '=', '#']) {
         return Err(EditError::InvalidEntry {
@@ -1018,6 +1079,75 @@ mod tests {
     }
 
     #[test]
+    fn vars_pre_and_post_edits_and_block_creation_and_removal() {
+        let source = "get {\n  url: http://a\n}\n";
+        // Ajout vars:pre-request et vars:post-response
+        let with_vars = apply(
+            source,
+            &[
+                add(EntrySection::VarsPreRequest, "v1", "foo"),
+                add(EntrySection::VarsPostResponse, "v2", "bar"),
+            ],
+        );
+        assert_eq!(
+            with_vars,
+            "get {\n  url: http://a\n}\n\nvars:pre-request {\n  v1: foo\n}\n\nvars:post-response {\n  v2: bar\n}\n"
+        );
+
+        // Modification de valeur et désactivation
+        let modified = apply(
+            &with_vars,
+            &[
+                FieldEdit::VarsPreRequestValue {
+                    index: 0,
+                    value: "foo2".into(),
+                },
+                FieldEdit::VarsPostResponseEnabled {
+                    index: 0,
+                    enabled: false,
+                },
+            ],
+        );
+        assert_eq!(
+            modified,
+            "get {\n  url: http://a\n}\n\nvars:pre-request {\n  v1: foo2\n}\n\nvars:post-response {\n  ~v2: bar\n}\n"
+        );
+
+        // Suppression de l'entrée -> le bloc vide est retiré
+        let removed = apply(
+            &modified,
+            &[FieldEdit::RemoveEntry {
+                section: EntrySection::VarsPreRequest,
+                index: 0,
+            }],
+        );
+        assert_eq!(
+            removed,
+            "get {\n  url: http://a\n}\n\nvars:post-response {\n  ~v2: bar\n}\n"
+        );
+    }
+
+    #[test]
+    fn legacy_vars_block_is_preserved_when_modified() {
+        let source = "get {\n  url: http://a\n}\n\nvars {\n  old_key: 123\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::VarsPreRequestValue {
+                    index: 0,
+                    value: "456".into(),
+                },
+                add(EntrySection::VarsPreRequest, "new_key", "789"),
+            ],
+        );
+        // Le bloc d'origine s'appelait `vars`, le nom `vars` est conservé
+        assert_eq!(
+            out,
+            "get {\n  url: http://a\n}\n\nvars {\n  old_key: 456\n  new_key: 789\n}\n"
+        );
+    }
+
+    #[test]
     fn edit_existing_text_block_is_reindented() {
         let source = "meta {\n  name: a\n}\n\nget {\n  url: http://a\n}\n\nscript:pre-request {\n  console.log(1);\n}\n";
         let out = apply(
@@ -1084,6 +1214,108 @@ mod tests {
     }
 
     #[test]
+    fn assert_allows_spaces_in_key_and_refuses_colon_or_leading_tilde() {
+        let source = "get {\n  url: http://a\n}\n";
+        // Assert autorise les espaces dans l'expression
+        let out = apply(
+            source,
+            &[add(EntrySection::Assert, "res.status == 200", "true")],
+        );
+        assert_eq!(
+            out,
+            "get {\n  url: http://a\n}\n\nassert {\n  res.status == 200: true\n}\n"
+        );
+
+        // Refuse les clés avec `:` ou `~` en tête
+        let file = parse(source);
+        let err_colon = resolve(&file, &[add(EntrySection::Assert, "res:status", "true")])
+            .expect_err("colon refusé");
+        assert!(matches!(
+            err_colon,
+            EditError::InvalidEntry {
+                problem: EntryProblem::KeyColon,
+                ..
+            }
+        ));
+
+        let err_tilde = resolve(&file, &[add(EntrySection::Assert, "~res.status", "true")])
+            .expect_err("tilde refusé");
+        assert!(matches!(
+            err_tilde,
+            EditError::InvalidEntry {
+                problem: EntryProblem::KeyLeadingMarker,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn settings_value_edit_is_allowed_but_structural_edits_are_refused() {
+        let source = "get {\n  url: http://a\n}\n\nsettings {\n  encodeUrl: true\n}\n";
+        // Modification de valeur permise
+        let out = apply(
+            source,
+            &[FieldEdit::SettingsValue {
+                index: 0,
+                value: "false".into(),
+            }],
+        );
+        assert_eq!(
+            out,
+            "get {\n  url: http://a\n}\n\nsettings {\n  encodeUrl: false\n}\n"
+        );
+
+        let file = parse(source);
+        // Ajout refusé
+        let err_add = resolve(&file, &[add(EntrySection::Settings, "timeout", "1000")])
+            .expect_err("ajout refusé");
+        assert_eq!(err_add, EditError::ImmutableBlock { block: "settings" });
+
+        // Suppression refusée
+        let err_remove = resolve(
+            &file,
+            &[FieldEdit::RemoveEntry {
+                section: EntrySection::Settings,
+                index: 0,
+            }],
+        )
+        .expect_err("suppression refusée");
+        assert_eq!(err_remove, EditError::ImmutableBlock { block: "settings" });
+
+        // Renommage refusé
+        let err_rename = resolve(
+            &file,
+            &[FieldEdit::RenameKey {
+                section: EntrySection::Settings,
+                index: 0,
+                key: "newKey".into(),
+            }],
+        )
+        .expect_err("renommage refusé");
+        assert_eq!(err_rename, EditError::ImmutableBlock { block: "settings" });
+    }
+
+    #[test]
+    fn creation_inserts_all_sections_in_canonical_bruno_order() {
+        let source = "get {\n  url: http://a\n}\n";
+        let out = apply(
+            source,
+            &[
+                add(EntrySection::Assert, "res.status", "eq 200"),
+                add(EntrySection::VarsPostResponse, "v2", "b"),
+                add(EntrySection::VarsPreRequest, "v1", "a"),
+                add(EntrySection::Headers, "H", "1"),
+                add(EntrySection::PathParams, "p", "2"),
+                add(EntrySection::QueryParams, "q", "3"),
+            ],
+        );
+        assert_eq!(
+            out,
+            "get {\n  url: http://a?q=3\n}\n\nparams:query {\n  q: 3\n}\n\nparams:path {\n  p: 2\n}\n\nheaders {\n  H: 1\n}\n\nvars:pre-request {\n  v1: a\n}\n\nvars:post-response {\n  v2: b\n}\n\nassert {\n  res.status: eq 200\n}\n"
+        );
+    }
+
+    #[test]
     fn text_block_with_braces_and_closing_syntax() {
         let source = "get {\n  url: http://a\n}\n";
         let script = "function test() {\n  if (true) {\n    return {};\n  }\n}";
@@ -1091,6 +1323,26 @@ mod tests {
         assert_eq!(
             out,
             "get {\n  url: http://a\n}\n\nscript:post-response {\n  function test() {\n    if (true) {\n      return {};\n    }\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn key_value_and_text_blocks_share_the_canonical_order() {
+        let source = "get {\n  url: http://a\n}\n\nsettings {\n  encodeUrl: true\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::Docs("doc".into()),
+                FieldEdit::Tests("test();".into()),
+                add(EntrySection::Assert, "res.status", "eq 200"),
+                FieldEdit::ScriptPreRequest("pre();".into()),
+                add(EntrySection::VarsPostResponse, "v2", "b"),
+                add(EntrySection::Headers, "H", "1"),
+            ],
+        );
+        assert_eq!(
+            out,
+            "get {\n  url: http://a\n}\n\nheaders {\n  H: 1\n}\n\nvars:post-response {\n  v2: b\n}\n\nassert {\n  res.status: eq 200\n}\n\nscript:pre-request {\n  pre();\n}\n\ntests {\n  test();\n}\n\nsettings {\n  encodeUrl: true\n}\n\ndocs {\n  doc\n}\n"
         );
     }
 }

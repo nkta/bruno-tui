@@ -608,15 +608,7 @@ fn render_insert_cursor(model: &Model, frame: &mut Frame, detail_area: Rect) {
     if !matches!(session.state, EditState::Input(_)) {
         return;
     }
-    let Some(TreeNode::Request(req)) = model.selected_node() else {
-        return;
-    };
-    if req.path != session.path {
-        return;
-    }
-    let Some((line_index, col_index)) =
-        detail::cursor_position_in_detail(req, session, model.shown_request_tab())
-    else {
+    let Some((line_index, col_index)) = detail::cursor_position_for_model(model) else {
         return;
     };
     let inner_area = inner(detail_area);
@@ -847,6 +839,11 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
             let keys = match field {
                 Some(EditableField::AddRow(_)) => {
                     "↑↓ champ  Entrée ajouter  Ctrl+S enregistrer  Échap fermer"
+                }
+                // Les clés de `settings` sont fixées par Bruno : seule la
+                // valeur se modifie.
+                Some(EditableField::SettingsValue(_)) => {
+                    "↑↓ champ  Entrée modifier  Ctrl+S enregistrer  Échap fermer"
                 }
                 Some(f) if f.entry().is_some() => {
                     "↑↓ champ  Entrée modifier  Espace activer  a ajouter  d supprimer  c renommer  Ctrl+S enregistrer  Échap fermer"
@@ -2788,6 +2785,34 @@ mod tests {
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("curseur");
         assert_eq!(cursor.x, inner_area.x + 1 + "  X-T: v".len() as u16);
+    }
+
+    #[test]
+    fn help_line_on_a_setting_offers_only_value_edit() {
+        use crate::app::model::EditableField;
+
+        let mut model = loaded_model((100, 40));
+        select(&mut model, "scripted.bru");
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        let session = model.editing.as_mut().expect("session");
+        session.fields.push(EditableField::SettingsValue(0));
+        session
+            .preview
+            .extra
+            .settings
+            .push(crate::collection::KeyValue {
+                key: "encodeUrl".into(),
+                value: "true".into(),
+                enabled: true,
+            });
+        go_to_field(&mut model, EditableField::SettingsValue(0));
+        let line = status_line(&model);
+        assert!(line.contains("Entrée modifier"), "{line}");
+        assert!(!line.contains("a ajouter"), "{line}");
+        assert!(!line.contains("d supprimer"), "{line}");
+        assert!(!line.contains("c renommer"), "{line}");
+        assert!(!line.contains("Espace activer"), "{line}");
     }
 
     #[test]

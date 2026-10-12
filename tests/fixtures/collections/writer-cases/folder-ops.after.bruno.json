@@ -1,0 +1,21 @@
+{
+  "url": "",
+  "headers": [
+    {
+      "name": "X-Folder",
+      "value": "v2",
+      "enabled": true
+    }
+  ],
+  "params": [],
+  "vars_req": [
+    {
+      "name": "folder_var",
+      "value": "hello",
+      "enabled": true
+    }
+  ],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {}
+}

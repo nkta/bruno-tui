@@ -2,5 +2,12 @@
   "version": "1",
   "name": "writer-cases",
   "type": "collection",
-  "ignore": ["environment-vars.bru", "environment-vars.after.bru"]
+  "ignore": [
+    "environment-vars.bru",
+    "environment-vars.after.bru",
+    "folder-ops.bru",
+    "folder-ops.after.bru",
+    "collection-ops.bru",
+    "collection-ops.after.bru"
+  ]
 }

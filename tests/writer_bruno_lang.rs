@@ -12,12 +12,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use bruno_tui::collection::{BruFile, KeyValue, RequestView};
+use bruno_tui::collection::{BruFile, FileMeta, KeyValue, RequestView};
 use bruno_tui::writer::RequestWriter;
 use serde_json::Value;
 
 /// Même liste que `CASES_NAMES` dans `scripts/gen-writer-bruno-fixtures.sh`.
-const ENTRY_CASES: [&str; 9] = [
+const ENTRY_CASES: [&str; 14] = [
     "add-header",
     "add-block",
     "add-path-between",
@@ -27,6 +27,11 @@ const ENTRY_CASES: [&str; 9] = [
     "query-sync",
     "url-sync",
     "crlf-add",
+    "vars-ops",
+    "assert-ops",
+    "settings-ops",
+    "folder-ops",
+    "collection-ops",
 ];
 
 fn cases() -> PathBuf {
@@ -55,7 +60,9 @@ fn bru_parser_agrees_with_recorded_bruno_reading() {
     for name in ENTRY_CASES {
         let source =
             fs::read_to_string(cases().join(format!("{name}.after.bru"))).expect("fixture after");
-        let view = RequestView::from_ast(&BruFile::parse(source).expect("AST")).expect("vue");
+        let parsed = BruFile::parse(source).expect("AST");
+        let view = RequestView::from_ast(&parsed)
+            .unwrap_or_else(|_| FileMeta::from_ast(parsed.clone()).to_request_view());
         let bruno = bruno_json(name);
 
         assert_eq!(view.url, bruno["url"].as_str().expect("url"), "{name}");
@@ -71,6 +78,41 @@ fn bru_parser_agrees_with_recorded_bruno_reading() {
         };
         assert_eq!(view.query_params, of_type("query"), "{name}");
         assert_eq!(view.path_params, of_type("path"), "{name}");
+
+        if let Some(vars_req) = bruno.get("vars_req").and_then(Value::as_array) {
+            assert_eq!(
+                view.extra.vars_pre_request,
+                key_values(vars_req.iter()),
+                "{name} vars_req"
+            );
+        }
+        if let Some(vars_res) = bruno.get("vars_res").and_then(Value::as_array) {
+            assert_eq!(
+                view.extra.vars_post_response,
+                key_values(vars_res.iter()),
+                "{name} vars_res"
+            );
+        }
+        if let Some(assertions) = bruno.get("assertions").and_then(Value::as_array) {
+            assert_eq!(
+                view.extra.assertions,
+                key_values(assertions.iter()),
+                "{name} assertions"
+            );
+        }
+        if let Some(settings) = bruno.get("settings").and_then(Value::as_object) {
+            for (key, val) in settings {
+                if let Some(kv) = view.extra.settings.iter().find(|s| &s.key == key) {
+                    let val_str = match val {
+                        Value::Bool(b) => b.to_string(),
+                        Value::Number(n) => n.to_string(),
+                        Value::String(s) => s.clone(),
+                        _ => val.to_string(),
+                    };
+                    assert_eq!(kv.value, val_str, "{name} setting {key}");
+                }
+            }
+        }
     }
 }
 

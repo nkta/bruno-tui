@@ -1,0 +1,21 @@
+meta {
+  name: vars-ops
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://{{host}}/items
+}
+
+headers {
+  Accept: application/json
+}
+
+vars:pre-request {
+  token: updated_token
+}
+
+vars:post-response {
+  res_id: res.body.id
+}

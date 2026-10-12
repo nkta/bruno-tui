@@ -142,11 +142,11 @@ atténués ; une barre d'onglets adaptative fait défiler les onglets sur les
 | `v` | sélection visuelle de lignes ; `y` copie dans le presse-papiers |
 | `Clic` | cliquer sur un onglet pour l'afficher |
 
-Les onglets Vars, Script, Tests, Docs et Settings sont en lecture seule :
-pendant une session d'édition, ils ne sont pas des cibles éditables et la
-navigation entre champs reste inchangée. Les onglets Script (scripts pré-requête
-et post-réponse) et Tests affichent le code brut avec numérotation de lignes,
-aussi bien pour les fichiers `.bru` que pour les collections OpenCollection YAML.
+Les onglets Script (scripts pré-requête et post-réponse), Tests et Docs restent
+édités dans un éditeur externe ; les onglets Vars, Assert et Settings
+sont éditables directement dans le TUI pour les fichiers `.bru`. Les onglets Script
+et Tests affichent le code brut avec numérotation de lignes, aussi bien pour les
+fichiers `.bru` que pour les collections OpenCollection YAML.
 
 ### Contenu des dossiers et de la collection racine
 
@@ -164,9 +164,10 @@ aussi bien pour les fichiers `.bru` que pour les collections OpenCollection YAML
   secrets, clés d'API) sont masquées (`********`) dans l'onglet Auth, tandis que les références
   de variables (`{{variable}}`) restent visibles en clair.
 - **Édition** : pour les collections Bruno (`.bru`), les requêtes, les dossiers (`folder.bru`)
-  et la racine (`collection.bru`) supportent l'édition des en-têtes et des blocs de texte
-  (scripts, tests, documentation). Les collections OpenCollection (YAML), gRPC et WebSocket
-  restent strictement en lecture seule.
+  et la racine (`collection.bru`) sont éditables (`Entrée` / `e`) : en-têtes, variables
+  (`vars:pre-request`, `vars:post-response`), assertions, réglages (`settings`, valeurs seules)
+  et blocs de texte (scripts, tests, documentation). Les collections OpenCollection (YAML),
+  gRPC et WebSocket restent strictement en lecture seule.
 
 
 ## Édition (requêtes, dossiers, collection)
@@ -176,16 +177,17 @@ du dossier (`folder.bru`) ou de la collection (`collection.bru`) sélectionné. 
 écrit sur disque avant `Ctrl+S`.
 
 Sélection de champ (URL, méthode, en-têtes, paramètres de requête et de
-chemin, corps, scripts pré/post, tests, documentation) :
+chemin, corps, variables, assertions, réglages, scripts pré/post, tests,
+documentation) :
 
 | Touche | Effet |
 |---|---|
 | `↑`/`k`, `↓`/`j` | champ précédent, suivant |
 | `Entrée` | modifier la valeur ; sur la méthode, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur un bloc de texte (script, test, doc), ouvre l'éditeur externe ; sur une ligne « + Ajouter », ajoute une entrée |
-| `Espace` | activer ou désactiver l'en-tête ou le paramètre |
+| `Espace` | activer ou désactiver l'en-tête, le paramètre, la variable ou l'assertion |
 | `a` | ajouter une entrée dans la section du champ (clé, puis valeur) |
-| `d` | supprimer l'en-tête ou le paramètre, sans confirmation |
-| `c` | renommer la clé de l'en-tête ou du paramètre |
+| `d` | supprimer l'en-tête, le paramètre, la variable ou l'assertion, sans confirmation |
+| `c` | renommer la clé de l'en-tête, du paramètre, de la variable ou de l'assertion |
 | `Ctrl+S` | enregistrer sur le disque |
 | `Échap` | fermer la session (confirmation si modifiée) |
 
@@ -208,7 +210,9 @@ Comme dans Bruno, les paramètres de requête et l'URL restent cohérents :
 modifier un paramètre reconstruit la chaîne de requête de l'URL à partir
 des paramètres activés, et modifier l'URL recalcule les paramètres activés
 (les paramètres désactivés restent à leur place). Une clé vide, contenant
-un espace ou `:`, ou commençant par `~` ou `"` est refusée ; dans un
+un espace ou `:`, ou commençant par `~` ou `"` est refusée (les clés
+d'assertion acceptent les espaces, ex. `res.status`) ; les réglages
+(`settings`) n'acceptent que la modification de valeur ; dans un
 paramètre de requête, `&`, `#` et le saut de ligne sont refusés (ainsi que
 `=` dans la clé).
 

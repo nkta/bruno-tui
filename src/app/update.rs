@@ -2543,12 +2543,13 @@ fn start_edit(model: &mut Model) {
         model.last_status = Some(StatusMessage::ReadOnlyCollection);
         return;
     }
-    let Some(root) = model.loaded().map(|c| &c.root) else {
+    let Some(collection) = model.loaded() else {
         return;
     };
+    let root = &collection.root;
     let (path, view) = if model.selected_collection {
         let path = std::path::PathBuf::from("collection.bru");
-        let Some(Ok(meta)) = model.loaded().and_then(|c| c.settings.as_ref()) else {
+        let Some(Ok(meta)) = collection.settings.as_ref() else {
             return;
         };
         (path, meta.to_request_view())
@@ -2671,7 +2672,15 @@ fn toggle_field(model: &mut Model) {
         EditableField::HeaderValue(index) => FieldEdit::HeaderEnabled { index, enabled },
         EditableField::QueryParamValue(index) => FieldEdit::QueryParamEnabled { index, enabled },
         EditableField::PathParamValue(index) => FieldEdit::PathParamEnabled { index, enabled },
-        EditableField::Method
+        EditableField::VarsPreRequestValue(index) => {
+            FieldEdit::VarsPreRequestEnabled { index, enabled }
+        }
+        EditableField::VarsPostResponseValue(index) => {
+            FieldEdit::VarsPostResponseEnabled { index, enabled }
+        }
+        EditableField::AssertValue(index) => FieldEdit::AssertEnabled { index, enabled },
+        EditableField::SettingsValue(_)
+        | EditableField::Method
         | EditableField::Url
         | EditableField::AddRow(_)
         | EditableField::BodyText
@@ -2810,6 +2819,9 @@ fn add_entry(model: &mut Model) {
     else {
         return;
     };
+    if section == EntrySection::Settings {
+        return;
+    }
     start_add(model, section);
 }
 
@@ -2825,6 +2837,9 @@ fn delete_entry(model: &mut Model) {
     else {
         return;
     };
+    if section == EntrySection::Settings {
+        return;
+    }
     try_commit(model, FieldEdit::RemoveEntry { section, index });
     scroll_edit_into_view(model);
 }
@@ -2842,6 +2857,9 @@ fn start_rename(model: &mut Model) {
     let Some((section, index)) = session.current_field().and_then(|field| field.entry()) else {
         return;
     };
+    if section == EntrySection::Settings {
+        return;
+    }
     let Some(key) = section_entries(&session.preview, section)
         .get(index)
         .map(|kv| kv.key.clone())
@@ -2968,6 +2986,14 @@ fn finish_add(model: &mut Model, section: EntrySection) {
             EntrySection::Headers => EditableField::HeaderValue(count.saturating_sub(1)),
             EntrySection::QueryParams => EditableField::QueryParamValue(count.saturating_sub(1)),
             EntrySection::PathParams => EditableField::PathParamValue(count.saturating_sub(1)),
+            EntrySection::VarsPreRequest => {
+                EditableField::VarsPreRequestValue(count.saturating_sub(1))
+            }
+            EntrySection::VarsPostResponse => {
+                EditableField::VarsPostResponseValue(count.saturating_sub(1))
+            }
+            EntrySection::Assert => EditableField::AssertValue(count.saturating_sub(1)),
+            EntrySection::Settings => EditableField::SettingsValue(count.saturating_sub(1)),
         };
         if let Some(position) = session.fields.iter().position(|f| *f == field) {
             session.cursor = position;
@@ -2983,6 +3009,14 @@ fn value_edit(field: EditableField, value: String) -> Option<FieldEdit> {
         EditableField::HeaderValue(index) => FieldEdit::HeaderValue { index, value },
         EditableField::QueryParamValue(index) => FieldEdit::QueryParamValue { index, value },
         EditableField::PathParamValue(index) => FieldEdit::PathParamValue { index, value },
+        EditableField::VarsPreRequestValue(index) => {
+            FieldEdit::VarsPreRequestValue { index, value }
+        }
+        EditableField::VarsPostResponseValue(index) => {
+            FieldEdit::VarsPostResponseValue { index, value }
+        }
+        EditableField::AssertValue(index) => FieldEdit::AssertValue { index, value },
+        EditableField::SettingsValue(index) => FieldEdit::SettingsValue { index, value },
         EditableField::BodyText => FieldEdit::BodyText(value),
         EditableField::ScriptPreRequest => FieldEdit::ScriptPreRequest(value),
         EditableField::ScriptPostResponse => FieldEdit::ScriptPostResponse(value),
@@ -9499,6 +9533,62 @@ mod tests {
         assert!(!session.preview.headers[1].enabled);
         assert!(!session.dirty);
         assert!(!session.has_unsaved());
+    }
+
+    #[test]
+    fn settings_refuses_structural_edits_and_accepts_value_edits() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        let source = "meta {\n  name: ping\n  type: http\n  seq: 7\n}\n\nget {\n  url: https://{{host}}/ping\n  body: none\n  auth: none\n}\n\nsettings {\n  encodeUrl: true\n}\n";
+        let ast = crate::collection::BruFile::parse(source.to_owned()).expect("AST");
+        let view = RequestView::from_ast(&ast).expect("vue");
+        if let CollectionState::Loaded(col) = &mut model.collection {
+            for node in &mut col.tree {
+                if let TreeNode::Request(req) = node
+                    && req.path == std::path::Path::new("simple-get.bru")
+                {
+                    req.ast = Some(ast.clone());
+                    req.view = view.clone();
+                }
+            }
+        }
+        let session_mut = model.editing.as_mut().expect("session");
+        session_mut.fields.push(EditableField::SettingsValue(0));
+        session_mut
+            .preview
+            .extra
+            .settings
+            .push(crate::collection::KeyValue {
+                key: "encodeUrl".into(),
+                value: "true".into(),
+                enabled: true,
+            });
+        go_to(&mut model, EditableField::SettingsValue(0));
+
+        // Toggle (Espace) est sans effet
+        update(&mut model, Message::ToggleField);
+        assert!(!session(&model).dirty);
+
+        // Delete ('d') est sans effet
+        update(&mut model, Message::Delete);
+        assert!(!session(&model).dirty);
+
+        // Rename ('c') est sans effet
+        update(&mut model, Message::Rename);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+
+        // Add ('a') est sans effet
+        update(&mut model, Message::Add);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+
+        // Mais Value edit (Enter) est autorisé !
+        update(&mut model, Message::Enter);
+        assert!(matches!(session(&model).state, EditState::Input(_)));
+        press(&mut model, InputKey::Backspace, 4);
+        type_input(&mut model, "false");
+        update(&mut model, Message::ValidateInput);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(session(&model).dirty);
+        assert_eq!(session(&model).preview.extra.settings[0].value, "false");
     }
 
     #[test]

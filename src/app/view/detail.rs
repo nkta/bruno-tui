@@ -186,10 +186,6 @@ fn field(label: &str, value: impl Into<String>) -> Line<'static> {
     ])
 }
 
-fn yes_no(value: bool) -> &'static str {
-    if value { "oui" } else { "non" }
-}
-
 /// Style d'une entrée désactivée : atténué comme [`theme::LABEL`], mais en
 /// italique en plus pour rester distinct du style de la clé qui précède
 /// (les deux seraient sinon indiscernables, `theme::LABEL` n'étant que
@@ -597,12 +593,14 @@ fn editable_entries(
     section: EntrySection,
 ) {
     if values.is_empty() && session.is_none() {
-        field_lines.push(FieldLine {
-            field: EditableField::AddRow(section),
-            line: lines.len(),
-            count: 1,
-            prefix_width: 2,
-        });
+        if section != EntrySection::Settings {
+            field_lines.push(FieldLine {
+                field: EditableField::AddRow(section),
+                line: lines.len(),
+                count: 1,
+                prefix_width: 2,
+            });
+        }
         lines.push(Line::raw("  aucun"));
         return;
     }
@@ -611,6 +609,10 @@ fn editable_entries(
             EntrySection::Headers => EditableField::HeaderValue(i),
             EntrySection::QueryParams => EditableField::QueryParamValue(i),
             EntrySection::PathParams => EditableField::PathParamValue(i),
+            EntrySection::VarsPreRequest => EditableField::VarsPreRequestValue(i),
+            EntrySection::VarsPostResponse => EditableField::VarsPostResponseValue(i),
+            EntrySection::Assert => EditableField::AssertValue(i),
+            EntrySection::Settings => EditableField::SettingsValue(i),
         };
         let hscroll = value_hscroll(session, &field);
         let renamed = input_for(session, |target| {
@@ -655,6 +657,9 @@ fn editable_entries(
     let Some(session) = session else {
         return;
     };
+    if section == EntrySection::Settings {
+        return;
+    }
     let field = EditableField::AddRow(section);
     let hscroll = value_hscroll(Some(session), &field);
     let new_key = input_for(
@@ -1037,8 +1042,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Variables pré-requête".to_owned(),
-                |lines, _| {
-                    entries(lines, view.vars_pre_request());
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        shown.vars_pre_request(),
+                        session,
+                        EntrySection::VarsPreRequest,
+                    );
                 },
             );
             boxed_section(
@@ -1046,8 +1057,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Variables post-réponse".to_owned(),
-                |lines, _| {
-                    entries(lines, view.vars_post_response());
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        shown.vars_post_response(),
+                        session,
+                        EntrySection::VarsPostResponse,
+                    );
                 },
             );
         }
@@ -1097,10 +1114,21 @@ pub fn request_text_and_fields(
             );
         }
         RequestTab::Assert => {
-            lines.push(field("Assertions", yes_no(view.has_assert)));
-            if !view.assertions().is_empty() {
-                entries(&mut lines, view.assertions());
-            }
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Assertions".to_owned(),
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        shown.assertions(),
+                        session,
+                        EntrySection::Assert,
+                    );
+                },
+            );
         }
         RequestTab::Tests => {
             boxed_section(
@@ -1142,8 +1170,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Settings".to_owned(),
-                |lines, _| {
-                    entries(lines, view.settings());
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        shown.settings(),
+                        session,
+                        EntrySection::Settings,
+                    );
                 },
             );
         }
@@ -1197,6 +1231,8 @@ pub fn folder_tab_is_empty(meta: &FileMeta, tab: RequestTab) -> bool {
         }
         RequestTab::Tests => meta.tests().is_none_or(|t| t.trim().is_empty()),
         RequestTab::Docs => meta.docs().is_none_or(|d| d.trim().is_empty()),
+        RequestTab::Assert => meta.assertions().is_empty(),
+        RequestTab::Settings => meta.settings().is_empty(),
         _ => true,
     }
 }
@@ -1358,6 +1394,24 @@ pub fn field_at_line(model: &Model, line: u16) -> Option<EditableField> {
         .into_iter()
         .find(|location| (location.line..location.line + location.count).contains(&line))
         .map(|location| location.field)
+}
+
+/// Position du curseur de texte pendant une saisie dans le détail du modèle.
+pub fn cursor_position_for_model(model: &Model) -> Option<(usize, usize)> {
+    let session = model.editing.as_ref()?;
+    let EditState::Input(input) = &session.state else {
+        return None;
+    };
+    let field = session.current_field()?;
+    let (_, field_lines, _) = detail_text_fields_boxes(model);
+    let location = field_lines.iter().find(|l| l.field == field)?;
+    let (line, _) = input.cursor_line_col();
+    let before = input.text_before_cursor_on_line();
+    let (visible, _) = skip_columns(&before, usize::from(session.hscroll));
+    Some((
+        location.line + line,
+        location.prefix_width + Line::raw(visible).width(),
+    ))
 }
 
 /// Position du curseur de texte pendant une saisie : ligne logique dans le
@@ -1879,17 +1933,10 @@ fn meta_tab_content(
                 &mut boxes,
                 "En-têtes".to_owned(),
                 |lines, field_lines| {
-                    if let Some(session) = session {
-                        editable_entries(
-                            lines,
-                            field_lines,
-                            &session.preview.headers,
-                            Some(session),
-                            EntrySection::Headers,
-                        );
-                    } else {
-                        entries(lines, meta.headers());
-                    }
+                    let headers = session
+                        .map(|s| s.preview.headers.as_slice())
+                        .unwrap_or_else(|| meta.headers());
+                    editable_entries(lines, field_lines, headers, session, EntrySection::Headers);
                 },
             );
         }
@@ -1919,8 +1966,17 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "Variables pré-requête".to_owned(),
-                |lines, _| {
-                    entries(lines, meta.vars_pre_request());
+                |lines, field_lines| {
+                    let vars_pre = session
+                        .map(|s| s.preview.vars_pre_request())
+                        .unwrap_or_else(|| meta.vars_pre_request());
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        vars_pre,
+                        session,
+                        EntrySection::VarsPreRequest,
+                    );
                 },
             );
             boxed_section(
@@ -1928,8 +1984,17 @@ fn meta_tab_content(
                 &mut field_lines,
                 &mut boxes,
                 "Variables post-réponse".to_owned(),
-                |lines, _| {
-                    entries(lines, meta.vars_post_response());
+                |lines, field_lines| {
+                    let vars_post = session
+                        .map(|s| s.preview.vars_post_response())
+                        .unwrap_or_else(|| meta.vars_post_response());
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        vars_post,
+                        session,
+                        EntrySection::VarsPostResponse,
+                    );
                 },
             );
         }
@@ -1961,6 +2026,46 @@ fn meta_tab_content(
                         script_post,
                         session,
                         EditableField::ScriptPostResponse,
+                    );
+                },
+            );
+        }
+        RequestTab::Assert => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Assertions".to_owned(),
+                |lines, field_lines| {
+                    let assertions = session
+                        .map(|s| s.preview.assertions())
+                        .unwrap_or_else(|| meta.assertions());
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        assertions,
+                        session,
+                        EntrySection::Assert,
+                    );
+                },
+            );
+        }
+        RequestTab::Settings => {
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Settings".to_owned(),
+                |lines, field_lines| {
+                    let settings = session
+                        .map(|s| s.preview.settings())
+                        .unwrap_or_else(|| meta.settings());
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        settings,
+                        session,
+                        EntrySection::Settings,
                     );
                 },
             );
@@ -2701,7 +2806,7 @@ mod tests {
             "1 test(\"ok\", function () {",
             "2   expect(res.getStatus()).to.equal(200);",
             "3 });",
-            "Assertions : oui",
+            "── Assertions",
             "res.status: eq 200",
             "Auth : bearer",
         ] {
@@ -3325,6 +3430,9 @@ auth:basic {
             EntrySection::Headers,
             EntrySection::QueryParams,
             EntrySection::PathParams,
+            EntrySection::VarsPreRequest,
+            EntrySection::VarsPostResponse,
+            EntrySection::Assert,
         ] {
             // Chaque section est dans son onglet.
             let tab = RequestTab::of_field(EditableField::AddRow(section)).expect("onglet");
@@ -3796,5 +3904,73 @@ auth:basic {
         let labels: Vec<&str> = bar.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(labels.contains(&"Console"));
         assert!(labels.contains(&"Timeline"));
+    }
+
+    #[test]
+    fn session_navigation_and_edits_for_assert_and_vars() {
+        use crate::app::message::{InputKey, Message};
+        use crate::app::update::update;
+
+        let mut model = loaded_model((100, 30));
+        session_on(&mut model, "scripted.bru");
+
+        // Trouver la position de AssertValue(0) dans la liste des champs
+        let assert_val0 = EditableField::AssertValue(0);
+        let assert_index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == assert_val0))
+            .expect("champ assert 0");
+
+        model.editing.as_mut().expect("session").cursor = assert_index;
+        assert_eq!(model.shown_request_tab(), RequestTab::Assert);
+
+        // Toggle avec Espace
+        update(&mut model, Message::ToggleField);
+        let text = plain(&detail_text(&model));
+        assert!(text.contains("res.status: eq 200 (désactivé)"), "{text}");
+
+        // Retoggle avec Espace
+        update(&mut model, Message::ToggleField);
+        let text = plain(&detail_text(&model));
+        assert!(text.contains("res.status: eq 200"), "{text}");
+        assert!(!text.contains("res.status: eq 200 (désactivé)"), "{text}");
+
+        // Aller sur AddRow(Assert)
+        let add_assert = EditableField::AddRow(EntrySection::Assert);
+        let add_index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == add_assert))
+            .expect("ligne add assert");
+        model.editing.as_mut().expect("session").cursor = add_index;
+        assert_eq!(model.shown_request_tab(), RequestTab::Assert);
+
+        // Saisir une nouvelle assertion avec espaces dans la clé : res.headers['content-type'] : isDefined
+        update(&mut model, Message::Enter);
+        for c in "res.headers['content-type']".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+        update(&mut model, Message::ValidateInput);
+        for c in "isDefined".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+        update(&mut model, Message::InputKey(InputKey::Enter));
+
+        let text = plain(&detail_text(&model));
+        assert!(
+            text.contains("res.headers['content-type']: isDefined"),
+            "{text}"
+        );
+
+        // Aller sur AddRow(VarsPreRequest)
+        let add_vars_pre = EditableField::AddRow(EntrySection::VarsPreRequest);
+        let add_vars_index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == add_vars_pre))
+            .expect("ligne add vars_pre");
+        model.editing.as_mut().expect("session").cursor = add_vars_index;
+        assert_eq!(model.shown_request_tab(), RequestTab::Vars);
     }
 }

@@ -1,0 +1,21 @@
+{
+  "url": "",
+  "headers": [
+    {
+      "name": "Authorization",
+      "value": "Bearer changed",
+      "enabled": true
+    }
+  ],
+  "params": [],
+  "vars_req": [
+    {
+      "name": "coll_var",
+      "value": "world",
+      "enabled": true
+    }
+  ],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {}
+}

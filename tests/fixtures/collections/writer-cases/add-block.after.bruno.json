@@ -7,5 +7,9 @@
       "enabled": true
     }
   ],
-  "params": []
+  "params": [],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {}
 }

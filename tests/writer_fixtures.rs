@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use bruno_tui::collection::{BruFile, BruLoader, CollectionLoader, RequestView, TreeNode};
+use bruno_tui::collection::{
+    BruFile, BruLoader, CollectionLoader, FileMeta, RequestView, TreeNode,
+};
 use bruno_tui::writer::{
     BruWriter, EditError, EntryProblem, EntrySection, EnvironmentVarEdit, FieldEdit, FileStamp,
     RequestWriter, WriteError, preview, write_environment,
@@ -514,7 +516,9 @@ fn remove(section: EntrySection, index: usize) -> FieldEdit {
 /// Modifications attendues pour chaque fixture d'ajout, de suppression ou
 /// de renommage, dont le résultat est versionné dans `<nom>.after.bru`.
 fn entry_cases() -> Vec<(&'static str, Vec<FieldEdit>)> {
-    use EntrySection::{Headers, PathParams, QueryParams};
+    use EntrySection::{
+        Assert, Headers, PathParams, QueryParams, VarsPostResponse, VarsPreRequest,
+    };
     vec![
         (
             "add-header",
@@ -566,6 +570,64 @@ fn entry_cases() -> Vec<(&'static str, Vec<FieldEdit>)> {
                 add(PathParams, "id", "1"),
             ],
         ),
+        (
+            "vars-ops",
+            vec![
+                FieldEdit::VarsPreRequestValue {
+                    index: 0,
+                    value: "updated_token".into(),
+                },
+                remove(VarsPreRequest, 1),
+                add(VarsPostResponse, "res_id", "res.body.id"),
+            ],
+        ),
+        (
+            "assert-ops",
+            vec![
+                FieldEdit::AssertValue {
+                    index: 0,
+                    value: "eq 201".into(),
+                },
+                FieldEdit::AssertEnabled {
+                    index: 1,
+                    enabled: false,
+                },
+                add(Assert, "res.headers['content-type']", "matches json"),
+            ],
+        ),
+        (
+            "settings-ops",
+            vec![
+                FieldEdit::SettingsValue {
+                    index: 0,
+                    value: "false".into(),
+                },
+                FieldEdit::SettingsValue {
+                    index: 1,
+                    value: "5000".into(),
+                },
+            ],
+        ),
+        (
+            "folder-ops",
+            vec![
+                FieldEdit::HeaderValue {
+                    index: 0,
+                    value: "v2".into(),
+                },
+                add(VarsPreRequest, "folder_var", "hello"),
+            ],
+        ),
+        (
+            "collection-ops",
+            vec![
+                FieldEdit::HeaderValue {
+                    index: 0,
+                    value: "Bearer changed".into(),
+                },
+                add(VarsPreRequest, "coll_var", "world"),
+            ],
+        ),
     ]
 }
 
@@ -596,11 +658,9 @@ fn entry_cases_match_after_fixtures_and_preview() {
         );
 
         let reloaded = BruFile::parse(String::from_utf8(written).expect("utf-8")).expect("AST");
-        assert_eq!(
-            previewed,
-            RequestView::from_ast(&reloaded).expect("vue"),
-            "{name}"
-        );
+        let reloaded_view = RequestView::from_ast(&reloaded)
+            .unwrap_or_else(|_| FileMeta::from_ast(reloaded.clone()).to_request_view());
+        assert_eq!(previewed, reloaded_view, "{name}");
 
         let _ = fs::remove_dir_all(&dir);
     }

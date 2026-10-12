@@ -16,18 +16,34 @@ pub enum EntrySection {
     Headers,
     QueryParams,
     PathParams,
+    VarsPreRequest,
+    VarsPostResponse,
+    Assert,
+    Settings,
 }
 
 impl EntrySection {
     /// Ordre d'écriture de Bruno après le bloc de méthode.
-    pub const ALL: [Self; 3] = [Self::QueryParams, Self::PathParams, Self::Headers];
+    pub const ALL: [Self; 7] = [
+        Self::QueryParams,
+        Self::PathParams,
+        Self::Headers,
+        Self::VarsPreRequest,
+        Self::VarsPostResponse,
+        Self::Assert,
+        Self::Settings,
+    ];
 
     /// Nom du bloc `.bru` de la section.
     pub fn block_name(self) -> &'static str {
         match self {
-            Self::Headers => "headers",
             Self::QueryParams => "params:query",
             Self::PathParams => "params:path",
+            Self::Headers => "headers",
+            Self::VarsPreRequest => "vars:pre-request",
+            Self::VarsPostResponse => "vars:post-response",
+            Self::Assert => "assert",
+            Self::Settings => "settings",
         }
     }
 
@@ -37,6 +53,10 @@ impl EntrySection {
             Self::QueryParams => 0,
             Self::PathParams => 1,
             Self::Headers => 2,
+            Self::VarsPreRequest => 3,
+            Self::VarsPostResponse => 4,
+            Self::Assert => 5,
+            Self::Settings => 6,
         }
     }
 }
@@ -45,9 +65,9 @@ impl EntrySection {
 ///
 /// Les modifications d'une liste s'appliquent dans l'ordre : `index`
 /// désigne la position dans `RequestView.headers` / `.query_params` /
-/// `.path_params` telle qu'elle résulte des modifications précédentes de la
-/// même liste. Sans ajout ni suppression, il coïncide avec l'indice exposé
-/// par `bru-parser`. `Url`, `Method` et `BodyText` sont singletons.
+/// `.path_params` / etc. telle qu'elle résulte des modifications précédentes
+/// de la même liste. Sans ajout ni suppression, il coïncide avec l'indice
+/// exposé par `bru-parser`. `Url`, `Method` et `BodyText` sont singletons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldEdit {
     Url(String),
@@ -77,6 +97,34 @@ pub enum FieldEdit {
     PathParamEnabled {
         index: usize,
         enabled: bool,
+    },
+    VarsPreRequestValue {
+        index: usize,
+        value: String,
+    },
+    VarsPreRequestEnabled {
+        index: usize,
+        enabled: bool,
+    },
+    VarsPostResponseValue {
+        index: usize,
+        value: String,
+    },
+    VarsPostResponseEnabled {
+        index: usize,
+        enabled: bool,
+    },
+    AssertValue {
+        index: usize,
+        value: String,
+    },
+    AssertEnabled {
+        index: usize,
+        enabled: bool,
+    },
+    SettingsValue {
+        index: usize,
+        value: String,
     },
     BodyText(String),
     /// Contenu du bloc script:pre-request ; vide pour retirer le bloc.
@@ -296,5 +344,38 @@ mod tests {
     fn no_edits_produces_no_replacements() {
         let file = parse("get {\n  url: http://a\n}\n");
         assert!(resolve(&file, &[]).expect("résolu").is_empty());
+    }
+
+    #[test]
+    fn resolves_vars_assert_settings() {
+        let source = "get {\n  url: http://a\n}\n\nvars:pre-request {\n  v1: 1\n}\n\nvars:post-response {\n  v2: 2\n}\n\nassert {\n  res.status: 200\n}\n\nsettings {\n  encodeUrl: true\n}\n";
+        let file = parse(source);
+        let replacements = resolve(
+            &file,
+            &[
+                FieldEdit::VarsPreRequestValue {
+                    index: 0,
+                    value: "10".into(),
+                },
+                FieldEdit::VarsPostResponseValue {
+                    index: 0,
+                    value: "20".into(),
+                },
+                FieldEdit::AssertValue {
+                    index: 0,
+                    value: "eq 200".into(),
+                },
+                FieldEdit::SettingsValue {
+                    index: 0,
+                    value: "false".into(),
+                },
+            ],
+        )
+        .expect("résolu");
+        assert_eq!(replacements.len(), 4);
+        assert_eq!(replacements[0].bytes, "  v1: 10\n");
+        assert_eq!(replacements[1].bytes, "  v2: 20\n");
+        assert_eq!(replacements[2].bytes, "  res.status: eq 200\n");
+        assert_eq!(replacements[3].bytes, "  encodeUrl: false\n");
     }
 }

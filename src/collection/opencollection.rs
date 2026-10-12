@@ -807,6 +807,8 @@ fn defaults_meta(
             script_post_response: found.post_response,
             tests: found.tests,
             docs,
+            settings: Vec::new(),
+            assertions: Vec::new(),
         }),
     }
 }

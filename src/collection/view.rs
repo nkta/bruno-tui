@@ -493,6 +493,11 @@ impl RequestView {
             }),
         }
     }
+
+    /// Vrai si cette vue représente un fichier de dossier ou collection (sans méthode HTTP).
+    pub fn is_file_meta(&self) -> bool {
+        self.method.is_empty()
+    }
 }
 
 /// Contenu détaillé des onglets de `folder.bru` ou `collection.bru`,
@@ -509,6 +514,8 @@ pub struct FileMetaContent {
     pub script_post_response: Option<String>,
     pub tests: Option<String>,
     pub docs: Option<String>,
+    pub settings: Vec<KeyValue>,
+    pub assertions: Vec<KeyValue>,
 }
 
 /// Méta-données et contenu de `collection.bru` ou `folder.bru`.
@@ -548,6 +555,14 @@ impl FileMeta {
 
     pub fn vars_post_response(&self) -> &[KeyValue] {
         &self.content.vars_post_response
+    }
+
+    pub fn settings(&self) -> &[KeyValue] {
+        &self.content.settings
+    }
+
+    pub fn assertions(&self) -> &[KeyValue] {
+        &self.content.assertions
     }
 
     pub fn script_pre_request(&self) -> Option<&str> {
@@ -598,6 +613,8 @@ impl FileMeta {
         let script_post_response = file.text("script:post-response");
         let tests = file.text("tests");
         let docs = file.text("docs");
+        let settings = key_values(&file, "settings");
+        let assertions = key_values(&file, "assert");
 
         let has_auth = auth
             .as_ref()
@@ -629,6 +646,8 @@ impl FileMeta {
                 script_post_response,
                 tests,
                 docs,
+                settings,
+                assertions,
             }),
         }
     }
@@ -651,7 +670,7 @@ impl FileMeta {
             has_pre_request_script: self.has_pre_request_script,
             has_post_response_script: self.has_post_response_script,
             has_tests: self.has_tests,
-            has_assert: false,
+            has_assert: !self.content.assertions.is_empty(),
             extra: Box::new(ExtraTabs {
                 vars_pre_request: self.content.vars_pre_request.clone(),
                 vars_post_response: self.content.vars_post_response.clone(),
@@ -659,8 +678,8 @@ impl FileMeta {
                 script_post_response: self.content.script_post_response.clone(),
                 tests: self.content.tests.clone(),
                 docs: self.content.docs.clone(),
-                settings: Vec::new(),
-                assertions: Vec::new(),
+                settings: self.content.settings.clone(),
+                assertions: self.content.assertions.clone(),
                 grpc: None,
                 auth_params: self.content.auth_params.clone(),
             }),
