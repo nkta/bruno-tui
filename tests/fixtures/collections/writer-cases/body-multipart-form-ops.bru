@@ -1,0 +1,15 @@
+meta {
+  name: body-multipart-form-ops
+  type: http
+  seq: 1
+}
+
+post {
+  url: https://{{host}}/upload
+  body: multipartForm
+}
+
+body:multipart-form {
+  description: initial note
+  avatar: @file(profile.jpg) @contentType(image/jpeg)
+}

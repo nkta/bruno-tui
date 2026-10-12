@@ -42,13 +42,10 @@ pub enum TextCapture {
     SecretName,
     /// Valeur d'une variable secrète, masquée.
     SecretValue,
-    /// Sélecteur de méthode ouvert (`add-method-editing`) : seules la
-    /// navigation, la validation et l'annulation ont un sens.
-    MethodPicker,
-    /// Sélecteur de mode d'authentification ouvert (`feat-edit-auth`).
-    AuthModePicker,
-    /// Sélecteur d'emplacement d'API key (`feat-edit-auth`).
-    ApiKeyPlacementPicker,
+    /// Sélecteur ouvert (méthode, mode de corps, mode d'authentification,
+    /// placement d'API key) : seules la navigation, la validation et
+    /// l'annulation ont un sens.
+    Picker,
     /// Recherche globale par nom, méthode, chemin et URL (`Ctrl+K`).
     GlobalSearch,
     /// Saisie du chemin pour l'exportation du corps de réponse.
@@ -500,9 +497,7 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::Filter => filter_capture_message(key),
         TextCapture::TreeFilter => tree_filter_capture_message(key),
         TextCapture::SecretName | TextCapture::SecretValue => secret_capture_message(key),
-        TextCapture::MethodPicker
-        | TextCapture::AuthModePicker
-        | TextCapture::ApiKeyPlacementPicker => method_picker_capture_message(key),
+        TextCapture::Picker => picker_capture_message(key),
         TextCapture::GlobalSearch => global_search_capture_message(key),
         TextCapture::ExportPath => export_path_capture_message(key),
         TextCapture::PlaintextSecretPrompt => plaintext_secret_prompt_capture_message(key),
@@ -558,10 +553,10 @@ fn global_search_capture_message(key: KeyEvent) -> Option<Message> {
     }
 }
 
-/// Capture pendant le sélecteur de méthode : navigation, validation par
+/// Capture pendant un sélecteur : navigation, validation par
 /// `Entrée`, annulation par `Échap` ; le reste est ignoré. `Ctrl+C` est
 /// traité en amont par `key_message` (`add-method-editing`).
-fn method_picker_capture_message(key: KeyEvent) -> Option<Message> {
+fn picker_capture_message(key: KeyEvent) -> Option<Message> {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => Some(Message::Up),
         KeyCode::Down | KeyCode::Char('j') => Some(Message::Down),
@@ -1034,7 +1029,7 @@ mod tests {
             Some(TextCapture::TreeFilter),
             Some(TextCapture::SecretName),
             Some(TextCapture::SecretValue),
-            Some(TextCapture::MethodPicker),
+            Some(TextCapture::Picker),
         ] {
             let event = key(KeyCode::Char('e'), KeyModifiers::CONTROL);
             assert!(

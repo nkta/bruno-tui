@@ -166,7 +166,14 @@ impl RequestTab {
             EditableField::SettingsValue(_) | EditableField::AddRow(EntrySection::Settings) => {
                 Some(RequestTab::Settings)
             }
-            EditableField::BodyText => Some(RequestTab::Body),
+            EditableField::BodyMode
+            | EditableField::BodyText
+            | EditableField::GraphqlVars
+            | EditableField::FormUrlEncodedValue(_)
+            | EditableField::MultipartFormValue(_)
+            | EditableField::AddRow(EntrySection::FormUrlEncoded | EntrySection::MultipartForm) => {
+                Some(RequestTab::Body)
+            }
             EditableField::ScriptPreRequest | EditableField::ScriptPostResponse => {
                 Some(RequestTab::Script)
             }
@@ -804,10 +811,7 @@ impl EditSession {
     pub fn has_unsaved(&self) -> bool {
         self.dirty
             || match &self.state {
-                EditState::FieldSelect
-                | EditState::MethodPicker { .. }
-                | EditState::AuthModePicker { .. }
-                | EditState::ApiKeyPlacementPicker { .. } => false,
+                EditState::FieldSelect | EditState::Picker { .. } => false,
                 EditState::PlaintextSecretPrompt { .. } => true,
                 EditState::Input(input) => {
                     input.is_modified() || matches!(self.target, InputTarget::NewValue { .. })
@@ -1016,24 +1020,17 @@ impl EnvironmentEditSession {
     }
 }
 
-/// État d'une session : choix du champ, saisie de sa valeur, ou sélecteur
-/// de méthode ouvert (`add-method-editing`).
+/// État d'une session : choix du champ, saisie de sa valeur, sélecteur
+/// ouvert (méthode, mode de corps, mode d'authentification, placement
+/// d'API key) ou avertissement de secret en clair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditState {
     FieldSelect,
     Input(TextInput),
-    /// Sélecteur de méthode ouvert, `selected` est l'indice présélectionné
-    /// dans `crate::collection::ast::METHODS`.
-    MethodPicker {
-        selected: usize,
-    },
-    /// Sélecteur de mode d'authentification ouvert (`feat-edit-auth`).
-    AuthModePicker {
-        selected: usize,
-        modes: Vec<&'static str>,
-    },
-    /// Sélecteur d'emplacement d'API key (`feat-edit-auth`).
-    ApiKeyPlacementPicker {
+    /// Sélecteur ouvert : `selected` est l'indice présélectionné dans
+    /// `kind.options()`.
+    Picker {
+        kind: PickerKind,
         selected: usize,
     },
     /// Avertissement de secret en clair dans un fichier .bru (§ 5 spec).
@@ -1045,7 +1042,46 @@ pub enum EditState {
     },
 }
 
-/// Options de placement possibles pour l'authentification `apikey` dans Bruno.
+/// Liste proposée par un sélecteur de la session d'édition. Tous les
+/// sélecteurs partagent la même mécanique : `↑↓` choisir, `Entrée`
+/// valider, `Échap` ou un clic ailleurs annuler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerKind {
+    /// Méthode HTTP (`crate::collection::ast::METHODS`).
+    Method,
+    /// Mode du corps (`crate::writer::BODY_MODES`).
+    BodyMode,
+    /// Mode d'authentification d'une requête ou d'un dossier.
+    AuthMode,
+    /// Mode d'authentification de la collection (sans `inherit`).
+    CollectionAuthMode,
+    /// Placement de l'API key (`APIKEY_PLACEMENTS`).
+    ApiKeyPlacement,
+}
+
+impl PickerKind {
+    /// Choix proposés, dans l'ordre d'affichage.
+    pub fn options(self) -> &'static [&'static str] {
+        match self {
+            Self::Method => &crate::collection::ast::METHODS,
+            Self::BodyMode => &crate::writer::BODY_MODES,
+            Self::AuthMode => &AUTH_MODES,
+            Self::CollectionAuthMode => &COLLECTION_AUTH_MODES,
+            Self::ApiKeyPlacement => &APIKEY_PLACEMENTS,
+        }
+    }
+}
+
+/// Modes d'authentification proposés pour une requête ou un dossier.
+pub const AUTH_MODES: [&str; 9] = [
+    "none", "inherit", "basic", "bearer", "digest", "ntlm", "apikey", "awsv4", "wsse",
+];
+
+/// Modes d'authentification proposés pour la collection : rien à hériter.
+pub const COLLECTION_AUTH_MODES: [&str; 8] = [
+    "none", "basic", "bearer", "digest", "ntlm", "apikey", "awsv4", "wsse",
+];
+
 pub const APIKEY_PLACEMENTS: [&str; 2] = ["header", "queryparams"];
 
 /// Ce que produit la validation de la saisie en cours.
@@ -1087,7 +1123,13 @@ pub enum EditableField {
     SettingsValue(usize),
     /// Ligne « + Ajouter » d'une section.
     AddRow(EntrySection),
+    /// Mode du corps de la requête HTTP (`docs/edition-phase2.md` § 6).
+    BodyMode,
     BodyText,
+    /// Variables GraphQL `body:graphql:vars`.
+    GraphqlVars,
+    FormUrlEncodedValue(usize),
+    MultipartFormValue(usize),
     ScriptPreRequest,
     ScriptPostResponse,
     Tests,
@@ -1141,17 +1183,42 @@ impl EditableField {
         for index in 0..view.extra.settings.len() {
             fields.push(Self::SettingsValue(index));
         }
-        if let Some(body) = &view.body
-            && matches!(
-                body.kind,
-                BodyKind::Json
-                    | BodyKind::Text
-                    | BodyKind::Xml
-                    | BodyKind::Sparql
-                    | BodyKind::Graphql
-            )
-        {
-            fields.push(Self::BodyText);
+        if !view.is_file_meta() {
+            let is_graphql = view.kind.as_deref() == Some("graphql");
+            if !is_graphql {
+                fields.push(Self::BodyMode);
+            }
+            if let Some(body) = &view.body {
+                match body.kind {
+                    BodyKind::Json | BodyKind::Text | BodyKind::Xml | BodyKind::Sparql => {
+                        fields.push(Self::BodyText);
+                    }
+                    BodyKind::Graphql => {
+                        fields.push(Self::BodyText);
+                        fields.push(Self::GraphqlVars);
+                    }
+                    BodyKind::FormUrlEncoded => {
+                        if let BodyContent::Entries(entries) = &body.content {
+                            for index in 0..entries.len() {
+                                fields.push(Self::FormUrlEncodedValue(index));
+                            }
+                        }
+                        fields.push(Self::AddRow(EntrySection::FormUrlEncoded));
+                    }
+                    BodyKind::MultipartForm => {
+                        if let BodyContent::Entries(entries) = &body.content {
+                            for index in 0..entries.len() {
+                                fields.push(Self::MultipartFormValue(index));
+                            }
+                        }
+                        fields.push(Self::AddRow(EntrySection::MultipartForm));
+                    }
+                    BodyKind::File | BodyKind::Other(_) => {}
+                }
+            } else if is_graphql {
+                fields.push(Self::BodyText);
+                fields.push(Self::GraphqlVars);
+            }
         }
         fields.push(Self::ScriptPreRequest);
         fields.push(Self::ScriptPostResponse);
@@ -1170,12 +1237,16 @@ impl EditableField {
             Self::VarsPostResponseValue(index) => Some((EntrySection::VarsPostResponse, *index)),
             Self::AssertValue(index) => Some((EntrySection::Assert, *index)),
             Self::SettingsValue(index) => Some((EntrySection::Settings, *index)),
+            Self::FormUrlEncodedValue(index) => Some((EntrySection::FormUrlEncoded, *index)),
+            Self::MultipartFormValue(index) => Some((EntrySection::MultipartForm, *index)),
             Self::Method
             | Self::Url
             | Self::AuthMode
             | Self::AuthParamValue(_)
+            | Self::BodyMode
             | Self::AddRow(_)
             | Self::BodyText
+            | Self::GraphqlVars
             | Self::ScriptPreRequest
             | Self::ScriptPostResponse
             | Self::Tests
@@ -1236,7 +1307,29 @@ impl EditableField {
                 view.extra.settings.get(*index).map_or("", |s| &s.key)
             ),
             Self::AddRow(section) => add_row_label(*section).to_owned(),
+            Self::BodyMode => "Mode du corps".to_owned(),
             Self::BodyText => "Corps".to_owned(),
+            Self::GraphqlVars => "Variables GraphQL".to_owned(),
+            Self::FormUrlEncodedValue(index) => format!(
+                "Champ {}",
+                view.body
+                    .as_ref()
+                    .and_then(|b| match &b.content {
+                        BodyContent::Entries(e) => e.get(*index).map(|kv| kv.key.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("")
+            ),
+            Self::MultipartFormValue(index) => format!(
+                "Champ {}",
+                view.body
+                    .as_ref()
+                    .and_then(|b| match &b.content {
+                        BodyContent::Entries(e) => e.get(*index).map(|kv| kv.key.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("")
+            ),
             Self::ScriptPreRequest => "Script pré-requête".to_owned(),
             Self::ScriptPostResponse => "Script post-réponse".to_owned(),
             Self::Tests => "Tests".to_owned(),
@@ -1255,6 +1348,7 @@ pub fn add_row_label(section: EntrySection) -> &'static str {
         EntrySection::VarsPostResponse => "+ Ajouter une variable post-response",
         EntrySection::Assert => "+ Ajouter une assertion",
         EntrySection::Settings => "+ Ajouter un paramètre",
+        EntrySection::FormUrlEncoded | EntrySection::MultipartForm => "+ Ajouter un champ",
     }
 }
 
@@ -1268,6 +1362,8 @@ pub fn section_label(section: EntrySection) -> &'static str {
         EntrySection::VarsPostResponse => "Variables post-response",
         EntrySection::Assert => "Assertions",
         EntrySection::Settings => "Paramètres",
+        EntrySection::FormUrlEncoded => "Formulaire URL-encoded",
+        EntrySection::MultipartForm => "Formulaire Multipart",
     }
 }
 
@@ -1284,6 +1380,13 @@ pub fn section_entries(
         EntrySection::VarsPostResponse => &view.extra.vars_post_response,
         EntrySection::Assert => &view.extra.assertions,
         EntrySection::Settings => &view.extra.settings,
+        EntrySection::FormUrlEncoded | EntrySection::MultipartForm => match &view.body {
+            Some(body) => match &body.content {
+                crate::collection::BodyContent::Entries(entries) => entries.as_slice(),
+                _ => &[],
+            },
+            None => &[],
+        },
     }
 }
 
@@ -1358,6 +1461,7 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
         EditableField::Method => &view.method,
         EditableField::Url => &view.url,
         EditableField::AddRow(_) => "",
+        EditableField::BodyMode => view.body_mode(),
         EditableField::BodyText => match &view.body {
             Some(body) => match &body.content {
                 BodyContent::Text(text) => text.as_str(),
@@ -1365,6 +1469,7 @@ pub fn field_value_committed<'a>(session: &'a EditSession, field: &EditableField
             },
             None => "",
         },
+        EditableField::GraphqlVars => view.graphql_vars().unwrap_or(""),
         EditableField::ScriptPreRequest => view.script_pre_request().unwrap_or(""),
         EditableField::ScriptPostResponse => view.script_post_response().unwrap_or(""),
         EditableField::Tests => view.tests().unwrap_or(""),
@@ -2265,11 +2370,7 @@ impl Model {
         }
         if let Some(session) = &self.editing {
             match session.state {
-                EditState::MethodPicker { .. } => return Some(TextCapture::MethodPicker),
-                EditState::AuthModePicker { .. } => return Some(TextCapture::AuthModePicker),
-                EditState::ApiKeyPlacementPicker { .. } => {
-                    return Some(TextCapture::ApiKeyPlacementPicker);
-                }
+                EditState::Picker { .. } => return Some(TextCapture::Picker),
                 EditState::PlaintextSecretPrompt { .. } => {
                     return Some(TextCapture::PlaintextSecretPrompt);
                 }
@@ -2748,6 +2849,7 @@ mod tests {
                 EditableField::AddRow(VarsPreRequest),
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),
+                EditableField::BodyMode,
                 EditableField::BodyText,
                 EditableField::ScriptPreRequest,
                 EditableField::ScriptPostResponse,
@@ -2756,7 +2858,7 @@ mod tests {
             ]
         );
 
-        // corps formUrlEncoded -> corps exclu, blocs texte inclus
+        // corps formUrlEncoded -> sélecteur de mode + AddRow(FormUrlEncoded), blocs texte inclus
         let fields_form = EditableField::list_for(&make_view(Some(BodyKind::FormUrlEncoded), 0));
         assert_eq!(
             fields_form,
@@ -2770,6 +2872,8 @@ mod tests {
                 EditableField::AddRow(VarsPreRequest),
                 EditableField::AddRow(VarsPostResponse),
                 EditableField::AddRow(Assert),
+                EditableField::BodyMode,
+                EditableField::AddRow(crate::writer::EntrySection::FormUrlEncoded),
                 EditableField::ScriptPreRequest,
                 EditableField::ScriptPostResponse,
                 EditableField::Tests,

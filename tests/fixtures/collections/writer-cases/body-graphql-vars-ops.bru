@@ -1,0 +1,19 @@
+meta {
+  name: body-graphql-vars-ops
+  type: graphql
+  seq: 1
+}
+
+post {
+  url: https://{{host}}/graphql
+  body: graphql
+}
+
+body:graphql {
+  query GetUser {
+    user {
+      id
+      name
+    }
+  }
+}

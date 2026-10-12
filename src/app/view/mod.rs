@@ -26,11 +26,12 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::model::{
-    CampaignView, CollectionState, EditState, Focus, Model, PendingConfirm, RunFailure,
-    StatusMessage,
+    CampaignView, CollectionState, EditState, Focus, Model, PendingConfirm, PickerKind, RunFailure,
+    StatusMessage, section_entries,
 };
 use super::update::{active_tree_filter_pattern, is_tree_filtered};
 use crate::collection::TreeNode;
+use crate::writer::EntrySection;
 
 /// Largeur minimale du terminal : exactement la somme des planchers de
 /// l'arbre, du détail et de la réponse (`MIN_TREE_WIDTH +
@@ -857,6 +858,15 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
                 Some(EditableField::SettingsValue(_)) => {
                     "↑↓ champ  Entrée modifier  Ctrl+S enregistrer  Échap fermer"
                 }
+                // Les entrées `@file(...)` de multipart sont en lecture seule :
+                // seules la bascule d'activation et la suppression sont permises.
+                Some(EditableField::MultipartFormValue(index))
+                    if section_entries(&session.preview, EntrySection::MultipartForm)
+                        .get(index)
+                        .is_some_and(|kv| kv.value.trim_start().starts_with("@file(")) =>
+                {
+                    "↑↓ champ  Espace activer  d supprimer  Ctrl+S enregistrer  Échap fermer"
+                }
                 Some(f) if f.entry().is_some() => {
                     "↑↓ champ  Entrée modifier  Espace activer  a ajouter  d supprimer  c renommer  Ctrl+S enregistrer  Échap fermer"
                 }
@@ -882,24 +892,25 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
             };
             format!("Saisie · {label}{unsaved} — {keys}")
         }
-        EditState::MethodPicker { .. } => {
-            format!("Méthode · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler")
-        }
-        EditState::AuthModePicker { .. } => {
-            format!(
-                "Mode d'auth · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler"
-            )
-        }
-        EditState::ApiKeyPlacementPicker { .. } => {
-            format!(
-                "Emplacement · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler"
-            )
+        EditState::Picker { kind, .. } => {
+            let title = picker_title(*kind);
+            format!("{title} · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler")
         }
         EditState::PlaintextSecretPrompt { var_name, .. } => {
             format!(
                 "Secret en clair — Entrée remplacer par {{{{{var_name}}}}}  g garder  Échap revenir"
             )
         }
+    }
+}
+
+/// Titre de la barre d'aide pendant un sélecteur.
+fn picker_title(kind: PickerKind) -> &'static str {
+    match kind {
+        PickerKind::Method => "Méthode",
+        PickerKind::BodyMode => "Mode du corps",
+        PickerKind::AuthMode | PickerKind::CollectionAuthMode => "Mode d'auth",
+        PickerKind::ApiKeyPlacement => "Emplacement",
     }
 }
 

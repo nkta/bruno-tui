@@ -4,8 +4,8 @@ use ratatui::text::Line;
 
 use crate::app::message::InputKey;
 use crate::app::model::{
-    EditSession, EditState, EditableField, Focus, InputTarget, Model, PendingConfirm, SavedEdit,
-    StatusMessage, field_enabled, field_value, field_value_committed, section_entries,
+    EditSession, EditState, EditableField, Focus, InputTarget, Model, PendingConfirm, PickerKind,
+    SavedEdit, StatusMessage, field_enabled, field_value, field_value_committed, section_entries,
 };
 use crate::app::text_input::TextInput;
 use crate::app::update::Command;
@@ -74,92 +74,62 @@ pub(crate) fn enter_in_detail(model: &mut Model) -> Command {
             Command::None
         }
         Some(session) if session.state == EditState::FieldSelect => begin_input(model),
-        Some(session) if matches!(session.state, EditState::MethodPicker { .. }) => {
-            confirm_method_picker(model);
-            Command::None
-        }
-        Some(session) if matches!(session.state, EditState::AuthModePicker { .. }) => {
-            confirm_auth_mode_picker(model);
-            Command::None
-        }
-        Some(session) if matches!(session.state, EditState::ApiKeyPlacementPicker { .. }) => {
-            confirm_api_key_placement_picker(model);
+        Some(session) if matches!(session.state, EditState::Picker { .. }) => {
+            confirm_picker(model);
             Command::None
         }
         Some(_) => Command::None,
     }
 }
 
-/// Déplace la présélection du sélecteur de méthode, bornée aux
-/// extrémités de `ast::METHODS` (`add-method-editing`).
-pub(crate) fn move_method_picker(model: &mut Model, delta: i8) {
+/// Ouvre le sélecteur `kind`, la valeur courante du champ présélectionnée.
+pub(crate) fn open_picker(model: &mut Model, kind: PickerKind) {
     let Some(session) = &mut model.editing else {
         return;
     };
-    let EditState::MethodPicker { selected } = &mut session.state else {
-        return;
-    };
-    let count = crate::collection::ast::METHODS.len();
-    if delta < 0 {
-        *selected = selected.saturating_sub(1);
-    } else if delta > 0 {
-        *selected = (*selected + 1).min(count - 1);
-    }
-}
-
-/// Valide la présélection du sélecteur de méthode : applique le
-/// changement si elle diffère de la méthode courante, puis referme le
-/// sélecteur vers l'état Sélection de champ (`add-method-editing`).
-pub(crate) fn confirm_method_picker(model: &mut Model) {
-    let Some(session) = &model.editing else {
-        return;
-    };
-    let EditState::MethodPicker { selected } = session.state else {
-        return;
-    };
-    let Some(&method) = crate::collection::ast::METHODS.get(selected) else {
-        return;
-    };
-    if !method.eq_ignore_ascii_case(&session.preview.method) {
-        try_commit(model, FieldEdit::Method(method.to_owned()));
-    }
-    close_input(model);
-}
-
-/// Ouvre le sélecteur de mode d'authentification (`feat-edit-auth`).
-pub(crate) fn open_auth_mode_picker(model: &mut Model) {
-    let is_collection = model.selected_collection;
-    let modes = if is_collection {
-        vec![
-            "none", "basic", "bearer", "digest", "ntlm", "apikey", "awsv4", "wsse",
-        ]
-    } else {
-        vec![
-            "none", "inherit", "basic", "bearer", "digest", "ntlm", "apikey", "awsv4", "wsse",
-        ]
-    };
-    let Some(session) = &mut model.editing else {
-        return;
-    };
-    let current = session.preview.auth.as_ref().map_or("none", |m| m.as_str());
-    let selected = modes
+    let current = picker_current(session, kind);
+    let selected = kind
+        .options()
         .iter()
-        .position(|&candidate| current.eq_ignore_ascii_case(candidate))
+        .position(|candidate| current.eq_ignore_ascii_case(candidate))
         .unwrap_or(0);
-    session.state = EditState::AuthModePicker { selected, modes };
+    session.state = EditState::Picker { kind, selected };
     model.last_status = None;
     scroll_edit_into_view(model);
 }
 
-/// Déplace la présélection du sélecteur de mode d'authentification.
-pub(crate) fn move_auth_mode_picker(model: &mut Model, delta: i8) {
+/// Valeur courante du champ que pilote le sélecteur `kind`.
+fn picker_current(session: &EditSession, kind: PickerKind) -> String {
+    match kind {
+        PickerKind::Method => session.preview.method.clone(),
+        PickerKind::BodyMode => session.preview.body_mode().to_owned(),
+        PickerKind::AuthMode | PickerKind::CollectionAuthMode => session
+            .preview
+            .auth
+            .as_ref()
+            .map_or("none", |mode| mode.as_str())
+            .to_owned(),
+        PickerKind::ApiKeyPlacement => match session.current_field() {
+            Some(EditableField::AuthParamValue(index)) => session
+                .preview
+                .auth_params()
+                .get(index)
+                .map_or_else(String::new, |kv| kv.value.clone()),
+            _ => String::new(),
+        },
+    }
+}
+
+/// Déplace la présélection du sélecteur ouvert, bornée aux extrémités de
+/// ses choix.
+pub(crate) fn move_picker(model: &mut Model, delta: i8) {
     let Some(session) = &mut model.editing else {
         return;
     };
-    let EditState::AuthModePicker { selected, modes } = &mut session.state else {
+    let EditState::Picker { kind, selected } = &mut session.state else {
         return;
     };
-    let count = modes.len();
+    let count = kind.options().len();
     if delta < 0 {
         *selected = selected.saturating_sub(1);
     } else if delta > 0 {
@@ -167,85 +137,39 @@ pub(crate) fn move_auth_mode_picker(model: &mut Model, delta: i8) {
     }
 }
 
-/// Valide la présélection du sélecteur de mode d'authentification.
-pub(crate) fn confirm_auth_mode_picker(model: &mut Model) {
+/// Valide la présélection du sélecteur ouvert : applique le changement
+/// s'il diffère de la valeur courante, puis referme le sélecteur vers
+/// l'état Sélection de champ.
+pub(crate) fn confirm_picker(model: &mut Model) {
     let Some(session) = &model.editing else {
         return;
     };
-    let EditState::AuthModePicker { selected, modes } = &session.state else {
+    let EditState::Picker { kind, selected } = session.state else {
         return;
     };
-    let Some(&mode) = modes.get(*selected) else {
+    let Some(&choice) = kind.options().get(selected) else {
         return;
     };
-    let current = session.preview.auth.as_ref().map_or("none", |m| m.as_str());
-    if !mode.eq_ignore_ascii_case(current) {
-        try_commit(model, FieldEdit::AuthMode(mode.to_owned()));
-    }
-    close_input(model);
-}
-
-/// Ouvre le sélecteur d'emplacement de la clé API (`feat-edit-auth`).
-pub(crate) fn open_api_key_placement_picker(model: &mut Model, index: usize) {
-    let Some(session) = &mut model.editing else {
-        return;
-    };
-    let current = session
-        .preview
-        .auth_params()
-        .get(index)
-        .map_or("", |kv| kv.value.as_str());
-    let selected = if current.eq_ignore_ascii_case("queryparams") {
-        1
-    } else {
-        0
-    };
-    session.state = EditState::ApiKeyPlacementPicker { selected };
-    model.last_status = None;
-    scroll_edit_into_view(model);
-}
-
-/// Déplace la présélection du sélecteur d'emplacement de la clé API.
-pub(crate) fn move_api_key_placement_picker(model: &mut Model, delta: i8) {
-    let Some(session) = &mut model.editing else {
-        return;
-    };
-    let EditState::ApiKeyPlacementPicker { selected } = &mut session.state else {
-        return;
-    };
-    if delta < 0 {
-        *selected = selected.saturating_sub(1);
-    } else if delta > 0 {
-        *selected = (*selected + 1).min(1);
-    }
-}
-
-/// Valide la présélection du sélecteur d'emplacement de la clé API.
-pub(crate) fn confirm_api_key_placement_picker(model: &mut Model) {
-    let Some(session) = &model.editing else {
-        return;
-    };
-    let EditState::ApiKeyPlacementPicker { selected } = session.state else {
-        return;
-    };
-    let Some(EditableField::AuthParamValue(index)) = session.current_field() else {
-        close_input(model);
-        return;
-    };
-    let new_val = crate::app::model::APIKEY_PLACEMENTS[selected];
-    let current = session
-        .preview
-        .auth_params()
-        .get(index)
-        .map_or("", |kv| kv.value.as_str());
-    if current != new_val {
-        try_commit(
-            model,
+    let current = picker_current(session, kind);
+    let edit = match kind {
+        PickerKind::Method => FieldEdit::Method(choice.to_owned()),
+        PickerKind::BodyMode => FieldEdit::BodyMode(choice.to_owned()),
+        PickerKind::AuthMode | PickerKind::CollectionAuthMode => {
+            FieldEdit::AuthMode(choice.to_owned())
+        }
+        PickerKind::ApiKeyPlacement => {
+            let Some(EditableField::AuthParamValue(index)) = session.current_field() else {
+                close_input(model);
+                return;
+            };
             FieldEdit::AuthParamValue {
                 index,
-                value: new_val.to_owned(),
-            },
-        );
+                value: choice.to_owned(),
+            }
+        }
+    };
+    if !choice.eq_ignore_ascii_case(&current) {
+        try_commit(model, edit);
     }
     close_input(model);
 }
@@ -294,13 +218,21 @@ pub(crate) fn toggle_field(model: &mut Model) {
             FieldEdit::VarsPostResponseEnabled { index, enabled }
         }
         EditableField::AssertValue(index) => FieldEdit::AssertEnabled { index, enabled },
+        EditableField::FormUrlEncodedValue(index) => {
+            FieldEdit::FormUrlEncodedEnabled { index, enabled }
+        }
+        EditableField::MultipartFormValue(index) => {
+            FieldEdit::MultipartFormEnabled { index, enabled }
+        }
         EditableField::SettingsValue(_)
         | EditableField::Method
         | EditableField::Url
         | EditableField::AuthMode
         | EditableField::AuthParamValue(_)
+        | EditableField::BodyMode
         | EditableField::AddRow(_)
         | EditableField::BodyText
+        | EditableField::GraphqlVars
         | EditableField::ScriptPreRequest
         | EditableField::ScriptPostResponse
         | EditableField::Tests
@@ -328,27 +260,41 @@ pub(crate) fn begin_input(model: &mut Model) -> Command {
             Command::None
         }
         EditableField::Method => {
-            open_method_picker(model);
+            open_picker(model, PickerKind::Method);
+            Command::None
+        }
+        EditableField::BodyMode => {
+            open_picker(model, PickerKind::BodyMode);
             Command::None
         }
         EditableField::AuthMode => {
-            open_auth_mode_picker(model);
+            let kind = if model.selected_collection {
+                PickerKind::CollectionAuthMode
+            } else {
+                PickerKind::AuthMode
+            };
+            open_picker(model, kind);
             Command::None
         }
-        EditableField::AuthParamValue(index) => {
-            let is_placement = session
+        EditableField::AuthParamValue(index)
+            if session
                 .preview
                 .auth_params()
                 .get(index)
-                .is_some_and(|kv| kv.key == "placement");
-            if is_placement {
-                open_api_key_placement_picker(model, index);
-                Command::None
-            } else {
-                let input = TextInput::new(field_value(session, &field), false);
-                open_input(model, input, InputTarget::Field);
-                Command::None
-            }
+                .is_some_and(|kv| kv.key == "placement") =>
+        {
+            open_picker(model, PickerKind::ApiKeyPlacement);
+            Command::None
+        }
+        EditableField::MultipartFormValue(index)
+            if section_entries(&session.preview, EntrySection::MultipartForm)
+                .get(index)
+                .is_some_and(|kv| kv.value.trim_start().starts_with("@file(")) =>
+        {
+            model.last_status = Some(StatusMessage::EditRefused(
+                crate::writer::EditError::ImmutableFileEntry.to_string(),
+            ));
+            Command::None
         }
         EditableField::ScriptPreRequest
         | EditableField::ScriptPostResponse
@@ -370,7 +316,7 @@ pub(crate) fn begin_input(model: &mut Model) -> Command {
         _ => {
             let input = TextInput::new(
                 field_value(session, &field),
-                field == EditableField::BodyText,
+                matches!(field, EditableField::BodyText | EditableField::GraphqlVars),
             );
             open_input(model, input, InputTarget::Field);
             Command::None
@@ -386,22 +332,6 @@ pub(crate) fn open_input(model: &mut Model, input: TextInput, target: InputTarge
         session.hscroll = 0;
         session.unmasked = false;
     }
-    model.last_status = None;
-    scroll_edit_into_view(model);
-}
-
-/// Ouvre le sélecteur de méthode, la méthode courante de la session
-/// présélectionnée (`add-method-editing`).
-pub(crate) fn open_method_picker(model: &mut Model) {
-    let Some(session) = &mut model.editing else {
-        return;
-    };
-    let current = session.preview.method.as_str();
-    let selected = crate::collection::ast::METHODS
-        .iter()
-        .position(|candidate| current.eq_ignore_ascii_case(candidate))
-        .unwrap_or(0);
-    session.state = EditState::MethodPicker { selected };
     model.last_status = None;
     scroll_edit_into_view(model);
 }
@@ -496,6 +426,16 @@ pub(crate) fn start_rename(model: &mut Model) {
         return;
     };
     if section == EntrySection::Settings {
+        return;
+    }
+    if section == EntrySection::MultipartForm
+        && section_entries(&session.preview, section)
+            .get(index)
+            .is_some_and(|kv| kv.value.trim_start().starts_with("@file("))
+    {
+        model.last_status = Some(StatusMessage::EditRefused(
+            crate::writer::EditError::ImmutableFileEntry.to_string(),
+        ));
         return;
     }
     let Some(key) = section_entries(&session.preview, section)
@@ -673,6 +613,12 @@ pub(crate) fn finish_add(model: &mut Model, section: EntrySection) {
             }
             EntrySection::Assert => EditableField::AssertValue(count.saturating_sub(1)),
             EntrySection::Settings => EditableField::SettingsValue(count.saturating_sub(1)),
+            EntrySection::FormUrlEncoded => {
+                EditableField::FormUrlEncodedValue(count.saturating_sub(1))
+            }
+            EntrySection::MultipartForm => {
+                EditableField::MultipartFormValue(count.saturating_sub(1))
+            }
         };
         if let Some(position) = session.fields.iter().position(|f| *f == field) {
             session.cursor = position;
@@ -697,13 +643,18 @@ pub(crate) fn value_edit(field: EditableField, value: String) -> Option<FieldEdi
         EditableField::AssertValue(index) => FieldEdit::AssertValue { index, value },
         EditableField::SettingsValue(index) => FieldEdit::SettingsValue { index, value },
         EditableField::BodyText => FieldEdit::BodyText(value),
+        EditableField::GraphqlVars => FieldEdit::GraphqlVars(value),
+        EditableField::FormUrlEncodedValue(index) => {
+            FieldEdit::FormUrlEncodedValue { index, value }
+        }
+        EditableField::MultipartFormValue(index) => FieldEdit::MultipartFormValue { index, value },
         EditableField::ScriptPreRequest => FieldEdit::ScriptPreRequest(value),
         EditableField::ScriptPostResponse => FieldEdit::ScriptPostResponse(value),
         EditableField::Tests => FieldEdit::Tests(value),
         EditableField::Docs => FieldEdit::Docs(value),
         EditableField::AuthMode => FieldEdit::AuthMode(value),
         EditableField::AuthParamValue(index) => FieldEdit::AuthParamValue { index, value },
-        EditableField::Method | EditableField::AddRow(_) => return None,
+        EditableField::Method | EditableField::BodyMode | EditableField::AddRow(_) => return None,
     })
 }
 
@@ -727,10 +678,7 @@ pub(crate) fn cancel_input(model: &mut Model) {
                 session.cursor = return_cursor.min(session.fields.len().saturating_sub(1));
             }
         }
-        EditState::MethodPicker { .. }
-        | EditState::AuthModePicker { .. }
-        | EditState::ApiKeyPlacementPicker { .. }
-        | EditState::PlaintextSecretPrompt { .. } => {}
+        EditState::Picker { .. } | EditState::PlaintextSecretPrompt { .. } => {}
         EditState::FieldSelect => return,
     }
     model.last_status = None;
@@ -901,9 +849,7 @@ pub(crate) fn scroll_edit_into_view(model: &mut Model) {
     };
     let (target_line, hscroll) = match &session.state {
         EditState::FieldSelect
-        | EditState::MethodPicker { .. }
-        | EditState::AuthModePicker { .. }
-        | EditState::ApiKeyPlacementPicker { .. }
+        | EditState::Picker { .. }
         | EditState::PlaintextSecretPrompt { .. } => (location.line, 0),
         EditState::Input(input) => {
             let (line, _) = input.cursor_line_col();
@@ -1350,9 +1296,7 @@ mod tests {
                 assert_eq!(input.text(), initial_url);
             }
             EditState::FieldSelect
-            | EditState::MethodPicker { .. }
-            | EditState::AuthModePicker { .. }
-            | EditState::ApiKeyPlacementPicker { .. }
+            | EditState::Picker { .. }
             | EditState::PlaintextSecretPrompt { .. } => panic!("saisie attendue"),
         }
 
@@ -1450,9 +1394,7 @@ mod tests {
                 assert!(input.text().ends_with('\n'), "saut de ligne inséré");
             }
             EditState::FieldSelect
-            | EditState::MethodPicker { .. }
-            | EditState::AuthModePicker { .. }
-            | EditState::ApiKeyPlacementPicker { .. }
+            | EditState::Picker { .. }
             | EditState::PlaintextSecretPrompt { .. } => {
                 panic!("devrait rester en saisie sur le corps")
             }
@@ -1780,9 +1722,7 @@ mod tests {
         match &model.editing.as_ref().expect("session").state {
             EditState::Input(input) => input,
             EditState::FieldSelect
-            | EditState::MethodPicker { .. }
-            | EditState::AuthModePicker { .. }
-            | EditState::ApiKeyPlacementPicker { .. }
+            | EditState::Picker { .. }
             | EditState::PlaintextSecretPrompt { .. } => panic!("saisie attendue"),
         }
     }
@@ -1893,7 +1833,10 @@ mod tests {
         update(&mut model, Message::Enter);
         assert_eq!(
             session(&model).state,
-            EditState::MethodPicker { selected: 0 }
+            EditState::Picker {
+                kind: PickerKind::Method,
+                selected: 0
+            }
         );
         assert!(!session(&model).has_unsaved());
 
@@ -1902,21 +1845,30 @@ mod tests {
         assert!(model.run.active.is_none());
         assert_eq!(
             session(&model).state,
-            EditState::MethodPicker { selected: 0 }
+            EditState::Picker {
+                kind: PickerKind::Method,
+                selected: 0
+            }
         );
 
         // Extrémité haute : Up ne bouge pas depuis la première entrée.
         update(&mut model, Message::Up);
         assert_eq!(
             session(&model).state,
-            EditState::MethodPicker { selected: 0 }
+            EditState::Picker {
+                kind: PickerKind::Method,
+                selected: 0
+            }
         );
 
         // Navigation vers POST (indice 1) puis validation.
         update(&mut model, Message::Down);
         assert_eq!(
             session(&model).state,
-            EditState::MethodPicker { selected: 1 }
+            EditState::Picker {
+                kind: PickerKind::Method,
+                selected: 1
+            }
         );
         update(&mut model, Message::Enter);
         assert_eq!(session(&model).state, EditState::FieldSelect);
@@ -1927,7 +1879,10 @@ mod tests {
         update(&mut model, Message::Enter);
         assert_eq!(
             session(&model).state,
-            EditState::MethodPicker { selected: 1 }
+            EditState::Picker {
+                kind: PickerKind::Method,
+                selected: 1
+            }
         );
 
         // Annulation : le sélecteur se ferme sans changer la méthode, quelle
@@ -2676,7 +2631,10 @@ mod tests {
         update(&mut model, Message::Enter);
         assert!(matches!(
             session(&model).state,
-            EditState::AuthModePicker { selected: 0, .. }
+            EditState::Picker {
+                kind: PickerKind::AuthMode,
+                selected: 0
+            }
         ));
 
         // Navigation vers inherit (1), basic (2), bearer (3)
@@ -2685,7 +2643,10 @@ mod tests {
         update(&mut model, Message::Down);
         assert!(matches!(
             session(&model).state,
-            EditState::AuthModePicker { selected: 3, .. }
+            EditState::Picker {
+                kind: PickerKind::AuthMode,
+                selected: 3
+            }
         ));
 
         // Validation
@@ -2721,18 +2682,24 @@ mod tests {
         move_to_field(&mut model, EditableField::AuthParamValue(2));
         assert_eq!(shown_value(&model, EditableField::AuthParamValue(2)), "");
 
-        // Appuyer sur Entrée sur placement ouvre ApiKeyPlacementPicker (pas TextInput !)
+        // Appuyer sur Entrée sur placement ouvre le sélecteur de placement (pas TextInput !)
         update(&mut model, Message::Enter);
         assert_eq!(
             session(&model).state,
-            EditState::ApiKeyPlacementPicker { selected: 0 }
+            EditState::Picker {
+                kind: PickerKind::ApiKeyPlacement,
+                selected: 0
+            }
         );
 
         // Naviguer vers "queryparams" (1)
         update(&mut model, Message::Down);
         assert_eq!(
             session(&model).state,
-            EditState::ApiKeyPlacementPicker { selected: 1 }
+            EditState::Picker {
+                kind: PickerKind::ApiKeyPlacement,
+                selected: 1
+            }
         );
 
         // Valider
@@ -2991,5 +2958,161 @@ mod tests {
         assert!(session(&model).unmasked);
         update(&mut model, Message::ToggleRevealSecret);
         assert!(!session(&model).unmasked);
+    }
+
+    #[test]
+    fn body_mode_picker_opens_navigates_confirms_and_cancels() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::BodyMode);
+
+        // Ouverture : présélection sur le mode courant ("none", indice 0).
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            session(&model).state,
+            EditState::Picker {
+                kind: PickerKind::BodyMode,
+                selected: 0
+            }
+        );
+        assert!(!session(&model).has_unsaved());
+
+        // Navigation vers "json" (indice 1) puis validation.
+        update(&mut model, Message::Down);
+        assert_eq!(
+            session(&model).state,
+            EditState::Picker {
+                kind: PickerKind::BodyMode,
+                selected: 1
+            }
+        );
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(shown_value(&model, EditableField::BodyMode), "json");
+        assert!(session(&model).dirty);
+
+        // Réouverture : le nouveau mode est présélectionné.
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            session(&model).state,
+            EditState::Picker {
+                kind: PickerKind::BodyMode,
+                selected: 1
+            }
+        );
+
+        // Annulation : le sélecteur se ferme sans changer le mode.
+        update(&mut model, Message::Down);
+        update(&mut model, Message::CancelInput);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(shown_value(&model, EditableField::BodyMode), "json");
+    }
+
+    #[test]
+    fn body_mode_picker_validation_without_change_does_not_mark_modified() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::BodyMode);
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(!session(&model).dirty);
+        assert!(!session(&model).has_unsaved());
+    }
+
+    #[test]
+    fn form_urlencoded_flow_add_edit_toggle_and_delete() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        move_to_field(&mut model, EditableField::BodyMode);
+        update(&mut model, Message::Enter);
+        // "formUrlEncoded" est à l'indice 5 dans BODY_MODES (none=0, json=1, text=2, xml=3, sparql=4, formUrlEncoded=5)
+        for _ in 0..5 {
+            update(&mut model, Message::Down);
+        }
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            shown_value(&model, EditableField::BodyMode),
+            "formUrlEncoded"
+        );
+
+        // Ajout d'un champ via la ligne AddRow
+        add_via_row(&mut model, EntrySection::FormUrlEncoded, "user", "alice");
+        assert_eq!(
+            shown_value(&model, EditableField::FormUrlEncodedValue(0)),
+            "alice"
+        );
+
+        // Toggle field
+        update(&mut model, Message::ToggleField);
+        assert!(!crate::app::model::field_enabled(
+            session(&model),
+            &EditableField::FormUrlEncodedValue(0)
+        ));
+
+        // Delete field
+        update(&mut model, Message::Delete);
+        assert!(
+            !session(&model)
+                .fields
+                .contains(&EditableField::FormUrlEncodedValue(0))
+        );
+    }
+
+    #[test]
+    fn multipart_file_entry_read_only_rules() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        try_commit(&mut model, FieldEdit::BodyMode("multipartForm".into()));
+        try_commit(
+            &mut model,
+            FieldEdit::AddEntry {
+                section: EntrySection::MultipartForm,
+                key: "avatar".into(),
+                value: "@file(/tmp/photo.png)".into(),
+                enabled: true,
+            },
+        );
+        move_to_field(&mut model, EditableField::MultipartFormValue(0));
+
+        // Entrée refusée (lecture seule)
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::EditRefused(_))
+        ));
+
+        // Renommage refusé (lecture seule)
+        update(&mut model, Message::Rename);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(matches!(
+            model.last_status,
+            Some(StatusMessage::EditRefused(_))
+        ));
+
+        // Toggle autorisé
+        update(&mut model, Message::ToggleField);
+        assert!(!crate::app::model::field_enabled(
+            session(&model),
+            &EditableField::MultipartFormValue(0)
+        ));
+
+        // Suppression autorisée
+        update(&mut model, Message::Delete);
+        assert!(
+            !session(&model)
+                .fields
+                .contains(&EditableField::MultipartFormValue(0))
+        );
+    }
+
+    #[test]
+    fn graphql_vars_can_be_edited() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        try_commit(
+            &mut model,
+            FieldEdit::GraphqlVars("{\n  \"limit\": 10\n}".into()),
+        );
+        assert_eq!(
+            shown_value(&model, EditableField::GraphqlVars),
+            "{\n  \"limit\": 10\n}"
+        );
     }
 }

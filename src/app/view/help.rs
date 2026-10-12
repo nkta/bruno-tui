@@ -170,11 +170,11 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Entrée",
-                effect: "modifier la valeur (ou sélecteur de méthode/mode auth/placement apikey)",
+                effect: "modifier la valeur (ou sélecteur de méthode/mode de corps/mode auth/placement apikey, éditeur externe pour scripts, tests, docs)",
             },
             HelpEntry {
                 key: "Espace",
-                effect: "activer ou désactiver l'en-tête, la variable ou le paramètre",
+                effect: "activer ou désactiver l'en-tête, la variable, le paramètre ou le champ de formulaire",
             },
             HelpEntry {
                 key: "a",
@@ -182,11 +182,11 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "d",
-                effect: "supprimer l'en-tête, la variable ou le paramètre, sans confirmation",
+                effect: "supprimer l'en-tête, la variable, le paramètre ou le champ de formulaire, sans confirmation",
             },
             HelpEntry {
                 key: "c",
-                effect: "renommer la clé de l'en-tête, de la variable ou du paramètre",
+                effect: "renommer la clé de l'en-tête, de la variable, du paramètre ou du champ de formulaire (hors @file)",
             },
             HelpEntry {
                 key: "Ctrl+R",
@@ -202,7 +202,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Entrée / Tab",
-                effect: "en saisie : valider la valeur (Entrée = saut de ligne dans le corps)",
+                effect: "en saisie : valider la valeur (Entrée = saut de ligne dans le corps et variables GraphQL)",
             },
             HelpEntry {
                 key: "Échap (saisie)",

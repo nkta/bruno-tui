@@ -176,18 +176,18 @@ Dans le panneau Détail, `Entrée` (ou `e`) ouvre une session d'édition de la r
 du dossier (`folder.bru`) ou de la collection (`collection.bru`) sélectionné. Rien n'est
 écrit sur disque avant `Ctrl+S`.
 
-Sélection de champ (URL, méthode, en-têtes, paramètres de requête et de
+Sélection de champ (URL, méthode, mode du corps, en-têtes, formulaires, paramètres de requête et de
 chemin, corps, variables, assertions, réglages, scripts pré/post, tests,
 documentation) :
 
 | Touche | Effet |
 |---|---|
 | `↑`/`k`, `↓`/`j` | champ précédent, suivant |
-| `Entrée` | modifier la valeur ; sur la méthode, le mode d'authentification ou le placement d'API Key, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur un bloc de texte (script, test, doc), ouvre l'éditeur externe ; sur une ligne « + Ajouter », ajoute une entrée |
-| `Espace` | activer ou désactiver l'en-tête, le paramètre, la variable ou l'assertion |
+| `Entrée` | modifier la valeur ; sur la méthode, le mode du corps, le mode d'authentification ou le placement d'API Key, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur un bloc de texte (script, test, doc), ouvre l'éditeur externe ; sur une ligne « + Ajouter », ajoute une entrée |
+| `Espace` | activer ou désactiver l'en-tête, le paramètre, la variable, l'assertion ou le champ de formulaire |
 | `a` | ajouter une entrée dans la section du champ (clé, puis valeur) |
-| `d` | supprimer l'en-tête, le paramètre, la variable ou l'assertion, sans confirmation |
-| `c` | renommer la clé de l'en-tête, du paramètre, de la variable ou de l'assertion |
+| `d` | supprimer l'en-tête, le paramètre, la variable, l'assertion ou le champ de formulaire, sans confirmation |
+| `c` | renommer la clé de l'en-tête, du paramètre, de la variable, de l'assertion ou du champ de formulaire (hors `@file(...)`) |
 | `Ctrl+R` | masquer / révéler les valeurs sensibles d'authentification |
 | `Ctrl+S` | enregistrer sur le disque (demande confirmation si un ancien bloc d'authentification non vide est supprimé) |
 | `Échap` | fermer la session (confirmation si modifiée) |
@@ -212,8 +212,16 @@ l'appui sur `Entrée` suspend le TUI et ouvre le fichier dans un éditeur extern
 - **Prise en compte des modifications** : le texte relu devient une modification en attente dans la session. Si le texte est vidé, le bloc correspondant est retiré à l'enregistrement.
 - **Formatage Bruno** : lors de la sauvegarde (`Ctrl+S`), le contenu est réindenté à 2 espaces conformément au format Bruno.
 
+### Mode et contenu du corps
+
+- **Mode du corps** : champ en tête de l'onglet Corps (`BODY_MODES` : `none`, `json`, `text`, `xml`, `sparql`, `formUrlEncoded`, `multipartForm`, `file`) avec sélecteur clavier (`↑↓`, `Entrée`, `Échap`). Pour les requêtes GraphQL (`type: graphql`), le mode est fixe sans sélecteur. Seule la clé `body:` du bloc méthode change au `Ctrl+S` ; les blocs de corps existants sont préservés à l'octet près.
+- **Formulaires** : `body:form-urlencoded` et `body:multipart-form` s'éditent clé/valeur (`a`, `d`, `c`, `Espace`, `Entrée`). Les champs `@file(...)` de multipart sont en lecture seule (seuls `Espace` et `d` suppression sont autorisés). Les annotations `@contentType(...)` et préfixes `@...` sont préservés à l'octet près.
+- **Variables GraphQL** : `body:graphql:vars` s'édite en texte multiligne directement dans l'onglet Corps.
+- **Création et suppression** : un bloc absent est créé à sa position canonique définie par Bruno (`jsonToBru.js`), et un bloc vidé est automatiquement retiré à la sauvegarde.
+- **Corps fichier** : `body:file` est en lecture seule.
+
 Saisie : `Entrée` ou `Tab` valide (`Entrée` insère un saut de ligne dans le
-corps), `Échap` annule, `Ctrl+S` valide puis enregistre ; pendant la saisie
+corps et les variables GraphQL), `Échap` annule, `Ctrl+S` valide puis enregistre ; pendant la saisie
 de la clé d'une nouvelle entrée, `Ctrl+S` l'ajoute avec une valeur vide.
 Toute lettre tapée en saisie est du texte.
 

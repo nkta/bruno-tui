@@ -12,12 +12,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use bruno_tui::collection::{BruFile, FileMeta, KeyValue, RequestView};
+use bruno_tui::collection::{
+    BodyContent, BodyKind, BodyView, BruFile, FileMeta, KeyValue, RequestView,
+};
 use bruno_tui::writer::RequestWriter;
 use serde_json::Value;
 
 /// Même liste que `CASES_NAMES` dans `scripts/gen-writer-bruno-fixtures.sh`.
-const ENTRY_CASES: [&str; 19] = [
+const ENTRY_CASES: [&str; 23] = [
     "add-header",
     "add-block",
     "add-path-between",
@@ -37,6 +39,10 @@ const ENTRY_CASES: [&str; 19] = [
     "auth-apikey",
     "folder-auth",
     "collection-auth",
+    "body-mode-ops",
+    "body-form-urlencoded-ops",
+    "body-multipart-form-ops",
+    "body-graphql-vars-ops",
 ];
 
 fn cases() -> PathBuf {
@@ -83,6 +89,70 @@ fn bru_parser_agrees_with_recorded_bruno_reading() {
         };
         assert_eq!(view.query_params, of_type("query"), "{name}");
         assert_eq!(view.path_params, of_type("path"), "{name}");
+
+        if let Some(body_mode) = bruno.get("body_mode").and_then(Value::as_str) {
+            assert_eq!(view.body_mode(), body_mode, "{name} body_mode");
+        }
+        if let Some(body_form) = bruno.get("body_form").and_then(Value::as_array) {
+            let entries = match &view.body {
+                Some(BodyView {
+                    kind: BodyKind::FormUrlEncoded,
+                    content: BodyContent::Entries(entries),
+                }) => entries.as_slice(),
+                _ => panic!("{name} : attendu FormUrlEncoded avec Entries"),
+            };
+            assert_eq!(entries, key_values(body_form.iter()), "{name} body_form");
+        }
+        if let Some(body_multipart) = bruno.get("body_multipart").and_then(Value::as_array) {
+            let entries = match &view.body {
+                Some(BodyView {
+                    kind: BodyKind::MultipartForm,
+                    content: BodyContent::Entries(entries),
+                }) => entries.as_slice(),
+                _ => panic!("{name} : attendu MultipartForm avec Entries"),
+            };
+            assert_eq!(entries.len(), body_multipart.len(), "{name} multipart len");
+            for (kv, expected) in entries.iter().zip(body_multipart.iter()) {
+                assert_eq!(
+                    kv.key,
+                    expected["name"].as_str().unwrap(),
+                    "{name} multipart key"
+                );
+                assert_eq!(
+                    kv.enabled,
+                    expected["enabled"].as_bool().unwrap(),
+                    "{name} multipart enabled"
+                );
+                let kind = expected["type"].as_str().unwrap();
+                if kind == "text" {
+                    assert_eq!(
+                        kv.value,
+                        expected["value"].as_str().unwrap(),
+                        "{name} multipart text value"
+                    );
+                } else if kind == "file" {
+                    let file_val = expected["value"][0].as_str().unwrap();
+                    assert!(
+                        kv.value.contains(&format!("@file({file_val})")),
+                        "{name} multipart file reference"
+                    );
+                    let ct = expected["contentType"].as_str().unwrap();
+                    if !ct.is_empty() {
+                        assert!(
+                            kv.value.contains(&format!("@contentType({ct})")),
+                            "{name} multipart content type"
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(graphql_vars) = bruno.get("body_graphql_vars").and_then(Value::as_str) {
+            assert_eq!(
+                view.graphql_vars().unwrap_or(""),
+                graphql_vars,
+                "{name} graphql_vars"
+            );
+        }
 
         if let Some(vars_req) = bruno.get("vars_req").and_then(Value::as_array) {
             assert_eq!(

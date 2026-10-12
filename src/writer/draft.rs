@@ -12,7 +12,7 @@ use super::dictionary::{
     dictionary_replacements, following_blank_line_len, line_end, preceding_blank_line_len,
     section_block_node,
 };
-use super::edit::{EntrySection, FieldEdit, Replacement};
+use super::edit::{BODY_MODES, EntrySection, FieldEdit, Replacement};
 use super::error::{EditError, EntryProblem};
 use super::format;
 use super::query;
@@ -37,6 +37,14 @@ struct UrlState {
     current: String,
 }
 
+/// Clé `body` du bloc de méthode (`docs/edition-phase2.md` § 6).
+struct BodyModeState {
+    span: Option<Range<usize>>,
+    insert_anchor: usize,
+    original: String,
+    current: String,
+}
+
 /// Nom du bloc de méthode (ex. `"get"`), tranche de ce seul mot-clé dans
 /// le source (`add-method-editing`) : le bloc de méthode s'écrit toujours
 /// en colonne 0, donc cette tranche est
@@ -49,7 +57,9 @@ struct MethodState {
 
 /// Contenu d'un bloc de corps texte ciblé.
 struct BodyState {
-    span: Range<usize>,
+    block_name: &'static str,
+    block_span: Option<Range<usize>>,
+    content_span: Option<Range<usize>>,
     text: String,
 }
 
@@ -59,14 +69,16 @@ pub(crate) enum TextBlockKind {
     ScriptPostResponse,
     Tests,
     Docs,
+    GraphqlVars,
 }
 
 impl TextBlockKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::ScriptPreRequest,
         Self::ScriptPostResponse,
         Self::Tests,
         Self::Docs,
+        Self::GraphqlVars,
     ];
 
     pub fn block_name(&self) -> &'static str {
@@ -75,6 +87,7 @@ impl TextBlockKind {
             Self::ScriptPostResponse => "script:post-response",
             Self::Tests => "tests",
             Self::Docs => "docs",
+            Self::GraphqlVars => "body:graphql:vars",
         }
     }
 
@@ -84,11 +97,43 @@ impl TextBlockKind {
             Self::ScriptPostResponse => 1,
             Self::Tests => 2,
             Self::Docs => 3,
+            Self::GraphqlVars => 4,
         }
     }
 }
 
-/// État d'un bloc de texte libre (`script:*`, `tests`, `docs`).
+/// Groupe de remplacements émis par `Draft::replacements`.
+#[derive(Clone, Copy)]
+enum Emission {
+    Section(EntrySection),
+    Text(TextBlockKind),
+    Auth,
+    Body,
+}
+
+/// Ordre d'émission des remplacements, calqué sur l'ordre canonique des
+/// blocs (`canonical_block_rank`) : deux blocs créés au même point
+/// d'insertion s'écrivent ainsi dans l'ordre attendu par Bruno.
+const EMISSION_ORDER: [Emission; 16] = [
+    Emission::Section(EntrySection::QueryParams),
+    Emission::Section(EntrySection::PathParams),
+    Emission::Section(EntrySection::Headers),
+    Emission::Auth,
+    Emission::Body,
+    Emission::Section(EntrySection::FormUrlEncoded),
+    Emission::Section(EntrySection::MultipartForm),
+    Emission::Text(TextBlockKind::GraphqlVars),
+    Emission::Section(EntrySection::VarsPreRequest),
+    Emission::Section(EntrySection::VarsPostResponse),
+    Emission::Section(EntrySection::Assert),
+    Emission::Text(TextBlockKind::ScriptPreRequest),
+    Emission::Text(TextBlockKind::ScriptPostResponse),
+    Emission::Text(TextBlockKind::Tests),
+    Emission::Section(EntrySection::Settings),
+    Emission::Text(TextBlockKind::Docs),
+];
+
+/// État d'un bloc de texte libre (`script:*`, `tests`, `docs`, `body:graphql:vars`).
 struct TextBlockState {
     block_span: Option<Range<usize>>,
     content_span: Option<Range<usize>>,
@@ -290,9 +335,10 @@ pub(crate) struct Draft<'a> {
     ast: &'a BruFile,
     url: Result<UrlState, EditError>,
     method: Result<MethodState, EditError>,
+    body_mode: Result<BodyModeState, EditError>,
     sections: [Section; EntrySection::ALL.len()],
     body: Option<BodyState>,
-    text_blocks: [TextBlockState; 4],
+    text_blocks: [TextBlockState; TextBlockKind::ALL.len()],
     auth: AuthState,
 }
 
@@ -336,6 +382,7 @@ impl<'a> Draft<'a> {
             ast,
             url: url_state(ast),
             method: method_state(ast),
+            body_mode: body_mode_state(ast),
             sections: EntrySection::ALL.map(section),
             body: None,
             text_blocks: TextBlockKind::ALL.map(text_block),
@@ -347,7 +394,8 @@ impl<'a> Draft<'a> {
     /// l'état courant de la section.
     pub(crate) fn apply(&mut self, edit: &FieldEdit) -> Result<(), EditError> {
         use EntrySection::{
-            Assert, Headers, PathParams, QueryParams, Settings, VarsPostResponse, VarsPreRequest,
+            Assert, FormUrlEncoded, Headers, MultipartForm, PathParams, QueryParams, Settings,
+            VarsPostResponse, VarsPreRequest,
         };
         match edit {
             FieldEdit::Url(value) => {
@@ -361,6 +409,13 @@ impl<'a> Draft<'a> {
                 }
                 let method = self.method.as_mut().map_err(|error| error.clone())?;
                 method.current = value.clone();
+            }
+            FieldEdit::BodyMode(value) => {
+                if !BODY_MODES.contains(&value.as_str()) {
+                    return Err(EditError::UnknownBodyMode);
+                }
+                let body_mode = self.body_mode.as_mut().map_err(|error| error.clone())?;
+                body_mode.current = value.clone();
             }
             FieldEdit::HeaderValue { index, value } => {
                 self.entry_mut(Headers, *index)?.value = value.clone();
@@ -385,6 +440,23 @@ impl<'a> Draft<'a> {
             FieldEdit::SettingsValue { index, value } => {
                 self.entry_mut(Settings, *index)?.value = value.clone();
             }
+            FieldEdit::FormUrlEncodedValue { index, value } => {
+                self.entry_mut(FormUrlEncoded, *index)?.value = value.clone();
+            }
+            FieldEdit::FormUrlEncodedEnabled { index, enabled } => {
+                self.entry_mut(FormUrlEncoded, *index)?.disabled = !enabled;
+            }
+            FieldEdit::MultipartFormValue { index, value } => {
+                let entry = self.entry_mut(MultipartForm, *index)?;
+                if entry.value.trim_start().starts_with("@file(") {
+                    return Err(EditError::ImmutableFileEntry);
+                }
+                let preserved = preserve_content_type(value, &entry.value);
+                self.entry_mut(MultipartForm, *index)?.value = preserved;
+            }
+            FieldEdit::MultipartFormEnabled { index, enabled } => {
+                self.entry_mut(MultipartForm, *index)?.disabled = !enabled;
+            }
             FieldEdit::HeaderEnabled { index, enabled } => {
                 self.entry_mut(Headers, *index)?.disabled = !enabled;
             }
@@ -406,7 +478,12 @@ impl<'a> Draft<'a> {
             }
             FieldEdit::BodyText(text) => {
                 if self.body.is_none() {
-                    self.body = Some(body_state(self.ast)?);
+                    let declared = self
+                        .body_mode
+                        .as_ref()
+                        .map(|m| m.current.as_str())
+                        .unwrap_or("none");
+                    self.body = Some(body_state(self.ast, declared)?);
                 }
                 if let Some(body) = &mut self.body {
                     body.text = text.clone();
@@ -425,6 +502,10 @@ impl<'a> Draft<'a> {
             }
             FieldEdit::Docs(text) => {
                 self.text_blocks[TextBlockKind::Docs.position()].new_text = Some(text.clone());
+            }
+            FieldEdit::GraphqlVars(text) => {
+                self.text_blocks[TextBlockKind::GraphqlVars.position()].new_text =
+                    Some(text.clone());
             }
             FieldEdit::AddEntry {
                 section,
@@ -477,9 +558,21 @@ impl<'a> Draft<'a> {
                         block: Settings.block_name(),
                     });
                 }
+                if *section == MultipartForm {
+                    let entry = self.entry_mut(*section, *index)?;
+                    if entry.value.trim_start().starts_with("@file(") {
+                        return Err(EditError::ImmutableFileEntry);
+                    }
+                }
                 self.entry_mut(*section, *index)?;
                 check_key(*section, key, Some(*index))?;
-                self.entry_mut(*section, *index)?.key = key.clone();
+                let old_key = self.entry_mut(*section, *index)?.key.clone();
+                let final_key = if *section == MultipartForm {
+                    preserve_key_prefix(key, &old_key)
+                } else {
+                    key.clone()
+                };
+                self.entry_mut(*section, *index)?.key = final_key;
                 if *section == QueryParams {
                     self.sync_url_from_params();
                 }
@@ -616,6 +709,271 @@ impl<'a> Draft<'a> {
         Ok(())
     }
 
+    /// Remplacements du bloc d'authentification (déclaration du mode,
+    /// blocs `auth:*` obsolètes, bloc `auth:<mode>`).
+    fn auth_replacements(
+        &self,
+        raw: &str,
+        eol: &str,
+        prefixed_anchors: &mut Vec<usize>,
+        replacements: &mut Vec<Replacement>,
+    ) {
+        if !self.auth.touched {
+            return;
+        }
+        let auth = &self.auth;
+        let mode_to_write = auth.current_mode.as_deref().unwrap_or("none");
+
+        // 1. Déclaration du mode
+        match &auth.target {
+            AuthTarget::Request {
+                entry_span,
+                insert_point,
+            } => {
+                if let Some(span) = entry_span {
+                    if auth.original_mode.as_deref() != Some(mode_to_write) {
+                        replacements.push(Replacement {
+                            span: span.clone(),
+                            bytes: format::format_entry("auth", mode_to_write, false, eol),
+                        });
+                    }
+                } else {
+                    replacements.push(Replacement {
+                        span: *insert_point..*insert_point,
+                        bytes: format::format_entry("auth", mode_to_write, false, eol),
+                    });
+                }
+            }
+            AuthTarget::FolderOrCollection {
+                entry_span,
+                insert_point,
+            } => {
+                if let Some(span) = entry_span {
+                    if auth.original_mode.as_deref() != Some(mode_to_write) {
+                        replacements.push(Replacement {
+                            span: span.clone(),
+                            bytes: format::format_entry("mode", mode_to_write, false, eol),
+                        });
+                    }
+                } else if let Some(insert_pt) = insert_point {
+                    replacements.push(Replacement {
+                        span: *insert_pt..*insert_pt,
+                        bytes: format::format_entry("mode", mode_to_write, false, eol),
+                    });
+                } else {
+                    let anchor = canonical_creation_anchor(self.ast, "auth");
+                    let separate = !prefixed_anchors.contains(&anchor);
+                    if separate {
+                        prefixed_anchors.push(anchor);
+                    }
+                    let mut bytes = String::new();
+                    let anything_before = !raw[..anchor].is_empty();
+                    if separate && anything_before && !raw[..anchor].ends_with('\n') {
+                        bytes.push_str(eol);
+                    }
+                    if anything_before {
+                        bytes.push_str(eol);
+                    }
+                    bytes.push_str("auth {");
+                    bytes.push_str(eol);
+                    bytes.push_str(&format::format_entry("mode", mode_to_write, false, eol));
+                    bytes.push('}');
+                    bytes.push_str(eol);
+                    if !raw[anchor..].is_empty() && following_blank_line_len(raw, anchor) == 0 {
+                        bytes.push_str(eol);
+                    }
+                    replacements.push(Replacement {
+                        span: anchor..anchor,
+                        bytes,
+                    });
+                }
+            }
+        }
+
+        // 2. Suppression des blocs auth:* obsolètes
+        let active_block_name = auth.current_mode.as_ref().map(|m| format!("auth:{m}"));
+        let mut ignored_blocks: Vec<&str> = Vec::new();
+        for (name, span) in &auth.all_original_auth_blocks {
+            let keep = auth.block_existed && active_block_name.as_deref() == Some(name.as_str());
+            if !keep {
+                ignored_blocks.push(name.as_str());
+                let preceding = preceding_blank_line_len(raw, span.start);
+                let start = span.start - preceding;
+                let end = if preceding == 0 && start == 0 {
+                    span.end + following_blank_line_len(raw, span.end)
+                } else {
+                    span.end
+                };
+                replacements.push(Replacement {
+                    span: start..end,
+                    bytes: String::new(),
+                });
+            }
+        }
+
+        // 3. Écriture / mise à jour du bloc auth:<mode>
+        if let Some(mode) = &auth.current_mode
+            && mode != "none"
+            && mode != "inherit"
+        {
+            let block_name = format!("auth:{mode}");
+            if auth.block_existed {
+                if let Some((_, entries)) = block_node(self.ast, &block_name) {
+                    for (i, entry) in auth.entries.iter().enumerate() {
+                        if let Some(orig) = auth.original_entries.get(i)
+                            && entry.value != orig.value
+                            && let Some(orig_entry) = entries.get(i)
+                        {
+                            replacements.push(Replacement {
+                                span: orig_entry.span.clone(),
+                                bytes: format::format_entry(
+                                    &entry.key,
+                                    &entry.value,
+                                    entry.disabled,
+                                    eol,
+                                ),
+                            });
+                        }
+                    }
+                }
+            } else {
+                let anchor =
+                    canonical_creation_anchor_ignoring(self.ast, &block_name, &ignored_blocks);
+                let separate = !prefixed_anchors.contains(&anchor);
+                if separate {
+                    prefixed_anchors.push(anchor);
+                }
+                let mut bytes = String::new();
+                let anything_before = !raw[..anchor].is_empty();
+                if separate && anything_before && !raw[..anchor].ends_with('\n') {
+                    bytes.push_str(eol);
+                }
+                if anything_before {
+                    bytes.push_str(eol);
+                }
+                bytes.push_str(&block_name);
+                bytes.push_str(" {");
+                bytes.push_str(eol);
+                for entry in &auth.entries {
+                    bytes.push_str(&format::format_entry(
+                        &entry.key,
+                        &entry.value,
+                        entry.disabled,
+                        eol,
+                    ));
+                }
+                bytes.push('}');
+                bytes.push_str(eol);
+                if !raw[anchor..].is_empty() && following_blank_line_len(raw, anchor) == 0 {
+                    bytes.push_str(eol);
+                }
+                replacements.push(Replacement {
+                    span: anchor..anchor,
+                    bytes,
+                });
+            }
+        }
+    }
+
+    /// Remplacements du bloc de corps texte ciblé.
+    fn body_replacements(
+        &self,
+        raw: &str,
+        eol: &str,
+        prefixed_anchors: &mut Vec<usize>,
+        replacements: &mut Vec<Replacement>,
+    ) {
+        let Some(body) = &self.body else {
+            return;
+        };
+        let anchor = if body.block_span.is_none() && !body.text.trim().is_empty() {
+            canonical_creation_anchor(self.ast, body.block_name)
+        } else {
+            0
+        };
+        let separate = !prefixed_anchors.contains(&anchor);
+        if body.block_span.is_none() && !body.text.trim().is_empty() && separate {
+            prefixed_anchors.push(anchor);
+        }
+        replacements.extend(render_text_block(
+            raw,
+            eol,
+            TextBlockTarget {
+                block_name: body.block_name,
+                block_span: body.block_span.as_ref(),
+                content_span: body.content_span.as_ref(),
+            },
+            Some(&body.text),
+            anchor,
+            separate,
+        ));
+    }
+
+    /// Remplacements d'une section dictionnaire.
+    fn section_replacements(
+        &self,
+        section: EntrySection,
+        raw: &str,
+        eol: &str,
+        prefixed_anchors: &mut Vec<usize>,
+        replacements: &mut Vec<Replacement>,
+    ) {
+        let state = &self.sections[section.position()];
+        let block = section_block_node(self.ast, section);
+        let anchor = if block.is_none() && !state.entries.is_empty() {
+            canonical_creation_anchor(self.ast, section.block_name())
+        } else {
+            0
+        };
+        let separate = !prefixed_anchors.contains(&anchor);
+        if block.is_none() && !state.entries.is_empty() && separate {
+            prefixed_anchors.push(anchor);
+        }
+        replacements.extend(dictionary_replacements(
+            raw,
+            eol,
+            section.block_name(),
+            block,
+            state,
+            anchor,
+            separate,
+        ));
+    }
+
+    /// Remplacements d'un bloc de texte libre.
+    fn text_replacements(
+        &self,
+        kind: TextBlockKind,
+        raw: &str,
+        eol: &str,
+        prefixed_anchors: &mut Vec<usize>,
+        replacements: &mut Vec<Replacement>,
+    ) {
+        let state = &self.text_blocks[kind.position()];
+        let anchor = if state.block_span.is_none()
+            && state
+                .new_text
+                .as_ref()
+                .is_some_and(|t| !t.trim().is_empty())
+        {
+            canonical_creation_anchor(self.ast, kind.block_name())
+        } else {
+            0
+        };
+        let separate = !prefixed_anchors.contains(&anchor);
+        if state.block_span.is_none()
+            && state
+                .new_text
+                .as_ref()
+                .is_some_and(|t| !t.trim().is_empty())
+            && separate
+        {
+            prefixed_anchors.push(anchor);
+        }
+        replacements.extend(text_block_replacements(
+            raw, eol, kind, state, anchor, separate,
+        ));
+    }
     /// Tranches à réécrire pour passer du fichier chargé à l'état courant,
     /// triées par position.
     pub(crate) fn replacements(&self) -> Result<Vec<Replacement>, EditError> {
@@ -639,250 +997,49 @@ impl<'a> Draft<'a> {
                 bytes: method.current.clone(),
             });
         }
-        if let Some(body) = &self.body {
-            replacements.push(Replacement {
-                span: body.span.clone(),
-                bytes: format::format_body_content(&body.text, eol),
-            });
+        if let Ok(body_mode) = &self.body_mode
+            && body_mode.current != body_mode.original
+        {
+            match &body_mode.span {
+                Some(span) => {
+                    replacements.push(Replacement {
+                        span: span.clone(),
+                        bytes: format!("  body: {}{eol}", body_mode.current),
+                    });
+                }
+                None => {
+                    if body_mode.current != "none" {
+                        replacements.push(Replacement {
+                            span: body_mode.insert_anchor..body_mode.insert_anchor,
+                            bytes: format!("  body: {}{eol}", body_mode.current),
+                        });
+                    }
+                }
+            }
         }
-
+        // Émission dans l'ordre canonique des blocs (`EMISSION_ORDER`) : à
+        // un même point d'insertion, le tri stable conserve cet ordre et
+        // seul le premier bloc créé reçoit la ligne vide de séparation.
         let mut prefixed_anchors: Vec<usize> = Vec::new();
-        for section in [
-            EntrySection::QueryParams,
-            EntrySection::PathParams,
-            EntrySection::Headers,
-        ] {
-            let state = &self.sections[section.position()];
-            let block = section_block_node(self.ast, section);
-            let anchor = if block.is_none() && !state.entries.is_empty() {
-                canonical_creation_anchor(self.ast, section.block_name())
-            } else {
-                0
-            };
-            let separate = !prefixed_anchors.contains(&anchor);
-            if block.is_none() && !state.entries.is_empty() && separate {
-                prefixed_anchors.push(anchor);
-            }
-            replacements.extend(dictionary_replacements(
-                raw,
-                eol,
-                section.block_name(),
-                block,
-                state,
-                anchor,
-                separate,
-            ));
-        }
-
-        if self.auth.touched {
-            let auth = &self.auth;
-            let mode_to_write = auth.current_mode.as_deref().unwrap_or("none");
-
-            // 1. Déclaration du mode
-            match &auth.target {
-                AuthTarget::Request {
-                    entry_span,
-                    insert_point,
-                } => {
-                    if let Some(span) = entry_span {
-                        if auth.original_mode.as_deref() != Some(mode_to_write) {
-                            replacements.push(Replacement {
-                                span: span.clone(),
-                                bytes: format::format_entry("auth", mode_to_write, false, eol),
-                            });
-                        }
-                    } else {
-                        replacements.push(Replacement {
-                            span: *insert_point..*insert_point,
-                            bytes: format::format_entry("auth", mode_to_write, false, eol),
-                        });
-                    }
+        for step in EMISSION_ORDER {
+            match step {
+                Emission::Section(section) => self.section_replacements(
+                    section,
+                    raw,
+                    eol,
+                    &mut prefixed_anchors,
+                    &mut replacements,
+                ),
+                Emission::Text(kind) => {
+                    self.text_replacements(kind, raw, eol, &mut prefixed_anchors, &mut replacements)
                 }
-                AuthTarget::FolderOrCollection {
-                    entry_span,
-                    insert_point,
-                } => {
-                    if let Some(span) = entry_span {
-                        if auth.original_mode.as_deref() != Some(mode_to_write) {
-                            replacements.push(Replacement {
-                                span: span.clone(),
-                                bytes: format::format_entry("mode", mode_to_write, false, eol),
-                            });
-                        }
-                    } else if let Some(insert_pt) = insert_point {
-                        replacements.push(Replacement {
-                            span: *insert_pt..*insert_pt,
-                            bytes: format::format_entry("mode", mode_to_write, false, eol),
-                        });
-                    } else {
-                        let anchor = canonical_creation_anchor(self.ast, "auth");
-                        let separate = !prefixed_anchors.contains(&anchor);
-                        if separate {
-                            prefixed_anchors.push(anchor);
-                        }
-                        let mut bytes = String::new();
-                        let anything_before = !raw[..anchor].is_empty();
-                        if separate && anything_before && !raw[..anchor].ends_with('\n') {
-                            bytes.push_str(eol);
-                        }
-                        if anything_before {
-                            bytes.push_str(eol);
-                        }
-                        bytes.push_str("auth {");
-                        bytes.push_str(eol);
-                        bytes.push_str(&format::format_entry("mode", mode_to_write, false, eol));
-                        bytes.push('}');
-                        bytes.push_str(eol);
-                        if !raw[anchor..].is_empty() && following_blank_line_len(raw, anchor) == 0 {
-                            bytes.push_str(eol);
-                        }
-                        replacements.push(Replacement {
-                            span: anchor..anchor,
-                            bytes,
-                        });
-                    }
+                Emission::Auth => {
+                    self.auth_replacements(raw, eol, &mut prefixed_anchors, &mut replacements)
+                }
+                Emission::Body => {
+                    self.body_replacements(raw, eol, &mut prefixed_anchors, &mut replacements)
                 }
             }
-
-            // 2. Suppression des blocs auth:* obsolètes
-            let active_block_name = auth.current_mode.as_ref().map(|m| format!("auth:{m}"));
-            let mut ignored_blocks: Vec<&str> = Vec::new();
-            for (name, span) in &auth.all_original_auth_blocks {
-                let keep =
-                    auth.block_existed && active_block_name.as_deref() == Some(name.as_str());
-                if !keep {
-                    ignored_blocks.push(name.as_str());
-                    let preceding = preceding_blank_line_len(raw, span.start);
-                    let start = span.start - preceding;
-                    let end = if preceding == 0 && start == 0 {
-                        span.end + following_blank_line_len(raw, span.end)
-                    } else {
-                        span.end
-                    };
-                    replacements.push(Replacement {
-                        span: start..end,
-                        bytes: String::new(),
-                    });
-                }
-            }
-
-            // 3. Écriture / mise à jour du bloc auth:<mode>
-            if let Some(mode) = &auth.current_mode
-                && mode != "none"
-                && mode != "inherit"
-            {
-                let block_name = format!("auth:{mode}");
-                if auth.block_existed {
-                    if let Some((_, entries)) = block_node(self.ast, &block_name) {
-                        for (i, entry) in auth.entries.iter().enumerate() {
-                            if let Some(orig) = auth.original_entries.get(i)
-                                && entry.value != orig.value
-                                && let Some(orig_entry) = entries.get(i)
-                            {
-                                replacements.push(Replacement {
-                                    span: orig_entry.span.clone(),
-                                    bytes: format::format_entry(
-                                        &entry.key,
-                                        &entry.value,
-                                        entry.disabled,
-                                        eol,
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    let anchor =
-                        canonical_creation_anchor_ignoring(self.ast, &block_name, &ignored_blocks);
-                    let separate = !prefixed_anchors.contains(&anchor);
-                    if separate {
-                        prefixed_anchors.push(anchor);
-                    }
-                    let mut bytes = String::new();
-                    let anything_before = !raw[..anchor].is_empty();
-                    if separate && anything_before && !raw[..anchor].ends_with('\n') {
-                        bytes.push_str(eol);
-                    }
-                    if anything_before {
-                        bytes.push_str(eol);
-                    }
-                    bytes.push_str(&block_name);
-                    bytes.push_str(" {");
-                    bytes.push_str(eol);
-                    for entry in &auth.entries {
-                        bytes.push_str(&format::format_entry(
-                            &entry.key,
-                            &entry.value,
-                            entry.disabled,
-                            eol,
-                        ));
-                    }
-                    bytes.push('}');
-                    bytes.push_str(eol);
-                    if !raw[anchor..].is_empty() && following_blank_line_len(raw, anchor) == 0 {
-                        bytes.push_str(eol);
-                    }
-                    replacements.push(Replacement {
-                        span: anchor..anchor,
-                        bytes,
-                    });
-                }
-            }
-        }
-
-        for section in [
-            EntrySection::VarsPreRequest,
-            EntrySection::VarsPostResponse,
-            EntrySection::Assert,
-            EntrySection::Settings,
-        ] {
-            let state = &self.sections[section.position()];
-            let block = section_block_node(self.ast, section);
-            let anchor = if block.is_none() && !state.entries.is_empty() {
-                canonical_creation_anchor(self.ast, section.block_name())
-            } else {
-                0
-            };
-            let separate = !prefixed_anchors.contains(&anchor);
-            if block.is_none() && !state.entries.is_empty() && separate {
-                prefixed_anchors.push(anchor);
-            }
-            replacements.extend(dictionary_replacements(
-                raw,
-                eol,
-                section.block_name(),
-                block,
-                state,
-                anchor,
-                separate,
-            ));
-        }
-
-        for kind in TextBlockKind::ALL {
-            let state = &self.text_blocks[kind.position()];
-            let anchor = if state.block_span.is_none()
-                && state
-                    .new_text
-                    .as_ref()
-                    .is_some_and(|t| !t.trim().is_empty())
-            {
-                canonical_creation_anchor(self.ast, kind.block_name())
-            } else {
-                0
-            };
-            let separate = !prefixed_anchors.contains(&anchor);
-            if state.block_span.is_none()
-                && state
-                    .new_text
-                    .as_ref()
-                    .is_some_and(|t| !t.trim().is_empty())
-                && separate
-            {
-                prefixed_anchors.push(anchor);
-            }
-            replacements.extend(text_block_replacements(
-                raw, eol, kind, state, anchor, separate,
-            ));
         }
 
         // Une insertion (tranche vide) passe avant un remplacement qui
@@ -898,6 +1055,36 @@ impl<'a> Draft<'a> {
     }
 }
 
+fn preserve_content_type(new_val: &str, old_val: &str) -> String {
+    if !new_val.contains("@contentType(")
+        && let Some(idx) = old_val.rfind("@contentType(")
+    {
+        let suffix = &old_val[idx..];
+        if suffix.ends_with(')') {
+            return format!("{new_val} {suffix}");
+        }
+    }
+    new_val.to_owned()
+}
+
+fn preserve_key_prefix(new_key: &str, old_key: &str) -> String {
+    if !new_key.starts_with('@')
+        && old_key.starts_with('@')
+        && let Some(space_idx) = old_key.rfind(") ")
+    {
+        let prefix = &old_key[..space_idx + 2];
+        return format!("{prefix}{new_key}");
+    }
+    new_key.to_owned()
+}
+
+/// Cible d'un bloc de texte (`body:*`, `script:*`, `tests`, `docs`).
+struct TextBlockTarget<'a> {
+    block_name: &'a str,
+    block_span: Option<&'a Range<usize>>,
+    content_span: Option<&'a Range<usize>>,
+}
+
 /// Émet les remplacements pour un bloc de texte libre (`script:*`, `tests`, `docs`) :
 /// modification, suppression ou création.
 fn text_block_replacements(
@@ -908,15 +1095,39 @@ fn text_block_replacements(
     create_anchor: usize,
     separate_from_previous: bool,
 ) -> Vec<Replacement> {
+    render_text_block(
+        raw,
+        eol,
+        TextBlockTarget {
+            block_name: kind.block_name(),
+            block_span: state.block_span.as_ref(),
+            content_span: state.content_span.as_ref(),
+        },
+        state.new_text.as_deref(),
+        create_anchor,
+        separate_from_previous,
+    )
+}
+
+/// Émet les remplacements pour un bloc de texte (`body:*`, `script:*`, `tests`, `docs`) :
+/// modification, suppression ou création.
+fn render_text_block(
+    raw: &str,
+    eol: &str,
+    target: TextBlockTarget<'_>,
+    new_text: Option<&str>,
+    create_anchor: usize,
+    separate_from_previous: bool,
+) -> Vec<Replacement> {
     let mut replacements = Vec::new();
-    let Some(new_text) = &state.new_text else {
+    let Some(new_text) = new_text else {
         return replacements;
     };
 
     let is_empty = new_text.trim().is_empty();
 
-    match state.block_span {
-        Some(ref span) => {
+    match target.block_span {
+        Some(span) => {
             if is_empty {
                 let preceding = preceding_blank_line_len(raw, span.start);
                 let start = span.start - preceding;
@@ -929,7 +1140,7 @@ fn text_block_replacements(
                     span: start..end,
                     bytes: String::new(),
                 });
-            } else if let Some(ref content_span) = state.content_span {
+            } else if let Some(content_span) = target.content_span {
                 replacements.push(Replacement {
                     span: content_span.clone(),
                     bytes: format::format_body_content(new_text, eol),
@@ -949,7 +1160,7 @@ fn text_block_replacements(
                 if anything_before {
                     bytes.push_str(eol);
                 }
-                bytes.push_str(kind.block_name());
+                bytes.push_str(target.block_name);
                 bytes.push_str(" {");
                 bytes.push_str(eol);
                 bytes.push_str(&format::format_body_content(new_text, eol));
@@ -996,42 +1207,75 @@ fn canonical_block_rank(name: &str) -> Option<usize> {
     if name.starts_with("auth:") {
         return Some(7);
     }
-    if name.starts_with("body:") || name == "body" {
+    if name == "body:json" {
         return Some(8);
+    }
+    if name == "body:text" {
+        return Some(9);
+    }
+    if name == "body:xml" {
+        return Some(10);
+    }
+    if name == "body:sparql" {
+        return Some(11);
+    }
+    if name == "body:form-urlencoded" {
+        return Some(12);
+    }
+    if name == "body:multipart-form" {
+        return Some(13);
+    }
+    if name == "body:file" {
+        return Some(14);
+    }
+    if name == "body:graphql" {
+        return Some(15);
+    }
+    if name == "body:graphql:vars" {
+        return Some(16);
+    }
+    if name.starts_with("body:grpc") {
+        return Some(17);
+    }
+    if name.starts_with("body:ws") {
+        return Some(18);
+    }
+    if name.starts_with("body:") || name == "body" {
+        return Some(19);
     }
     // `vars` est l'ancien nom de `vars:pre-request`, conservé tel quel.
     if name == "vars:pre-request" || name == "vars" {
-        return Some(9);
+        return Some(20);
     }
     if name == "vars:post-response" {
-        return Some(10);
+        return Some(21);
     }
     if name == "assert" {
-        return Some(11);
+        return Some(22);
     }
     if name == "script:pre-request" {
-        return Some(12);
+        return Some(23);
     }
     if name == "script:post-response" {
-        return Some(13);
+        return Some(24);
     }
     if name.starts_with("script:grpc:") || name == "script:grpc" {
-        return Some(14);
+        return Some(25);
     }
     if name == "tests" {
-        return Some(15);
+        return Some(26);
     }
     if name == "app" {
-        return Some(16);
+        return Some(27);
     }
     if name == "settings" {
-        return Some(17);
+        return Some(28);
     }
     if name == "docs" {
-        return Some(18);
+        return Some(29);
     }
     if name == "example" {
-        return Some(19);
+        return Some(30);
     }
     None
 }
@@ -1166,7 +1410,7 @@ fn method_state(ast: &BruFile) -> Result<MethodState, EditError> {
     })
 }
 
-fn body_state(ast: &BruFile) -> Result<BodyState, EditError> {
+fn body_mode_state(ast: &BruFile) -> Result<BodyModeState, EditError> {
     let method = ast
         .blocks()
         .find(|block| METHODS.contains(&block.name.as_str()))
@@ -1174,12 +1418,29 @@ fn body_state(ast: &BruFile) -> Result<BodyState, EditError> {
     let BlockBody::Dictionary(entries) = &method.body else {
         return Err(EditError::MissingField { field: "body" });
     };
-    let declared = entries
+    let insert_anchor = entries
         .iter()
-        .find(|entry| entry.key == "body")
-        .map(|entry| entry.value.as_str())
-        .unwrap_or_default();
+        .find(|entry| entry.key == "url")
+        .map(|entry| entry.span.end)
+        .unwrap_or(0);
+    let existing = entries.iter().find(|entry| entry.key == "body");
+    let (span, original, current) = match existing {
+        Some(entry) => (
+            Some(entry.span.clone()),
+            entry.value.clone(),
+            entry.value.clone(),
+        ),
+        None => (None, "none".to_owned(), "none".to_owned()),
+    };
+    Ok(BodyModeState {
+        span,
+        insert_anchor,
+        original,
+        current,
+    })
+}
 
+fn body_state(ast: &BruFile, declared: &str) -> Result<BodyState, EditError> {
     if FORM_BODY_KINDS.contains(&declared) {
         return Err(EditError::WrongBodyForm {
             expected: "body:text",
@@ -1189,15 +1450,31 @@ fn body_state(ast: &BruFile) -> Result<BodyState, EditError> {
         .iter()
         .find(|(kind, _)| *kind == declared)
         .map(|(_, block)| *block)
+        .or_else(|| {
+            TEXT_BODY_BLOCKS.iter().find_map(|(_, block)| {
+                if ast.block(block).is_some() {
+                    Some(*block)
+                } else {
+                    None
+                }
+            })
+        })
         .ok_or(EditError::NoSuchBlock { block: "body" })?;
-    let block = ast
-        .block(block_name)
-        .ok_or(EditError::NoSuchBlock { block: block_name })?;
-    let BlockBody::Text { content } = &block.body else {
-        return Err(EditError::NoSuchBlock { block: block_name });
+    let found = ast.nodes().iter().find_map(|node| match &node.kind {
+        NodeKind::Block(block) if block.name == block_name => match &block.body {
+            BlockBody::Text { content } => Some((node.span.clone(), content.clone())),
+            _ => None,
+        },
+        _ => None,
+    });
+    let (block_span, content_span) = match found {
+        Some((b, c)) => (Some(b), Some(c)),
+        None => (None, None),
     };
     Ok(BodyState {
-        span: content.clone(),
+        block_name,
+        block_span,
+        content_span,
         text: String::new(),
     })
 }
@@ -1787,6 +2064,61 @@ mod tests {
     }
 
     #[test]
+    fn emission_order_covers_each_section_and_text_block_once() {
+        for section in EntrySection::ALL {
+            let count = EMISSION_ORDER
+                .iter()
+                .filter(|step| matches!(step, Emission::Section(s) if *s == section))
+                .count();
+            assert_eq!(count, 1, "{section:?}");
+        }
+        for kind in TextBlockKind::ALL {
+            let count = EMISSION_ORDER
+                .iter()
+                .filter(|step| matches!(step, Emission::Text(k) if *k == kind))
+                .count();
+            assert_eq!(count, 1, "{kind:?}");
+        }
+        let ranks: Vec<usize> = EMISSION_ORDER
+            .iter()
+            .filter_map(|step| match step {
+                Emission::Section(section) => canonical_block_rank(section.block_name()),
+                Emission::Text(kind) => canonical_block_rank(kind.block_name()),
+                Emission::Auth => canonical_block_rank("auth:bearer"),
+                Emission::Body => canonical_block_rank("body:json"),
+            })
+            .collect();
+        assert_eq!(ranks.len(), EMISSION_ORDER.len());
+        assert!(
+            ranks.windows(2).all(|pair| pair[0] <= pair[1]),
+            "ordre canonique : {ranks:?}"
+        );
+    }
+
+    #[test]
+    fn auth_and_body_created_at_the_same_anchor_follow_canonical_order() {
+        let source = "post {\n  url: http://a\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::BodyMode("json".into()),
+                FieldEdit::BodyText("{}".into()),
+                FieldEdit::AuthMode("bearer".into()),
+                FieldEdit::AddEntry {
+                    section: EntrySection::Headers,
+                    key: "Accept".into(),
+                    value: "*/*".into(),
+                    enabled: true,
+                },
+            ],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: json\n  auth: bearer\n}\n\nheaders {\n  Accept: */*\n}\n\nauth:bearer {\n  token: \n}\n\nbody:json {\n  {}\n}\n"
+        );
+    }
+
+    #[test]
     fn auth_mode_none_to_bearer_creates_block_with_empty_keys() {
         let source = "get {\n  url: http://a\n  body: none\n  auth: none\n}\n";
         let out = apply(source, &[FieldEdit::AuthMode("bearer".into())]);
@@ -1911,6 +2243,262 @@ mod tests {
                 block: "auth",
                 index: 5
             }
+        );
+    }
+
+    #[test]
+    fn body_mode_replaces_existing_mode_and_preserves_other_blocks() {
+        let source =
+            "post {\n  url: http://a\n  body: json\n  auth: none\n}\n\nbody:json {\n  {}\n}\n";
+        let out = apply(source, &[FieldEdit::BodyMode("formUrlEncoded".into())]);
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n  auth: none\n}\n\nbody:json {\n  {}\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_mode_inserts_after_url_when_absent() {
+        let source = "get {\n  url: http://a\n  auth: none\n}\n";
+        let out = apply(source, &[FieldEdit::BodyMode("json".into())]);
+        assert_eq!(
+            out,
+            "get {\n  url: http://a\n  body: json\n  auth: none\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_mode_none_replaces_existing_mode() {
+        let source = "post {\n  url: http://a\n  body: json\n}\n";
+        let out = apply(source, &[FieldEdit::BodyMode("none".into())]);
+        assert_eq!(out, "post {\n  url: http://a\n  body: none\n}\n");
+    }
+
+    #[test]
+    fn body_mode_unknown_is_refused() {
+        let file = parse(GET);
+        let error = resolve(&file, &[FieldEdit::BodyMode("yaml".into())]).unwrap_err();
+        assert_eq!(error, EditError::UnknownBodyMode);
+    }
+
+    #[test]
+    fn body_text_creates_missing_block_at_canonical_anchor() {
+        let source = "post {\n  url: http://a\n  body: json\n}\n\nheaders {\n  Content-Type: application/json\n}\n";
+        let out = apply(source, &[FieldEdit::BodyText("{\n  \"a\": 1\n}".into())]);
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: json\n}\n\nheaders {\n  Content-Type: application/json\n}\n\nbody:json {\n  {\n    \"a\": 1\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_text_removes_cleared_block() {
+        let source =
+            "post {\n  url: http://a\n  body: json\n}\n\nbody:json {\n  {\n    \"a\": 1\n  }\n}\n";
+        let out = apply(source, &[FieldEdit::BodyText("".into())]);
+        assert_eq!(out, "post {\n  url: http://a\n  body: json\n}\n");
+    }
+
+    #[test]
+    fn body_text_does_not_create_block_if_empty() {
+        let source = "post {\n  url: http://a\n  body: json\n}\n";
+        let out = apply(source, &[FieldEdit::BodyText("   \n  ".into())]);
+        assert_eq!(out, "post {\n  url: http://a\n  body: json\n}\n");
+    }
+
+    #[test]
+    fn body_text_creates_block_alongside_body_mode_change() {
+        let source = "post {\n  url: http://a\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::BodyMode("text".into()),
+                FieldEdit::BodyText("hello world".into()),
+            ],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: text\n}\n\nbody:text {\n  hello world\n}\n"
+        );
+    }
+
+    #[test]
+    fn graphql_vars_modifies_existing_block() {
+        let source = "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::GraphqlVars("{\n  \"id\": 2\n}".into())],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 2\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn graphql_vars_creates_missing_block_at_canonical_anchor() {
+        let source = "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::GraphqlVars("{\n  \"id\": 1\n}".into())],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn graphql_vars_removes_cleared_block() {
+        let source = "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n\nbody:graphql:vars {\n  {\n    \"id\": 1\n  }\n}\n";
+        let out = apply(source, &[FieldEdit::GraphqlVars("".into())]);
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n"
+        );
+    }
+
+    #[test]
+    fn form_urlencoded_value_enabled_and_rename() {
+        let source = "post {\n  url: http://a\n  body: formUrlEncoded\n}\n\nbody:form-urlencoded {\n  foo: bar\n  ~old: 1\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::FormUrlEncodedValue {
+                    index: 0,
+                    value: "baz".into(),
+                },
+                FieldEdit::FormUrlEncodedEnabled {
+                    index: 1,
+                    enabled: true,
+                },
+                FieldEdit::RenameKey {
+                    section: EntrySection::FormUrlEncoded,
+                    index: 1,
+                    key: "new".into(),
+                },
+            ],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n}\n\nbody:form-urlencoded {\n  foo: baz\n  new: 1\n}\n"
+        );
+    }
+
+    #[test]
+    fn form_urlencoded_creation_and_removal() {
+        let source = "post {\n  url: http://a\n  body: formUrlEncoded\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::AddEntry {
+                section: EntrySection::FormUrlEncoded,
+                key: "a".into(),
+                value: "1".into(),
+                enabled: true,
+            }],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n}\n\nbody:form-urlencoded {\n  a: 1\n}\n"
+        );
+
+        let out_cleared = apply(
+            &out,
+            &[FieldEdit::RemoveEntry {
+                section: EntrySection::FormUrlEncoded,
+                index: 0,
+            }],
+        );
+        assert_eq!(
+            out_cleared,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n}\n"
+        );
+    }
+
+    #[test]
+    fn multipart_form_text_field_editing_preserves_content_type() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  desc: old text @contentType(text/plain)\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::MultipartFormValue {
+                index: 0,
+                value: "new text".into(),
+            }],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  desc: new text @contentType(text/plain)\n}\n"
+        );
+    }
+
+    #[test]
+    fn multipart_form_file_entry_refuses_value_edit_and_rename() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  file: @file(doc.pdf) @contentType(application/pdf)\n}\n";
+        let file = parse(source);
+        let err1 = resolve(
+            &file,
+            &[FieldEdit::MultipartFormValue {
+                index: 0,
+                value: "other.pdf".into(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err1, EditError::ImmutableFileEntry);
+
+        let err2 = resolve(
+            &file,
+            &[FieldEdit::RenameKey {
+                section: EntrySection::MultipartForm,
+                index: 0,
+                key: "other".into(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err2, EditError::ImmutableFileEntry);
+    }
+
+    #[test]
+    fn multipart_form_file_entry_allows_toggle_and_removal() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  file: @file(doc.pdf)\n}\n";
+        let out_toggle = apply(
+            source,
+            &[FieldEdit::MultipartFormEnabled {
+                index: 0,
+                enabled: false,
+            }],
+        );
+        assert_eq!(
+            out_toggle,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  ~file: @file(doc.pdf)\n}\n"
+        );
+
+        let out_remove = apply(
+            source,
+            &[FieldEdit::RemoveEntry {
+                section: EntrySection::MultipartForm,
+                index: 0,
+            }],
+        );
+        assert_eq!(
+            out_remove,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n"
+        );
+    }
+
+    #[test]
+    fn multipart_form_preserves_key_annotation_prefix_on_rename() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  @description(test) oldKey: val\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::RenameKey {
+                section: EntrySection::MultipartForm,
+                index: 0,
+                key: "newKey".into(),
+            }],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  @description(test) newKey: val\n}\n"
         );
     }
 }

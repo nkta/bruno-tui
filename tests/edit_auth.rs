@@ -109,7 +109,7 @@ async fn edit_auth_mode_and_token_on_request_and_save() {
         sender.send(key(KeyCode::Down)).await.expect("down");
     }
 
-    // 3. Ouvrir AuthModePicker (Entrée)
+    // 3. Ouvrir le sélecteur de mode d'auth (Entrée)
     sender.send(key(KeyCode::Enter)).await.expect("enter");
 
     // Modes: ["none", "inherit", "basic", "bearer", ...]
@@ -186,7 +186,7 @@ async fn edit_auth_apikey_placement_via_picker_and_save() {
         sender.send(key(KeyCode::Down)).await.expect("down");
     }
 
-    // Ouvrir AuthModePicker
+    // Ouvrir le sélecteur de mode d'auth
     sender.send(key(KeyCode::Enter)).await.expect("enter");
 
     // Modes: ["none", "inherit", "basic", "bearer", "digest", "ntlm", "apikey"] -> 6 crans vers le bas
@@ -202,7 +202,7 @@ async fn edit_auth_apikey_placement_via_picker_and_save() {
     sender.send(key(KeyCode::Down)).await.expect("down");
     sender.send(key(KeyCode::Down)).await.expect("down");
 
-    // Entrée ouvre ApiKeyPlacementPicker
+    // Entrée ouvre le sélecteur de placement
     sender.send(key(KeyCode::Enter)).await.expect("enter");
 
     // Options: ["header", "queryparams"] -> descendre de 1 cran pour choisir "queryparams"
@@ -262,7 +262,7 @@ async fn edit_auth_mode_on_folder_and_save() {
     sender.send(key(KeyCode::Down)).await.expect("down");
     sender.send(key(KeyCode::Down)).await.expect("down");
 
-    // 3. Ouvrir AuthModePicker (Entrée)
+    // 3. Ouvrir le sélecteur de mode d'auth (Entrée)
     sender.send(key(KeyCode::Enter)).await.expect("enter");
 
     // Modes pour dossier: ["none", "inherit", "basic", ...]
@@ -366,7 +366,7 @@ auth:basic {
         sender.send(key(KeyCode::Down)).await.expect("down");
     }
 
-    // 3. Ouvrir AuthModePicker (Entrée)
+    // 3. Ouvrir le sélecteur de mode d'auth (Entrée)
     sender.send(key(KeyCode::Enter)).await.expect("enter");
 
     // Modes: ["none", "inherit", "basic", "bearer", ...]
