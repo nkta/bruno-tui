@@ -61,19 +61,33 @@ impl EntrySection {
     }
 }
 
+/// Modes du corps autorisés pour une requête HTTP (`docs/edition-phase2.md` § 6).
+pub const BODY_MODES: [&str; 8] = [
+    "none",
+    "json",
+    "text",
+    "xml",
+    "sparql",
+    "formUrlEncoded",
+    "multipartForm",
+    "file",
+];
+
 /// Modification d'une requête chargée.
 ///
 /// Les modifications d'une liste s'appliquent dans l'ordre : `index`
 /// désigne la position dans `RequestView.headers` / `.query_params` /
 /// `.path_params` / etc. telle qu'elle résulte des modifications précédentes
 /// de la même liste. Sans ajout ni suppression, il coïncide avec l'indice
-/// exposé par `bru-parser`. `Url`, `Method` et `BodyText` sont singletons.
+/// exposé par `bru-parser`. `Url`, `Method`, `BodyMode` et `BodyText` sont singletons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldEdit {
     Url(String),
     /// Nom du bloc de méthode, en minuscules, l'une des 9 valeurs de
     /// `crate::collection::ast::METHODS` (`add-method-editing`).
     Method(String),
+    /// Mode du corps dans le bloc de méthode (`BODY_MODES`).
+    BodyMode(String),
     HeaderValue {
         index: usize,
         value: String,

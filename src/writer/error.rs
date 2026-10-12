@@ -67,6 +67,10 @@ pub enum EditError {
     #[error("méthode inconnue")]
     UnknownMethod,
 
+    /// Mode du corps hors des 8 valeurs reconnues (`docs/edition-phase2.md` § 6).
+    #[error("mode de corps inconnu")]
+    UnknownBodyMode,
+
     #[error("bloc `{block}` non modifiable structurellement")]
     ImmutableBlock { block: &'static str },
 

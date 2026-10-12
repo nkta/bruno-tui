@@ -11,7 +11,7 @@ use super::dictionary::{
     DictEntry as DraftEntry, DictSection as Section, check_key_general, dictionary_replacements,
     following_blank_line_len, preceding_blank_line_len, section_block_node,
 };
-use super::edit::{EntrySection, FieldEdit, Replacement};
+use super::edit::{BODY_MODES, EntrySection, FieldEdit, Replacement};
 use super::error::{EditError, EntryProblem};
 use super::format;
 use super::query;
@@ -32,6 +32,14 @@ struct UrlState {
     span: Range<usize>,
     key: String,
     disabled: bool,
+    original: String,
+    current: String,
+}
+
+/// Clé `body` du bloc de méthode (`docs/edition-phase2.md` § 6).
+struct BodyModeState {
+    span: Option<Range<usize>>,
+    insert_anchor: usize,
     original: String,
     current: String,
 }
@@ -98,6 +106,7 @@ pub(crate) struct Draft<'a> {
     ast: &'a BruFile,
     url: Result<UrlState, EditError>,
     method: Result<MethodState, EditError>,
+    body_mode: Result<BodyModeState, EditError>,
     sections: [Section; EntrySection::ALL.len()],
     body: Option<BodyState>,
     text_blocks: [TextBlockState; 4],
@@ -143,6 +152,7 @@ impl<'a> Draft<'a> {
             ast,
             url: url_state(ast),
             method: method_state(ast),
+            body_mode: body_mode_state(ast),
             sections: EntrySection::ALL.map(section),
             body: None,
             text_blocks: TextBlockKind::ALL.map(text_block),
@@ -167,6 +177,13 @@ impl<'a> Draft<'a> {
                 }
                 let method = self.method.as_mut().map_err(|error| error.clone())?;
                 method.current = value.clone();
+            }
+            FieldEdit::BodyMode(value) => {
+                if !BODY_MODES.contains(&value.as_str()) {
+                    return Err(EditError::UnknownBodyMode);
+                }
+                let body_mode = self.body_mode.as_mut().map_err(|error| error.clone())?;
+                body_mode.current = value.clone();
             }
             FieldEdit::HeaderValue { index, value } => {
                 self.entry_mut(Headers, *index)?.value = value.clone();
@@ -212,7 +229,12 @@ impl<'a> Draft<'a> {
             }
             FieldEdit::BodyText(text) => {
                 if self.body.is_none() {
-                    self.body = Some(body_state(self.ast)?);
+                    let declared = self
+                        .body_mode
+                        .as_ref()
+                        .map(|m| m.current.as_str())
+                        .unwrap_or("none");
+                    self.body = Some(body_state(self.ast, declared)?);
                 }
                 if let Some(body) = &mut self.body {
                     body.text = text.clone();
@@ -399,6 +421,26 @@ impl<'a> Draft<'a> {
                 span: method.span.clone(),
                 bytes: method.current.clone(),
             });
+        }
+        if let Ok(body_mode) = &self.body_mode
+            && body_mode.current != body_mode.original
+        {
+            match &body_mode.span {
+                Some(span) => {
+                    replacements.push(Replacement {
+                        span: span.clone(),
+                        bytes: format!("  body: {}{eol}", body_mode.current),
+                    });
+                }
+                None => {
+                    if body_mode.current != "none" {
+                        replacements.push(Replacement {
+                            span: body_mode.insert_anchor..body_mode.insert_anchor,
+                            bytes: format!("  body: {}{eol}", body_mode.current),
+                        });
+                    }
+                }
+            }
         }
         if let Some(body) = &self.body {
             replacements.push(Replacement {
@@ -726,7 +768,7 @@ fn method_state(ast: &BruFile) -> Result<MethodState, EditError> {
     })
 }
 
-fn body_state(ast: &BruFile) -> Result<BodyState, EditError> {
+fn body_mode_state(ast: &BruFile) -> Result<BodyModeState, EditError> {
     let method = ast
         .blocks()
         .find(|block| METHODS.contains(&block.name.as_str()))
@@ -734,12 +776,29 @@ fn body_state(ast: &BruFile) -> Result<BodyState, EditError> {
     let BlockBody::Dictionary(entries) = &method.body else {
         return Err(EditError::MissingField { field: "body" });
     };
-    let declared = entries
+    let insert_anchor = entries
         .iter()
-        .find(|entry| entry.key == "body")
-        .map(|entry| entry.value.as_str())
-        .unwrap_or_default();
+        .find(|entry| entry.key == "url")
+        .map(|entry| entry.span.end)
+        .unwrap_or(0);
+    let existing = entries.iter().find(|entry| entry.key == "body");
+    let (span, original, current) = match existing {
+        Some(entry) => (
+            Some(entry.span.clone()),
+            entry.value.clone(),
+            entry.value.clone(),
+        ),
+        None => (None, "none".to_owned(), "none".to_owned()),
+    };
+    Ok(BodyModeState {
+        span,
+        insert_anchor,
+        original,
+        current,
+    })
+}
 
+fn body_state(ast: &BruFile, declared: &str) -> Result<BodyState, EditError> {
     if FORM_BODY_KINDS.contains(&declared) {
         return Err(EditError::WrongBodyForm {
             expected: "body:text",
@@ -1344,5 +1403,40 @@ mod tests {
             out,
             "get {\n  url: http://a\n}\n\nheaders {\n  H: 1\n}\n\nvars:post-response {\n  v2: b\n}\n\nassert {\n  res.status: eq 200\n}\n\nscript:pre-request {\n  pre();\n}\n\ntests {\n  test();\n}\n\nsettings {\n  encodeUrl: true\n}\n\ndocs {\n  doc\n}\n"
         );
+    }
+
+    #[test]
+    fn body_mode_replaces_existing_mode_and_preserves_other_blocks() {
+        let source =
+            "post {\n  url: http://a\n  body: json\n  auth: none\n}\n\nbody:json {\n  {}\n}\n";
+        let out = apply(source, &[FieldEdit::BodyMode("formUrlEncoded".into())]);
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n  auth: none\n}\n\nbody:json {\n  {}\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_mode_inserts_after_url_when_absent() {
+        let source = "get {\n  url: http://a\n  auth: none\n}\n";
+        let out = apply(source, &[FieldEdit::BodyMode("json".into())]);
+        assert_eq!(
+            out,
+            "get {\n  url: http://a\n  body: json\n  auth: none\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_mode_none_replaces_existing_mode() {
+        let source = "post {\n  url: http://a\n  body: json\n}\n";
+        let out = apply(source, &[FieldEdit::BodyMode("none".into())]);
+        assert_eq!(out, "post {\n  url: http://a\n  body: none\n}\n");
+    }
+
+    #[test]
+    fn body_mode_unknown_is_refused() {
+        let file = parse(GET);
+        let error = resolve(&file, &[FieldEdit::BodyMode("yaml".into())]).unwrap_err();
+        assert_eq!(error, EditError::UnknownBodyMode);
     }
 }
