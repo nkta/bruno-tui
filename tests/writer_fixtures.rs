@@ -856,3 +856,142 @@ fn folder_bru_text_blocks_and_headers_edit() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn body_mode_edit_and_body_text_block_creation_and_removal() {
+    let dir = workdir("body-mode-edit");
+    let path = dir.join("req.bru");
+    let initial = "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n  body: none\n  auth: none\n}\n";
+    fs::write(&path, initial).expect("écriture initiale");
+    let (ast, stamp) = load(&path);
+
+    // 1. Passage en mode json et création du bloc body:json
+    let stamp2 = BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[
+                FieldEdit::BodyMode("json".into()),
+                FieldEdit::BodyText("{\n  \"hello\": \"world\"\n}".into()),
+            ],
+        )
+        .expect("écriture json");
+
+    let rewritten = fs::read_to_string(&path).expect("relecture");
+    assert_eq!(
+        rewritten,
+        "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n  body: json\n  auth: none\n}\n\nbody:json {\n  {\n    \"hello\": \"world\"\n  }\n}\n"
+    );
+
+    // 2. Vidage du corps : le bloc body:json est supprimé mais body: json reste
+    let (ast2, _) = load(&path);
+    BruWriter
+        .write_request(&path, &ast2, &stamp2, &[FieldEdit::BodyText("".into())])
+        .expect("vidage corps");
+
+    let rewritten2 = fs::read_to_string(&path).expect("relecture 2");
+    assert_eq!(
+        rewritten2,
+        "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n  body: json\n  auth: none\n}\n"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn body_form_urlencoded_and_multipart_form_round_trip() {
+    let dir = workdir("forms-round-trip");
+    let path = dir.join("form.bru");
+    let initial = "meta {\n  name: form\n  type: http\n  seq: 1\n}\n\npost {\n  url: https://example.com\n  body: formUrlEncoded\n  auth: none\n}\n\nbody:form-urlencoded {\n  user: alice\n}\n";
+    fs::write(&path, initial).expect("écriture initiale");
+    let (ast, stamp) = load(&path);
+
+    // 1. Ajout et bascule dans form-urlencoded
+    let stamp2 = BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[
+                add(EntrySection::FormUrlEncoded, "role", "admin"),
+                FieldEdit::FormUrlEncodedEnabled {
+                    index: 0,
+                    enabled: false,
+                },
+            ],
+        )
+        .expect("écriture form");
+
+    let rewritten = fs::read_to_string(&path).expect("relecture");
+    assert_eq!(
+        rewritten,
+        "meta {\n  name: form\n  type: http\n  seq: 1\n}\n\npost {\n  url: https://example.com\n  body: formUrlEncoded\n  auth: none\n}\n\nbody:form-urlencoded {\n  ~user: alice\n  role: admin\n}\n"
+    );
+
+    // 2. Passage en multipartForm avec annotations et @file
+    let (ast2, _) = load(&path);
+    BruWriter
+        .write_request(
+            &path,
+            &ast2,
+            &stamp2,
+            &[
+                FieldEdit::BodyMode("multipartForm".into()),
+                add(
+                    EntrySection::MultipartForm,
+                    "avatar",
+                    "@file(photo.jpg) @contentType(image/jpeg)",
+                ),
+                add(EntrySection::MultipartForm, "@customKey", "value"),
+            ],
+        )
+        .expect("écriture multipart");
+
+    let rewritten2 = fs::read_to_string(&path).expect("relecture 2");
+    assert_eq!(
+        rewritten2,
+        "meta {\n  name: form\n  type: http\n  seq: 1\n}\n\npost {\n  url: https://example.com\n  body: multipartForm\n  auth: none\n}\n\nbody:form-urlencoded {\n  ~user: alice\n  role: admin\n}\n\nbody:multipart-form {\n  avatar: @file(photo.jpg) @contentType(image/jpeg)\n  @customKey: value\n}\n"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn body_graphql_vars_creation_edit_and_removal() {
+    let dir = workdir("gql-vars");
+    let path = dir.join("gql.bru");
+    let initial = "meta {\n  name: gql\n  type: graphql\n  seq: 1\n}\n\npost {\n  url: https://example.com/graphql\n  body: graphql\n  auth: none\n}\n\nbody:graphql {\n  query { ping }\n}\n";
+    fs::write(&path, initial).expect("écriture initiale");
+    let (ast, stamp) = load(&path);
+
+    // 1. Création du bloc body:graphql:vars
+    let stamp2 = BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[FieldEdit::GraphqlVars("{\n  \"limit\": 5\n}".into())],
+        )
+        .expect("création gql vars");
+
+    let rewritten = fs::read_to_string(&path).expect("relecture");
+    assert_eq!(
+        rewritten,
+        "meta {\n  name: gql\n  type: graphql\n  seq: 1\n}\n\npost {\n  url: https://example.com/graphql\n  body: graphql\n  auth: none\n}\n\nbody:graphql {\n  query { ping }\n}\n\nbody:graphql:vars {\n  {\n    \"limit\": 5\n  }\n}\n"
+    );
+
+    // 2. Vidage : suppression du bloc body:graphql:vars
+    let (ast2, _) = load(&path);
+    BruWriter
+        .write_request(&path, &ast2, &stamp2, &[FieldEdit::GraphqlVars("".into())])
+        .expect("vidage gql vars");
+
+    let rewritten2 = fs::read_to_string(&path).expect("relecture 2");
+    assert_eq!(
+        rewritten2,
+        "meta {\n  name: gql\n  type: graphql\n  seq: 1\n}\n\npost {\n  url: https://example.com/graphql\n  body: graphql\n  auth: none\n}\n\nbody:graphql {\n  query { ping }\n}\n"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
