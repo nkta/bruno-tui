@@ -141,11 +141,11 @@ atténués ; une barre d'onglets adaptative fait défiler les onglets sur les
 | `v` | sélection visuelle de lignes ; `y` copie dans le presse-papiers |
 | `Clic` | cliquer sur un onglet pour l'afficher |
 
-Les onglets Vars, Script, Tests, Docs et Settings sont en lecture seule :
-pendant une session d'édition, ils ne sont pas des cibles éditables et la
-navigation entre champs reste inchangée. Les onglets Script (scripts pré-requête
-et post-réponse) et Tests affichent le code brut avec numérotation de lignes,
-aussi bien pour les fichiers `.bru` que pour les collections OpenCollection YAML.
+Les onglets Script (scripts pré-requête et post-réponse), Tests et Docs restent
+édités dans un éditeur externe ; les onglets Vars, Assert et Settings
+sont éditables directement dans le TUI pour les fichiers `.bru`. Les onglets Script
+et Tests affichent le code brut avec numérotation de lignes, aussi bien pour les
+fichiers `.bru` que pour les collections OpenCollection YAML.
 
 ### Contenu des dossiers et de la collection racine
 
@@ -162,8 +162,10 @@ aussi bien pour les fichiers `.bru` que pour les collections OpenCollection YAML
 - **Masquage d'authentification** : les valeurs littérales sensibles (mots de passe, tokens,
   secrets, clés d'API) sont masquées (`********`) dans l'onglet Auth, tandis que les références
   de variables (`{{variable}}`) restent visibles en clair.
-- **Lecture seule** : les dossiers et la collection sont strictement en lecture seule ; aucune
-  session d'édition ne peut y être ouverte.
+- **Édition `.bru`** : pour les collections au format `.bru`, les dossiers (`folder.bru`) et
+  la collection racine (`collection.bru`) sont éditables (`Entrée` / `e`) pour leurs en-têtes,
+  variables, assertions et réglages. Pour les collections OpenCollection (YAML), ils restent
+  strictement en lecture seule.
 
 
 ## Édition d'une requête

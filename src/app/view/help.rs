@@ -174,7 +174,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Espace",
-                effect: "activer ou désactiver l'en-tête ou le paramètre",
+                effect: "activer ou désactiver l'en-tête, la variable ou le paramètre",
             },
             HelpEntry {
                 key: "a",
@@ -182,11 +182,11 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "d",
-                effect: "supprimer l'en-tête ou le paramètre, sans confirmation",
+                effect: "supprimer l'en-tête, la variable ou le paramètre, sans confirmation",
             },
             HelpEntry {
                 key: "c",
-                effect: "renommer la clé de l'en-tête ou du paramètre",
+                effect: "renommer la clé de l'en-tête, de la variable ou du paramètre",
             },
             HelpEntry {
                 key: "Ctrl+S",
