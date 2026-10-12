@@ -1,0 +1,25 @@
+{
+  "url": "https://{{host}}/items",
+  "headers": [],
+  "params": [],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [
+    {
+      "name": "res.status",
+      "value": "eq 201",
+      "enabled": true
+    },
+    {
+      "name": "res.body.items",
+      "value": "isDefined",
+      "enabled": false
+    },
+    {
+      "name": "res.headers['content-type']",
+      "value": "matches json",
+      "enabled": true
+    }
+  ],
+  "settings": {}
+}

@@ -1,0 +1,15 @@
+meta {
+  name: assert-ops
+  type: http
+  seq: 2
+}
+
+get {
+  url: https://{{host}}/items
+}
+
+assert {
+  res.status: eq 201
+  ~res.body.items: isDefined
+  res.headers['content-type']: matches json
+}

@@ -1,0 +1,18 @@
+meta {
+  name: vars-ops
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://{{host}}/items
+}
+
+headers {
+  Accept: application/json
+}
+
+vars:pre-request {
+  token: secret123
+  ~temp: to_delete
+}

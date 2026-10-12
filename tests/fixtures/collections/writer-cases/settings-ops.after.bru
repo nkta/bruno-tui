@@ -1,0 +1,14 @@
+meta {
+  name: settings-ops
+  type: http
+  seq: 3
+}
+
+get {
+  url: https://{{host}}/items
+}
+
+settings {
+  encodeUrl: false
+  timeout: 5000
+}

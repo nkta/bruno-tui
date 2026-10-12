@@ -14,5 +14,9 @@
       "enabled": true,
       "type": "query"
     }
-  ]
+  ],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {}
 }

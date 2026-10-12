@@ -1,0 +1,12 @@
+{
+  "url": "https://{{host}}/items",
+  "headers": [],
+  "params": [],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {
+    "encodeUrl": false,
+    "timeout": 5000
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "url": "https://{{host}}/items",
+  "headers": [
+    {
+      "name": "Accept",
+      "value": "application/json",
+      "enabled": true
+    }
+  ],
+  "params": [],
+  "vars_req": [
+    {
+      "name": "token",
+      "value": "updated_token",
+      "enabled": true
+    }
+  ],
+  "vars_res": [
+    {
+      "name": "res_id",
+      "value": "res.body.id",
+      "enabled": true
+    }
+  ],
+  "assertions": [],
+  "settings": {}
+}
