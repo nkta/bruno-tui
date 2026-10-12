@@ -412,13 +412,16 @@ mod tests {
     use super::super::*;
     use super::*;
     use crate::app::model::{
-        EnvironmentEditSession, MouseState, PendingConfirm, RequestTab, ResponseTab,
+        EnvironmentEditSession, InputTarget, MouseState, PendingConfirm, RequestTab, ResponseTab,
+        field_value,
     };
     use crate::app::test_support::{loaded_model, runner_probe_model, select, selected_name};
     use crate::app::view::detail::request_text_and_fields;
     use crate::app::view::detail::{plain_lines, response_plain_lines};
     use crate::app::view::hit::{Hit, hit_test};
     use crate::app::view::response_text_area;
+    use crate::writer::EntrySection;
+    use ratatui::text::Line;
 
     fn model_on(path: &str, size: (u16, u16)) -> Model {
         let mut model = loaded_model(size);
