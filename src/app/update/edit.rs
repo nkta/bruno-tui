@@ -477,6 +477,9 @@ pub(crate) fn finish_add(model: &mut Model, section: EntrySection) {
             }
             EntrySection::Assert => EditableField::AssertValue(count.saturating_sub(1)),
             EntrySection::Settings => EditableField::SettingsValue(count.saturating_sub(1)),
+            EntrySection::FormUrlEncoded | EntrySection::MultipartForm => {
+                EditableField::AddRow(section)
+            }
         };
         if let Some(position) = session.fields.iter().position(|f| *f == field) {
             session.cursor = position;

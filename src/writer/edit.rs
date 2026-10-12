@@ -20,14 +20,18 @@ pub enum EntrySection {
     VarsPostResponse,
     Assert,
     Settings,
+    FormUrlEncoded,
+    MultipartForm,
 }
 
 impl EntrySection {
     /// Ordre d'écriture de Bruno après le bloc de méthode.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::QueryParams,
         Self::PathParams,
         Self::Headers,
+        Self::FormUrlEncoded,
+        Self::MultipartForm,
         Self::VarsPreRequest,
         Self::VarsPostResponse,
         Self::Assert,
@@ -40,6 +44,8 @@ impl EntrySection {
             Self::QueryParams => "params:query",
             Self::PathParams => "params:path",
             Self::Headers => "headers",
+            Self::FormUrlEncoded => "body:form-urlencoded",
+            Self::MultipartForm => "body:multipart-form",
             Self::VarsPreRequest => "vars:pre-request",
             Self::VarsPostResponse => "vars:post-response",
             Self::Assert => "assert",
@@ -53,10 +59,12 @@ impl EntrySection {
             Self::QueryParams => 0,
             Self::PathParams => 1,
             Self::Headers => 2,
-            Self::VarsPreRequest => 3,
-            Self::VarsPostResponse => 4,
-            Self::Assert => 5,
-            Self::Settings => 6,
+            Self::FormUrlEncoded => 3,
+            Self::MultipartForm => 4,
+            Self::VarsPreRequest => 5,
+            Self::VarsPostResponse => 6,
+            Self::Assert => 7,
+            Self::Settings => 8,
         }
     }
 }
@@ -139,6 +147,22 @@ pub enum FieldEdit {
     SettingsValue {
         index: usize,
         value: String,
+    },
+    FormUrlEncodedValue {
+        index: usize,
+        value: String,
+    },
+    FormUrlEncodedEnabled {
+        index: usize,
+        enabled: bool,
+    },
+    MultipartFormValue {
+        index: usize,
+        value: String,
+    },
+    MultipartFormEnabled {
+        index: usize,
+        enabled: bool,
     },
     BodyText(String),
     /// Contenu du bloc body:graphql:vars ; vide pour retirer le bloc.

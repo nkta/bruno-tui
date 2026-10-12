@@ -165,7 +165,10 @@ impl RequestTab {
             EditableField::SettingsValue(_) | EditableField::AddRow(EntrySection::Settings) => {
                 Some(RequestTab::Settings)
             }
-            EditableField::BodyText => Some(RequestTab::Body),
+            EditableField::BodyText
+            | EditableField::AddRow(EntrySection::FormUrlEncoded | EntrySection::MultipartForm) => {
+                Some(RequestTab::Body)
+            }
             EditableField::ScriptPreRequest | EditableField::ScriptPostResponse => {
                 Some(RequestTab::Script)
             }
@@ -1213,6 +1216,7 @@ pub fn add_row_label(section: EntrySection) -> &'static str {
         EntrySection::VarsPostResponse => "+ Ajouter une variable post-response",
         EntrySection::Assert => "+ Ajouter une assertion",
         EntrySection::Settings => "+ Ajouter un paramètre",
+        EntrySection::FormUrlEncoded | EntrySection::MultipartForm => "+ Ajouter un champ",
     }
 }
 
@@ -1226,6 +1230,8 @@ pub fn section_label(section: EntrySection) -> &'static str {
         EntrySection::VarsPostResponse => "Variables post-response",
         EntrySection::Assert => "Assertions",
         EntrySection::Settings => "Paramètres",
+        EntrySection::FormUrlEncoded => "Formulaire URL-encoded",
+        EntrySection::MultipartForm => "Formulaire Multipart",
     }
 }
 
@@ -1242,6 +1248,13 @@ pub fn section_entries(
         EntrySection::VarsPostResponse => &view.extra.vars_post_response,
         EntrySection::Assert => &view.extra.assertions,
         EntrySection::Settings => &view.extra.settings,
+        EntrySection::FormUrlEncoded | EntrySection::MultipartForm => match &view.body {
+            Some(body) => match &body.content {
+                crate::collection::BodyContent::Entries(entries) => entries.as_slice(),
+                _ => &[],
+            },
+            None => &[],
+        },
     }
 }
 

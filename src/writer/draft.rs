@@ -169,7 +169,8 @@ impl<'a> Draft<'a> {
     /// l'état courant de la section.
     pub(crate) fn apply(&mut self, edit: &FieldEdit) -> Result<(), EditError> {
         use EntrySection::{
-            Assert, Headers, PathParams, QueryParams, Settings, VarsPostResponse, VarsPreRequest,
+            Assert, FormUrlEncoded, Headers, MultipartForm, PathParams, QueryParams, Settings,
+            VarsPostResponse, VarsPreRequest,
         };
         match edit {
             FieldEdit::Url(value) => {
@@ -213,6 +214,23 @@ impl<'a> Draft<'a> {
             }
             FieldEdit::SettingsValue { index, value } => {
                 self.entry_mut(Settings, *index)?.value = value.clone();
+            }
+            FieldEdit::FormUrlEncodedValue { index, value } => {
+                self.entry_mut(FormUrlEncoded, *index)?.value = value.clone();
+            }
+            FieldEdit::FormUrlEncodedEnabled { index, enabled } => {
+                self.entry_mut(FormUrlEncoded, *index)?.disabled = !enabled;
+            }
+            FieldEdit::MultipartFormValue { index, value } => {
+                let entry = self.entry_mut(MultipartForm, *index)?;
+                if entry.value.trim_start().starts_with("@file(") {
+                    return Err(EditError::ImmutableFileEntry);
+                }
+                let preserved = preserve_content_type(value, &entry.value);
+                self.entry_mut(MultipartForm, *index)?.value = preserved;
+            }
+            FieldEdit::MultipartFormEnabled { index, enabled } => {
+                self.entry_mut(MultipartForm, *index)?.disabled = !enabled;
             }
             FieldEdit::HeaderEnabled { index, enabled } => {
                 self.entry_mut(Headers, *index)?.disabled = !enabled;
@@ -315,9 +333,21 @@ impl<'a> Draft<'a> {
                         block: Settings.block_name(),
                     });
                 }
+                if *section == MultipartForm {
+                    let entry = self.entry_mut(*section, *index)?;
+                    if entry.value.trim_start().starts_with("@file(") {
+                        return Err(EditError::ImmutableFileEntry);
+                    }
+                }
                 self.entry_mut(*section, *index)?;
                 check_key(*section, key, Some(*index))?;
-                self.entry_mut(*section, *index)?.key = key.clone();
+                let old_key = self.entry_mut(*section, *index)?.key.clone();
+                let final_key = if *section == MultipartForm {
+                    preserve_key_prefix(key, &old_key)
+                } else {
+                    key.clone()
+                };
+                self.entry_mut(*section, *index)?.key = final_key;
                 if *section == QueryParams {
                     self.sync_url_from_params();
                 }
@@ -539,6 +569,29 @@ impl<'a> Draft<'a> {
         }
         Ok(replacements)
     }
+}
+
+fn preserve_content_type(new_val: &str, old_val: &str) -> String {
+    if !new_val.contains("@contentType(")
+        && let Some(idx) = old_val.rfind("@contentType(")
+    {
+        let suffix = &old_val[idx..];
+        if suffix.ends_with(')') {
+            return format!("{new_val} {suffix}");
+        }
+    }
+    new_val.to_owned()
+}
+
+fn preserve_key_prefix(new_key: &str, old_key: &str) -> String {
+    if !new_key.starts_with('@')
+        && old_key.starts_with('@')
+        && let Some(space_idx) = old_key.rfind(") ")
+    {
+        let prefix = &old_key[..space_idx + 2];
+        return format!("{prefix}{new_key}");
+    }
+    new_key.to_owned()
 }
 
 /// Cible d'un bloc de texte (`body:*`, `script:*`, `tests`, `docs`).
@@ -1622,6 +1675,150 @@ mod tests {
         assert_eq!(
             out,
             "post {\n  url: http://a\n  body: graphql\n}\n\nbody:graphql {\n  query\n}\n"
+        );
+    }
+
+    #[test]
+    fn form_urlencoded_value_enabled_and_rename() {
+        let source = "post {\n  url: http://a\n  body: formUrlEncoded\n}\n\nbody:form-urlencoded {\n  foo: bar\n  ~old: 1\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::FormUrlEncodedValue {
+                    index: 0,
+                    value: "baz".into(),
+                },
+                FieldEdit::FormUrlEncodedEnabled {
+                    index: 1,
+                    enabled: true,
+                },
+                FieldEdit::RenameKey {
+                    section: EntrySection::FormUrlEncoded,
+                    index: 1,
+                    key: "new".into(),
+                },
+            ],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n}\n\nbody:form-urlencoded {\n  foo: baz\n  new: 1\n}\n"
+        );
+    }
+
+    #[test]
+    fn form_urlencoded_creation_and_removal() {
+        let source = "post {\n  url: http://a\n  body: formUrlEncoded\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::AddEntry {
+                section: EntrySection::FormUrlEncoded,
+                key: "a".into(),
+                value: "1".into(),
+                enabled: true,
+            }],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n}\n\nbody:form-urlencoded {\n  a: 1\n}\n"
+        );
+
+        let out_cleared = apply(
+            &out,
+            &[FieldEdit::RemoveEntry {
+                section: EntrySection::FormUrlEncoded,
+                index: 0,
+            }],
+        );
+        assert_eq!(
+            out_cleared,
+            "post {\n  url: http://a\n  body: formUrlEncoded\n}\n"
+        );
+    }
+
+    #[test]
+    fn multipart_form_text_field_editing_preserves_content_type() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  desc: old text @contentType(text/plain)\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::MultipartFormValue {
+                index: 0,
+                value: "new text".into(),
+            }],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  desc: new text @contentType(text/plain)\n}\n"
+        );
+    }
+
+    #[test]
+    fn multipart_form_file_entry_refuses_value_edit_and_rename() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  file: @file(doc.pdf) @contentType(application/pdf)\n}\n";
+        let file = parse(source);
+        let err1 = resolve(
+            &file,
+            &[FieldEdit::MultipartFormValue {
+                index: 0,
+                value: "other.pdf".into(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err1, EditError::ImmutableFileEntry);
+
+        let err2 = resolve(
+            &file,
+            &[FieldEdit::RenameKey {
+                section: EntrySection::MultipartForm,
+                index: 0,
+                key: "other".into(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(err2, EditError::ImmutableFileEntry);
+    }
+
+    #[test]
+    fn multipart_form_file_entry_allows_toggle_and_removal() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  file: @file(doc.pdf)\n}\n";
+        let out_toggle = apply(
+            source,
+            &[FieldEdit::MultipartFormEnabled {
+                index: 0,
+                enabled: false,
+            }],
+        );
+        assert_eq!(
+            out_toggle,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  ~file: @file(doc.pdf)\n}\n"
+        );
+
+        let out_remove = apply(
+            source,
+            &[FieldEdit::RemoveEntry {
+                section: EntrySection::MultipartForm,
+                index: 0,
+            }],
+        );
+        assert_eq!(
+            out_remove,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n"
+        );
+    }
+
+    #[test]
+    fn multipart_form_preserves_key_annotation_prefix_on_rename() {
+        let source = "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  @description(test) oldKey: val\n}\n";
+        let out = apply(
+            source,
+            &[FieldEdit::RenameKey {
+                section: EntrySection::MultipartForm,
+                index: 0,
+                key: "newKey".into(),
+            }],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: multipartForm\n}\n\nbody:multipart-form {\n  @description(test) newKey: val\n}\n"
         );
     }
 }

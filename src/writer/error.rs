@@ -74,6 +74,9 @@ pub enum EditError {
     #[error("bloc `{block}` non modifiable structurellement")]
     ImmutableBlock { block: &'static str },
 
+    #[error("entrée de fichier `@file(...)` non modifiable")]
+    ImmutableFileEntry,
+
     #[error("bloc `{block}`{} : {problem}", at_index(.index))]
     InvalidEntry {
         block: &'static str,

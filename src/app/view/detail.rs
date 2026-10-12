@@ -613,6 +613,9 @@ fn editable_entries(
             EntrySection::VarsPostResponse => EditableField::VarsPostResponseValue(i),
             EntrySection::Assert => EditableField::AssertValue(i),
             EntrySection::Settings => EditableField::SettingsValue(i),
+            EntrySection::FormUrlEncoded | EntrySection::MultipartForm => {
+                EditableField::AddRow(section)
+            }
         };
         let hscroll = value_hscroll(session, &field);
         let renamed = input_for(session, |target| {
