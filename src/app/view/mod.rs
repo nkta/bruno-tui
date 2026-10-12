@@ -404,6 +404,15 @@ pub fn view(model: &Model, frame: &mut Frame) {
         render_global_search_popup(model, popup, frame, popup_area);
     }
 
+    if let Some(session) = &model.editing
+        && let EditState::PlaintextSecretPrompt { var_name, .. } = &session.state
+    {
+        let popup_area = plaintext_secret_popup_area(frame.area());
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
+        render_plaintext_secret_popup(var_name, frame, popup_area);
+    }
+
     frame.render_widget(
         Paragraph::new(status_line(model)).style(Style::new().add_modifier(Modifier::DIM)),
         areas.status,
@@ -819,6 +828,9 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::ExportError(reason) => {
             format!("Échec de l'exportation : {reason}")
         }
+        StatusMessage::SecretVariableHint(var_name) => {
+            format!("Définis {var_name} dans .env ou avec --secret {var_name}")
+        }
     }
 }
 
@@ -881,6 +893,11 @@ fn session_help_line(session: &crate::app::model::EditSession) -> String {
         EditState::ApiKeyPlacementPicker { .. } => {
             format!(
                 "Emplacement · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler"
+            )
+        }
+        EditState::PlaintextSecretPrompt { var_name, .. } => {
+            format!(
+                "Secret en clair — Entrée remplacer par {{{{{var_name}}}}}  g garder  Échap revenir"
             )
         }
     }
@@ -1289,6 +1306,48 @@ fn render_line_numbers(
         }
         row += height;
     }
+}
+
+/// Calcule la zone centrée du popup d'avertissement de secret en clair.
+pub fn plaintext_secret_popup_area(screen: Rect) -> Rect {
+    let width = 68.min(screen.width.saturating_sub(4)).max(40);
+    let height = 6.min(screen.height.saturating_sub(2)).max(5);
+    let x = screen.x + screen.width.saturating_sub(width) / 2;
+    let y = screen.y + screen.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// Rendu du popup d'avertissement de secret en clair (§ 5 spec).
+pub fn render_plaintext_secret_popup(var_name: &str, frame: &mut Frame, area: Rect) {
+    let block = Block::bordered()
+        .title(" Secret en clair ")
+        .border_style(Style::new().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let lines = vec![
+        Line::raw("Secret en clair dans le fichier .bru (souvent partagé via git)."),
+        Line::from(vec![
+            Span::styled("  Entrée  ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw(format!(
+                "remplacer par {{{{{var_name}}}}}",
+                var_name = var_name
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("  g       ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw("garder en clair"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Échap   ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw("revenir à la saisie"),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 #[cfg(test)]

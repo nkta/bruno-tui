@@ -903,10 +903,16 @@ fn render_auth_tab(
                             prefix_width,
                         });
                         let raw_val = field_value(session, &field);
+                        let is_sensitive =
+                            crate::collection::auth::is_sensitive_auth_key(&entry.key);
                         let display_val = if matches!(session.state, EditState::Input(_))
                             && session.current_field() == Some(field)
                         {
-                            raw_val.to_owned()
+                            if is_sensitive && !session.unmasked {
+                                "•".repeat(raw_val.chars().count())
+                            } else {
+                                raw_val.to_owned()
+                            }
                         } else {
                             crate::collection::auth::mask_auth_value(&entry.key, raw_val)
                         };
@@ -1510,10 +1516,20 @@ pub fn cursor_position_for_model(model: &Model) -> Option<(usize, usize)> {
     let (line, _) = input.cursor_line_col();
     let before = input.text_before_cursor_on_line();
     let (visible, _) = skip_columns(&before, usize::from(session.hscroll));
-    Some((
-        location.line + line,
-        location.prefix_width + Line::raw(visible).width(),
-    ))
+    let is_sensitive = match field {
+        EditableField::AuthParamValue(idx) => session
+            .preview
+            .auth_params()
+            .get(idx)
+            .is_some_and(|kv| crate::collection::auth::is_sensitive_auth_key(&kv.key)),
+        _ => false,
+    };
+    let text_width = if is_sensitive && !session.unmasked {
+        visible.chars().count()
+    } else {
+        Line::raw(visible).width()
+    };
+    Some((location.line + line, location.prefix_width + text_width))
 }
 
 /// Position du curseur de texte pendant une saisie : ligne logique dans le
@@ -1533,10 +1549,20 @@ pub fn cursor_position_in_detail(
     let (line, _) = input.cursor_line_col();
     let before = input.text_before_cursor_on_line();
     let (visible, _) = skip_columns(&before, usize::from(session.hscroll));
-    Some((
-        location.line + line,
-        location.prefix_width + Line::raw(visible).width(),
-    ))
+    let is_sensitive = match field {
+        EditableField::AuthParamValue(idx) => session
+            .preview
+            .auth_params()
+            .get(idx)
+            .is_some_and(|kv| crate::collection::auth::is_sensitive_auth_key(&kv.key)),
+        _ => false,
+    };
+    let text_width = if is_sensitive && !session.unmasked {
+        visible.chars().count()
+    } else {
+        Line::raw(visible).width()
+    };
+    Some((location.line + line, location.prefix_width + text_width))
 }
 
 /// Représentation d'une valeur JSON pour l'affichage : sans guillemets pour

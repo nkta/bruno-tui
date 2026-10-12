@@ -128,7 +128,8 @@ pub(crate) fn input_of(model: &Model) -> &TextInput {
         EditState::FieldSelect
         | EditState::MethodPicker { .. }
         | EditState::AuthModePicker { .. }
-        | EditState::ApiKeyPlacementPicker { .. } => panic!("saisie attendue"),
+        | EditState::ApiKeyPlacementPicker { .. }
+        | EditState::PlaintextSecretPrompt { .. } => panic!("saisie attendue"),
     }
 }
 

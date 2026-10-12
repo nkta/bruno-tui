@@ -132,8 +132,13 @@ async fn edit_auth_mode_and_token_on_request_and_save() {
         sender.send(key(KeyCode::Char(c))).await.expect("char");
     }
 
-    // Valider la saisie (Tab)
+    // Valider la saisie (Tab) -> ouvre PlaintextSecretPrompt
     sender.send(key(KeyCode::Tab)).await.expect("tab");
+    // Accepter de garder la valeur en clair ('g')
+    sender
+        .send(key(KeyCode::Char('g')))
+        .await
+        .expect("keep plaintext");
 
     // 5. Sauvegarder (Ctrl+S)
     sender.send(ctrl('s')).await.expect("ctrl+s");
@@ -280,7 +285,13 @@ async fn edit_auth_mode_on_folder_and_save() {
     for c in "secret".chars() {
         sender.send(key(KeyCode::Char(c))).await.expect("char");
     }
+    // Valider la saisie (Tab) -> ouvre PlaintextSecretPrompt
     sender.send(key(KeyCode::Tab)).await.expect("tab");
+    // Accepter de garder la valeur en clair ('g')
+    sender
+        .send(key(KeyCode::Char('g')))
+        .await
+        .expect("keep plaintext");
 
     // 6. Sauvegarder (Ctrl+S)
     sender.send(ctrl('s')).await.expect("ctrl+s");
@@ -415,6 +426,88 @@ auth:basic {
     assert!(
         !content_after_save.contains("alice"),
         "les anciennes valeurs doivent avoir été supprimées:\n{content_after_save}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn edit_auth_plaintext_secret_replacement_writes_variable_reference() {
+    let dir = workdir("secret-replacement");
+    let bru_json = r#"{
+  "name": "secret-test",
+  "version": "1"
+}"#;
+    fs::write(dir.join("bruno.json"), bru_json).expect("write bruno.json");
+
+    let initial_bru = r#"meta {
+  name: test-req
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://{{host}}/api
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: 
+}
+"#;
+    fs::write(dir.join("test-req.bru"), initial_bru).expect("write test-req.bru");
+
+    let (sender, events) = mpsc::channel(EVENT_BUFFER);
+    let handle = spawn_run(dir.clone(), sender.clone(), events);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Ouvrir l'édition
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // 2. Naviguer vers AuthMode (5 crans), puis vers token (1 cran supplémentaire = 6 crans)
+    for _ in 0..6 {
+        sender.send(key(KeyCode::Down)).await.expect("down");
+    }
+
+    // 3. Ouvrir la saisie du token (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // 4. Saisir une valeur sensible en clair
+    for c in "my-super-secret-token".chars() {
+        sender.send(key(KeyCode::Char(c))).await.expect("char");
+    }
+
+    // 5. Valider la saisie (Tab) -> ouvre PlaintextSecretPrompt
+    sender.send(key(KeyCode::Tab)).await.expect("tab");
+
+    // 6. Choisir Remplacer par la variable suggérée (Entrée)
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+
+    // 7. Sauvegarder (Ctrl+S)
+    sender.send(ctrl('s')).await.expect("ctrl+s");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // 8. Quitter
+    sender.send(key(KeyCode::Char('q'))).await.expect("quit");
+    let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("timeout")
+        .expect("join");
+
+    assert!(matches!(exit, Exit::Normal));
+
+    // 9. Vérifier le fichier sur disque
+    let content_after_save = fs::read_to_string(dir.join("test-req.bru")).expect("read file");
+    assert!(
+        content_after_save.contains("token: {{bearerToken}}"),
+        "le fichier doit contenir la référence {{bearerToken}}:\n{content_after_save}"
+    );
+    assert!(
+        !content_after_save.contains("my-super-secret-token"),
+        "la valeur en clair ne doit JAMAIS être écrite sur le disque:\n{content_after_save}"
     );
 
     let _ = fs::remove_dir_all(&dir);

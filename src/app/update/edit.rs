@@ -384,6 +384,7 @@ pub(crate) fn open_input(model: &mut Model, input: TextInput, target: InputTarge
         session.state = EditState::Input(input);
         session.target = target;
         session.hscroll = 0;
+        session.unmasked = false;
     }
     model.last_status = None;
     scroll_edit_into_view(model);
@@ -411,6 +412,7 @@ pub(crate) fn close_input(model: &mut Model) {
         session.state = EditState::FieldSelect;
         session.target = InputTarget::Field;
         session.hscroll = 0;
+        session.unmasked = false;
     }
     scroll_edit_into_view(model);
 }
@@ -531,13 +533,54 @@ pub(crate) fn validate_input(model: &mut Model, key_only: bool) -> Validation {
         return Validation::Done;
     };
     let text = input.text().to_owned();
-    match session.target.clone() {
+    let target = session.target.clone();
+    let current_field = session.current_field();
+    let committed = current_field
+        .as_ref()
+        .map(|f| field_value_committed(session, f).to_owned());
+    let prompt_state = match target {
         InputTarget::Field => {
-            let Some(field) = session.current_field() else {
+            if let Some(EditableField::AuthParamValue(index)) = current_field {
+                if let Some(param) = session.preview.auth_params().get(index) {
+                    if crate::collection::auth::is_sensitive_auth_key(&param.key)
+                        && !text.trim().is_empty()
+                        && (!text.contains("{{") || !text.contains("}}"))
+                    {
+                        let mode = session.preview.auth.as_ref().map_or("auth", |m| m.as_str());
+                        let var_name = suggest_secret_var_name(mode, &param.key);
+                        Some(EditState::PlaintextSecretPrompt {
+                            key: param.key.clone(),
+                            var_name,
+                            value: text.clone(),
+                            index,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    if let Some(state) = prompt_state {
+        if let Some(session) = &mut model.editing {
+            session.state = state;
+        }
+        return Validation::Continued;
+    }
+
+    match target {
+        InputTarget::Field => {
+            let Some(field) = current_field else {
                 close_input(model);
                 return Validation::Done;
             };
-            if text != field_value_committed(session, &field)
+            if Some(&text) != committed.as_ref()
                 && let Some(edit) = value_edit(field, text)
                 && !try_commit(model, edit)
             {
@@ -686,7 +729,8 @@ pub(crate) fn cancel_input(model: &mut Model) {
         }
         EditState::MethodPicker { .. }
         | EditState::AuthModePicker { .. }
-        | EditState::ApiKeyPlacementPicker { .. } => {}
+        | EditState::ApiKeyPlacementPicker { .. }
+        | EditState::PlaintextSecretPrompt { .. } => {}
         EditState::FieldSelect => return,
     }
     model.last_status = None;
@@ -859,7 +903,8 @@ pub(crate) fn scroll_edit_into_view(model: &mut Model) {
         EditState::FieldSelect
         | EditState::MethodPicker { .. }
         | EditState::AuthModePicker { .. }
-        | EditState::ApiKeyPlacementPicker { .. } => (location.line, 0),
+        | EditState::ApiKeyPlacementPicker { .. }
+        | EditState::PlaintextSecretPrompt { .. } => (location.line, 0),
         EditState::Input(input) => {
             let (line, _) = input.cursor_line_col();
             let column = u16::try_from(Line::raw(input.text_before_cursor_on_line()).width())
@@ -893,6 +938,75 @@ pub(crate) fn scroll_edit_into_view(model: &mut Model) {
 /// de requête sélectionnée est refusé (`improve-direct-editing`, D6).
 pub(crate) fn selection_locked(model: &Model) -> bool {
     model.editing.as_ref().is_some_and(EditSession::has_unsaved)
+}
+
+/// Nom de variable d'environnement suggéré en camelCase pour un secret d'auth (§ 5 spec).
+pub(crate) fn suggest_secret_var_name(mode: &str, key: &str) -> String {
+    let mut chars = key.chars();
+    let first = match chars.next() {
+        Some(c) => c.to_ascii_uppercase(),
+        None => return mode.to_owned(),
+    };
+    format!("{mode}{first}{}", chars.as_str())
+}
+
+/// Bascule la révélation temporaire des secrets masqués pendant la saisie (Ctrl+R).
+pub(crate) fn toggle_reveal_secret(model: &mut Model) {
+    if let Some(session) = &mut model.editing {
+        session.unmasked = !session.unmasked;
+    }
+}
+
+/// Remplace la valeur en clair saisie par une variable d'environnement suggérée (`{{variable}}`).
+/// La valeur en clair est immédiatement oubliée et n'apparaît dans aucun log ni fichier.
+pub(crate) fn replace_plaintext_secret(model: &mut Model) {
+    let Some(session) = &model.editing else {
+        return;
+    };
+    let EditState::PlaintextSecretPrompt {
+        var_name, index, ..
+    } = &session.state
+    else {
+        return;
+    };
+    let var_name = var_name.clone();
+    let index = *index;
+    let replacement = format!("{{{{{var_name}}}}}");
+    try_commit(
+        model,
+        FieldEdit::AuthParamValue {
+            index,
+            value: replacement,
+        },
+    );
+    close_input(model);
+    model.last_status = Some(StatusMessage::SecretVariableHint(var_name));
+}
+
+/// Enregistre la valeur sensible en clair telle quelle dans la session ('g' sur le prompt).
+pub(crate) fn keep_plaintext_secret(model: &mut Model) {
+    let Some(session) = &model.editing else {
+        return;
+    };
+    let EditState::PlaintextSecretPrompt { index, value, .. } = &session.state else {
+        return;
+    };
+    let index = *index;
+    let value = value.clone();
+    try_commit(model, FieldEdit::AuthParamValue { index, value });
+    close_input(model);
+}
+
+/// Annule le prompt de secret en clair et revient à la saisie de la valeur (Échap sur le prompt).
+pub(crate) fn cancel_plaintext_secret_prompt(model: &mut Model) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    let EditState::PlaintextSecretPrompt { value, .. } = &session.state else {
+        return;
+    };
+    let value = value.clone();
+    session.state = EditState::Input(TextInput::new(&value, false));
 }
 
 /// Détermine le mode d'authentification initial déclaré dans l'AST.
@@ -1238,7 +1352,8 @@ mod tests {
             EditState::FieldSelect
             | EditState::MethodPicker { .. }
             | EditState::AuthModePicker { .. }
-            | EditState::ApiKeyPlacementPicker { .. } => panic!("saisie attendue"),
+            | EditState::ApiKeyPlacementPicker { .. }
+            | EditState::PlaintextSecretPrompt { .. } => panic!("saisie attendue"),
         }
 
         // Validation sans frappe (Tab) : valeur conservée, pas de dirty
@@ -1337,7 +1452,8 @@ mod tests {
             EditState::FieldSelect
             | EditState::MethodPicker { .. }
             | EditState::AuthModePicker { .. }
-            | EditState::ApiKeyPlacementPicker { .. } => {
+            | EditState::ApiKeyPlacementPicker { .. }
+            | EditState::PlaintextSecretPrompt { .. } => {
                 panic!("devrait rester en saisie sur le corps")
             }
         }
@@ -1666,7 +1782,8 @@ mod tests {
             EditState::FieldSelect
             | EditState::MethodPicker { .. }
             | EditState::AuthModePicker { .. }
-            | EditState::ApiKeyPlacementPicker { .. } => panic!("saisie attendue"),
+            | EditState::ApiKeyPlacementPicker { .. }
+            | EditState::PlaintextSecretPrompt { .. } => panic!("saisie attendue"),
         }
     }
 
@@ -2647,14 +2764,14 @@ mod tests {
         update(&mut model, Message::Enter);
         assert!(matches!(session(&model).state, EditState::Input(_)));
 
-        // Taper la valeur
-        type_input(&mut model, "my-secret-token");
+        // Taper la valeur avec variable
+        type_input(&mut model, "{{myToken}}");
         update(&mut model, Message::ValidateInput);
 
         assert_eq!(session(&model).state, EditState::FieldSelect);
         assert_eq!(
             shown_value(&model, EditableField::AuthParamValue(0)),
-            "my-secret-token"
+            "{{myToken}}"
         );
     }
 
@@ -2756,5 +2873,123 @@ mod tests {
         let cmd = update(&mut model, Message::ConfirmYes);
         assert!(matches!(cmd, Command::SaveEdit { .. }));
         assert!(model.confirm.is_none());
+    }
+
+    #[test]
+    fn secret_var_name_suggestion() {
+        assert_eq!(suggest_secret_var_name("bearer", "token"), "bearerToken");
+        assert_eq!(
+            suggest_secret_var_name("basic", "password"),
+            "basicPassword"
+        );
+        assert_eq!(suggest_secret_var_name("apikey", "value"), "apikeyValue");
+        assert_eq!(
+            suggest_secret_var_name("awsv4", "secretAccessKey"),
+            "awsv4SecretAccessKey"
+        );
+        assert_eq!(
+            suggest_secret_var_name("awsv4", "sessionToken"),
+            "awsv4SessionToken"
+        );
+        assert_eq!(
+            suggest_secret_var_name("oauth2", "clientSecret"),
+            "oauth2ClientSecret"
+        );
+    }
+
+    #[test]
+    fn plaintext_secret_prompt_and_three_outcomes() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+
+        // Sur scripted.bru, mode = bearer (paramètre token = indice 0 des auth params)
+        move_to_field(&mut model, EditableField::AuthParamValue(0));
+
+        // 1. Valeur avec variable -> pas de prompt
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "{{myToken}}");
+        update(&mut model, Message::ValidateInput);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+
+        // 2. Secret en clair -> prompt PlaintextSecretPrompt
+        update(&mut model, Message::Enter);
+        // Écraser l'ancienne valeur
+        press(&mut model, InputKey::Backspace, 20);
+        type_input(&mut model, "super-secret-raw-value");
+        update(&mut model, Message::ValidateInput);
+
+        assert_eq!(
+            session(&model).state,
+            EditState::PlaintextSecretPrompt {
+                key: "token".to_string(),
+                var_name: "bearerToken".to_string(),
+                value: "super-secret-raw-value".to_string(),
+                index: 0,
+            }
+        );
+
+        // Issue 3 : Annuler (Échap) -> revient en saisie avec le texte initial
+        update(&mut model, Message::CancelPlaintextSecretPrompt);
+        match &session(&model).state {
+            EditState::Input(input) => {
+                assert_eq!(input.text(), "super-secret-raw-value");
+            }
+            _ => panic!("attendu en saisie texte"),
+        }
+
+        // Re-valider -> prompt à nouveau
+        update(&mut model, Message::ValidateInput);
+        assert!(matches!(
+            session(&model).state,
+            EditState::PlaintextSecretPrompt { .. }
+        ));
+
+        // Issue 2 : Garder ('g') -> conserve la valeur en clair
+        update(&mut model, Message::KeepPlaintextSecret);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(
+            shown_value(&model, EditableField::AuthParamValue(0)),
+            "super-secret-raw-value"
+        );
+
+        // Re-saisir une valeur en clair pour tester Issue 1 (Remplacer)
+        update(&mut model, Message::Enter);
+        press(&mut model, InputKey::Backspace, 30);
+        type_input(&mut model, "another-raw-secret");
+        update(&mut model, Message::ValidateInput);
+        assert!(matches!(
+            session(&model).state,
+            EditState::PlaintextSecretPrompt { .. }
+        ));
+
+        // Issue 1 : Remplacer (Entrée) -> insère {{bearerToken}}
+        update(&mut model, Message::ReplacePlaintextSecret);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert_eq!(
+            shown_value(&model, EditableField::AuthParamValue(0)),
+            "{{bearerToken}}"
+        );
+        // Et le statut contient SecretVariableHint
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::SecretVariableHint("bearerToken".into()))
+        );
+        // La valeur "another-raw-secret" ne doit apparaître nulle part dans pending
+        for edit in &session(&model).pending {
+            if let FieldEdit::AuthParamValue { value, .. } = edit {
+                assert_ne!(value, "another-raw-secret");
+                assert_eq!(value, "{{bearerToken}}");
+            }
+        }
+    }
+
+    #[test]
+    fn toggle_reveal_secret_flips_unmasked() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+
+        assert!(!session(&model).unmasked);
+        update(&mut model, Message::ToggleRevealSecret);
+        assert!(session(&model).unmasked);
+        update(&mut model, Message::ToggleRevealSecret);
+        assert!(!session(&model).unmasked);
     }
 }

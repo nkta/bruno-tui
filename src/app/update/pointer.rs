@@ -561,7 +561,8 @@ mod tests {
             EditState::FieldSelect
             | EditState::MethodPicker { .. }
             | EditState::AuthModePicker { .. }
-            | EditState::ApiKeyPlacementPicker { .. } => None,
+            | EditState::ApiKeyPlacementPicker { .. }
+            | EditState::PlaintextSecretPrompt { .. } => None,
         }
     }
 

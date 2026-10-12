@@ -53,6 +53,8 @@ pub enum TextCapture {
     GlobalSearch,
     /// Saisie du chemin pour l'exportation du corps de réponse.
     ExportPath,
+    /// Avertissement de secret en clair dans le fichier .bru.
+    PlaintextSecretPrompt,
 }
 
 /// Touche d'édition du tampon pendant la saisie d'un champ
@@ -350,6 +352,14 @@ pub enum Message {
         entries: Vec<HistoryEntry>,
         notice: Option<String>,
     },
+    /// Remplacer le secret en clair par la variable suggérée (Entrée sur PlaintextSecretPrompt).
+    ReplacePlaintextSecret,
+    /// Garder le secret en clair dans le fichier (g sur PlaintextSecretPrompt).
+    KeepPlaintextSecret,
+    /// Revenir à la saisie du secret (Échap sur PlaintextSecretPrompt).
+    CancelPlaintextSecretPrompt,
+    /// Afficher ou masquer le secret sensible (Ctrl+R pendant la saisie).
+    ToggleRevealSecret,
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -424,6 +434,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
             KeyCode::Char('x') => Some(Message::CancelRun),
             KeyCode::Char('s') => Some(Message::SaveEdit),
             KeyCode::Char('e') => Some(Message::OpenResponseInEditor),
+            KeyCode::Char('r') => Some(Message::ToggleRevealSecret),
             _ => None,
         };
     }
@@ -494,6 +505,19 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         | TextCapture::ApiKeyPlacementPicker => method_picker_capture_message(key),
         TextCapture::GlobalSearch => global_search_capture_message(key),
         TextCapture::ExportPath => export_path_capture_message(key),
+        TextCapture::PlaintextSecretPrompt => plaintext_secret_prompt_capture_message(key),
+    }
+}
+
+/// Capture pendant le popup d'avertissement de secret en clair :
+/// Entrée pour remplacer par la variable suggérée, g pour garder en clair,
+/// Échap pour revenir à la saisie.
+fn plaintext_secret_prompt_capture_message(key: KeyEvent) -> Option<Message> {
+    match key.code {
+        KeyCode::Enter => Some(Message::ReplacePlaintextSecret),
+        KeyCode::Char('g') => Some(Message::KeepPlaintextSecret),
+        KeyCode::Esc => Some(Message::CancelPlaintextSecretPrompt),
+        _ => None,
     }
 }
 
@@ -784,7 +808,10 @@ mod tests {
         assert!(name(key(KeyCode::Char('j'), KeyModifiers::ALT)).is_none());
         assert!(name(key(KeyCode::F(1), KeyModifiers::NONE)).is_none());
         // Toute autre combinaison `Ctrl+<lettre>` reste ignorée.
-        assert!(name(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).is_none());
+        assert_eq!(
+            name(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).as_deref(),
+            Some("ToggleRevealSecret")
+        );
         assert!(name(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).is_none());
         let mut release = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
@@ -1126,6 +1153,45 @@ mod tests {
         assert_eq!(
             name_capturing(event(), TextCapture::SecretValue).as_deref(),
             Some("SecretInput")
+        );
+    }
+
+    #[test]
+    fn plaintext_secret_prompt_captures_only_enter_g_and_esc() {
+        let none = KeyModifiers::NONE;
+        assert_eq!(
+            name_capturing(
+                key(KeyCode::Enter, none),
+                TextCapture::PlaintextSecretPrompt
+            )
+            .as_deref(),
+            Some("ReplacePlaintextSecret")
+        );
+        assert_eq!(
+            name_capturing(
+                key(KeyCode::Char('g'), none),
+                TextCapture::PlaintextSecretPrompt
+            )
+            .as_deref(),
+            Some("KeepPlaintextSecret")
+        );
+        assert_eq!(
+            name_capturing(key(KeyCode::Esc, none), TextCapture::PlaintextSecretPrompt).as_deref(),
+            Some("CancelPlaintextSecretPrompt")
+        );
+        assert!(
+            name_capturing(
+                key(KeyCode::Char('a'), none),
+                TextCapture::PlaintextSecretPrompt
+            )
+            .is_none()
+        );
+        assert!(
+            name_capturing(
+                key(KeyCode::Char('q'), none),
+                TextCapture::PlaintextSecretPrompt
+            )
+            .is_none()
         );
     }
 }

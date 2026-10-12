@@ -844,6 +844,22 @@ fn apply(model: &mut Model, message: Message) -> Command {
             cancel_input(model);
             Command::None
         }
+        Message::ReplacePlaintextSecret => {
+            edit::replace_plaintext_secret(model);
+            Command::None
+        }
+        Message::KeepPlaintextSecret => {
+            edit::keep_plaintext_secret(model);
+            Command::None
+        }
+        Message::CancelPlaintextSecretPrompt => {
+            edit::cancel_plaintext_secret_prompt(model);
+            Command::None
+        }
+        Message::ToggleRevealSecret => {
+            edit::toggle_reveal_secret(model);
+            Command::None
+        }
         Message::TextEditorClosed { field, result } => {
             match result {
                 Ok(new_text) => {
@@ -1277,6 +1293,7 @@ mod tests {
             .expect("vue"),
             dirty: true,
             hscroll: 0,
+            unmasked: false,
         });
 
         // 1. PendingConfirm::DiscardEdit
@@ -1332,6 +1349,7 @@ mod tests {
             .expect("vue"),
             dirty: true,
             hscroll: 0,
+            unmasked: false,
         });
         model.confirm = Some(PendingConfirm::QuitWithUnsavedEdit);
 

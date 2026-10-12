@@ -775,6 +775,8 @@ pub struct EditSession {
     /// Décalage horizontal, en colonnes d'affichage, de la valeur du champ
     /// en saisie (`improve-direct-editing`, D7).
     pub hscroll: u16,
+    /// Révélation temporaire des secrets masqués (Ctrl+R pendant la saisie).
+    pub unmasked: bool,
 }
 
 impl EditSession {
@@ -791,6 +793,7 @@ impl EditSession {
             preview: view,
             dirty: false,
             hscroll: 0,
+            unmasked: false,
         }
     }
 
@@ -805,6 +808,7 @@ impl EditSession {
                 | EditState::MethodPicker { .. }
                 | EditState::AuthModePicker { .. }
                 | EditState::ApiKeyPlacementPicker { .. } => false,
+                EditState::PlaintextSecretPrompt { .. } => true,
                 EditState::Input(input) => {
                     input.is_modified() || matches!(self.target, InputTarget::NewValue { .. })
                 }
@@ -1031,6 +1035,13 @@ pub enum EditState {
     /// Sélecteur d'emplacement d'API key (`feat-edit-auth`).
     ApiKeyPlacementPicker {
         selected: usize,
+    },
+    /// Avertissement de secret en clair dans un fichier .bru (§ 5 spec).
+    PlaintextSecretPrompt {
+        key: String,
+        var_name: String,
+        value: String,
+        index: usize,
     },
 }
 
@@ -1630,6 +1641,8 @@ pub enum StatusMessage {
     ExportError(String),
     /// Cellule du tableau comparatif sans résultat pour cet environnement.
     NoEnvironmentResult(String),
+    /// Rappel pour définir la variable secrète remplacée (§ 5 spec).
+    SecretVariableHint(String),
 }
 
 /// Série de campagnes multi-environnements : un `bru run` par
@@ -2256,6 +2269,9 @@ impl Model {
                 EditState::AuthModePicker { .. } => return Some(TextCapture::AuthModePicker),
                 EditState::ApiKeyPlacementPicker { .. } => {
                     return Some(TextCapture::ApiKeyPlacementPicker);
+                }
+                EditState::PlaintextSecretPrompt { .. } => {
+                    return Some(TextCapture::PlaintextSecretPrompt);
                 }
                 _ => {}
             }
