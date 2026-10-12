@@ -40,8 +40,18 @@ try {
 const entry = (item) => ({ name: item.name, value: item.value, enabled: item.enabled });
 const dump = {
   url: json.http ? json.http.url : '',
+  body_mode: json.http && json.http.body && json.http.body !== 'none' ? json.http.body : undefined,
   headers: (json.headers || []).map(entry),
   params: (json.params || []).map((item) => ({ ...entry(item), type: item.type })),
+  body_form: json.body && json.body.formUrlEncoded ? json.body.formUrlEncoded.map(entry) : undefined,
+  body_multipart: json.body && json.body.multipartForm ? json.body.multipartForm.map((item) => ({
+    name: item.name,
+    value: item.value,
+    enabled: item.enabled,
+    type: item.type,
+    contentType: item.contentType,
+  })) : undefined,
+  body_graphql_vars: json.body && json.body.graphql ? (json.body.graphql.variables || '') : undefined,
   vars_req: (json.vars && json.vars.req || []).map(entry),
   vars_res: (json.vars && json.vars.res || []).map(entry),
   assertions: (json.assertions || []).map(entry),

@@ -1,0 +1,28 @@
+{
+  "url": "https://{{host}}/upload",
+  "body_mode": "multipartForm",
+  "headers": [],
+  "params": [],
+  "body_multipart": [
+    {
+      "name": "description",
+      "value": "updated note",
+      "enabled": true,
+      "type": "text",
+      "contentType": ""
+    },
+    {
+      "name": "avatar",
+      "value": [
+        "profile.jpg"
+      ],
+      "enabled": false,
+      "type": "file",
+      "contentType": "image/jpeg"
+    }
+  ],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {}
+}

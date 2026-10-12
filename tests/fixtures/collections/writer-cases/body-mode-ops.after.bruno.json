@@ -1,0 +1,16 @@
+{
+  "url": "https://{{host}}/submit",
+  "body_mode": "json",
+  "headers": [
+    {
+      "name": "Content-Type",
+      "value": "application/json",
+      "enabled": true
+    }
+  ],
+  "params": [],
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {}
+}

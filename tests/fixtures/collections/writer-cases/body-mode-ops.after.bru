@@ -1,0 +1,14 @@
+meta {
+  name: body-mode-ops
+  type: http
+  seq: 1
+}
+
+post {
+  url: https://{{host}}/submit
+  body: json
+}
+
+headers {
+  Content-Type: application/json
+}

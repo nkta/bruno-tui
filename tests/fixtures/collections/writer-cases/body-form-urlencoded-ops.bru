@@ -1,0 +1,17 @@
+meta {
+  name: body-form-urlencoded-ops
+  type: http
+  seq: 1
+}
+
+post {
+  url: https://{{host}}/login
+  body: formUrlEncoded
+}
+
+body:form-urlencoded {
+  username: alice
+  token: 1234
+  to_delete: remove_me
+  ~remember_me: true
+}

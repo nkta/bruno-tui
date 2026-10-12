@@ -628,7 +628,90 @@ fn entry_cases() -> Vec<(&'static str, Vec<FieldEdit>)> {
                 add(VarsPreRequest, "coll_var", "world"),
             ],
         ),
+        ("body-mode-ops", vec![FieldEdit::BodyMode("json".into())]),
+        (
+            "body-form-urlencoded-ops",
+            vec![
+                FieldEdit::FormUrlEncodedValue {
+                    index: 0,
+                    value: "bob".into(),
+                },
+                FieldEdit::RenameKey {
+                    section: EntrySection::FormUrlEncoded,
+                    index: 1,
+                    key: "auth_token".into(),
+                },
+                FieldEdit::FormUrlEncodedEnabled {
+                    index: 3,
+                    enabled: true,
+                },
+                FieldEdit::RemoveEntry {
+                    section: EntrySection::FormUrlEncoded,
+                    index: 2,
+                },
+                add(EntrySection::FormUrlEncoded, "grant_type", "password"),
+            ],
+        ),
+        (
+            "body-multipart-form-ops",
+            vec![
+                FieldEdit::MultipartFormValue {
+                    index: 0,
+                    value: "updated note".into(),
+                },
+                FieldEdit::MultipartFormEnabled {
+                    index: 1,
+                    enabled: false,
+                },
+            ],
+        ),
+        (
+            "body-graphql-vars-ops",
+            vec![FieldEdit::GraphqlVars(
+                "{\n  \"limit\": 10,\n  \"offset\": 0\n}".into(),
+            )],
+        ),
     ]
+}
+
+#[test]
+fn body_graphql_vars_ops_created_then_modified() {
+    let dir = workdir("entry-body-graphql-vars-ops-flow");
+    let file_name = "body-graphql-vars-ops.bru";
+    let path = copy_case(file_name, &dir);
+    let (ast, stamp) = load(&path);
+
+    // 1. Création du bloc
+    let intermediate_vars = "{\n  \"initial\": true\n}";
+    let stamp2 = BruWriter
+        .write_request(
+            &path,
+            &ast,
+            &stamp,
+            &[FieldEdit::GraphqlVars(intermediate_vars.into())],
+        )
+        .expect("création");
+
+    // 2. Modification du bloc vers l'état attendu
+    let (ast2, _) = load(&path);
+    let final_vars = "{\n  \"limit\": 10,\n  \"offset\": 0\n}";
+    BruWriter
+        .write_request(
+            &path,
+            &ast2,
+            &stamp2,
+            &[FieldEdit::GraphqlVars(final_vars.into())],
+        )
+        .expect("modification");
+
+    let expected = fs::read(cases().join("body-graphql-vars-ops.after.bru")).expect("after");
+    let written = fs::read(&path).expect("relecture");
+    assert_eq!(
+        String::from_utf8_lossy(&written),
+        String::from_utf8_lossy(&expected)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

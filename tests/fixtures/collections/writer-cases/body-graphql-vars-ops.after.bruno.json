@@ -1,0 +1,11 @@
+{
+  "url": "https://{{host}}/graphql",
+  "body_mode": "graphql",
+  "headers": [],
+  "params": [],
+  "body_graphql_vars": "{\n  \"limit\": 10,\n  \"offset\": 0\n}",
+  "vars_req": [],
+  "vars_res": [],
+  "assertions": [],
+  "settings": {}
+}
