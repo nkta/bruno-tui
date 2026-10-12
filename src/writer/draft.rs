@@ -56,7 +56,9 @@ struct MethodState {
 
 /// Contenu d'un bloc de corps texte ciblé.
 struct BodyState {
-    span: Range<usize>,
+    block_name: &'static str,
+    block_span: Option<Range<usize>>,
+    content_span: Option<Range<usize>>,
     text: String,
 }
 
@@ -442,14 +444,32 @@ impl<'a> Draft<'a> {
                 }
             }
         }
+        let mut prefixed_anchors: Vec<usize> = Vec::new();
+
         if let Some(body) = &self.body {
-            replacements.push(Replacement {
-                span: body.span.clone(),
-                bytes: format::format_body_content(&body.text, eol),
-            });
+            let anchor = if body.block_span.is_none() && !body.text.trim().is_empty() {
+                canonical_creation_anchor(self.ast, body.block_name)
+            } else {
+                0
+            };
+            let separate = !prefixed_anchors.contains(&anchor);
+            if body.block_span.is_none() && !body.text.trim().is_empty() && separate {
+                prefixed_anchors.push(anchor);
+            }
+            replacements.extend(render_text_block(
+                raw,
+                eol,
+                TextBlockTarget {
+                    block_name: body.block_name,
+                    block_span: body.block_span.as_ref(),
+                    content_span: body.content_span.as_ref(),
+                },
+                Some(&body.text),
+                anchor,
+                separate,
+            ));
         }
 
-        let mut prefixed_anchors: Vec<usize> = Vec::new();
         for section in EntrySection::ALL {
             let state = &self.sections[section.position()];
             let block = section_block_node(self.ast, section);
@@ -513,6 +533,13 @@ impl<'a> Draft<'a> {
     }
 }
 
+/// Cible d'un bloc de texte (`body:*`, `script:*`, `tests`, `docs`).
+struct TextBlockTarget<'a> {
+    block_name: &'a str,
+    block_span: Option<&'a Range<usize>>,
+    content_span: Option<&'a Range<usize>>,
+}
+
 /// Émet les remplacements pour un bloc de texte libre (`script:*`, `tests`, `docs`) :
 /// modification, suppression ou création.
 fn text_block_replacements(
@@ -523,15 +550,39 @@ fn text_block_replacements(
     create_anchor: usize,
     separate_from_previous: bool,
 ) -> Vec<Replacement> {
+    render_text_block(
+        raw,
+        eol,
+        TextBlockTarget {
+            block_name: kind.block_name(),
+            block_span: state.block_span.as_ref(),
+            content_span: state.content_span.as_ref(),
+        },
+        state.new_text.as_deref(),
+        create_anchor,
+        separate_from_previous,
+    )
+}
+
+/// Émet les remplacements pour un bloc de texte (`body:*`, `script:*`, `tests`, `docs`) :
+/// modification, suppression ou création.
+fn render_text_block(
+    raw: &str,
+    eol: &str,
+    target: TextBlockTarget<'_>,
+    new_text: Option<&str>,
+    create_anchor: usize,
+    separate_from_previous: bool,
+) -> Vec<Replacement> {
     let mut replacements = Vec::new();
-    let Some(new_text) = &state.new_text else {
+    let Some(new_text) = new_text else {
         return replacements;
     };
 
     let is_empty = new_text.trim().is_empty();
 
-    match state.block_span {
-        Some(ref span) => {
+    match target.block_span {
+        Some(span) => {
             if is_empty {
                 let preceding = preceding_blank_line_len(raw, span.start);
                 let start = span.start - preceding;
@@ -544,7 +595,7 @@ fn text_block_replacements(
                     span: start..end,
                     bytes: String::new(),
                 });
-            } else if let Some(ref content_span) = state.content_span {
+            } else if let Some(content_span) = target.content_span {
                 replacements.push(Replacement {
                     span: content_span.clone(),
                     bytes: format::format_body_content(new_text, eol),
@@ -564,7 +615,7 @@ fn text_block_replacements(
                 if anything_before {
                     bytes.push_str(eol);
                 }
-                bytes.push_str(kind.block_name());
+                bytes.push_str(target.block_name);
                 bytes.push_str(" {");
                 bytes.push_str(eol);
                 bytes.push_str(&format::format_body_content(new_text, eol));
@@ -608,42 +659,75 @@ fn canonical_block_rank(name: &str) -> Option<usize> {
     if name.starts_with("auth:") || name == "auth" {
         return Some(6);
     }
-    if name.starts_with("body:") || name == "body" {
+    if name == "body:json" {
         return Some(7);
+    }
+    if name == "body:text" {
+        return Some(8);
+    }
+    if name == "body:xml" {
+        return Some(9);
+    }
+    if name == "body:sparql" {
+        return Some(10);
+    }
+    if name == "body:form-urlencoded" {
+        return Some(11);
+    }
+    if name == "body:multipart-form" {
+        return Some(12);
+    }
+    if name == "body:file" {
+        return Some(13);
+    }
+    if name == "body:graphql" {
+        return Some(14);
+    }
+    if name == "body:graphql:vars" {
+        return Some(15);
+    }
+    if name.starts_with("body:grpc") {
+        return Some(16);
+    }
+    if name.starts_with("body:ws") {
+        return Some(17);
+    }
+    if name.starts_with("body:") || name == "body" {
+        return Some(18);
     }
     // `vars` est l'ancien nom de `vars:pre-request`, conservé tel quel.
     if name == "vars:pre-request" || name == "vars" {
-        return Some(8);
+        return Some(19);
     }
     if name == "vars:post-response" {
-        return Some(9);
+        return Some(20);
     }
     if name == "assert" {
-        return Some(10);
+        return Some(21);
     }
     if name == "script:pre-request" {
-        return Some(11);
+        return Some(22);
     }
     if name == "script:post-response" {
-        return Some(12);
+        return Some(23);
     }
     if name.starts_with("script:grpc:") || name == "script:grpc" {
-        return Some(13);
+        return Some(24);
     }
     if name == "tests" {
-        return Some(14);
+        return Some(25);
     }
     if name == "app" {
-        return Some(15);
+        return Some(26);
     }
     if name == "settings" {
-        return Some(16);
+        return Some(27);
     }
     if name == "docs" {
-        return Some(17);
+        return Some(28);
     }
     if name == "example" {
-        return Some(18);
+        return Some(29);
     }
     None
 }
@@ -808,15 +892,31 @@ fn body_state(ast: &BruFile, declared: &str) -> Result<BodyState, EditError> {
         .iter()
         .find(|(kind, _)| *kind == declared)
         .map(|(_, block)| *block)
+        .or_else(|| {
+            TEXT_BODY_BLOCKS.iter().find_map(|(_, block)| {
+                if ast.block(block).is_some() {
+                    Some(*block)
+                } else {
+                    None
+                }
+            })
+        })
         .ok_or(EditError::NoSuchBlock { block: "body" })?;
-    let block = ast
-        .block(block_name)
-        .ok_or(EditError::NoSuchBlock { block: block_name })?;
-    let BlockBody::Text { content } = &block.body else {
-        return Err(EditError::NoSuchBlock { block: block_name });
+    let found = ast.nodes().iter().find_map(|node| match &node.kind {
+        NodeKind::Block(block) if block.name == block_name => match &block.body {
+            BlockBody::Text { content } => Some((node.span.clone(), content.clone())),
+            _ => None,
+        },
+        _ => None,
+    });
+    let (block_span, content_span) = match found {
+        Some((b, c)) => (Some(b), Some(c)),
+        None => (None, None),
     };
     Ok(BodyState {
-        span: content.clone(),
+        block_name,
+        block_span,
+        content_span,
         text: String::new(),
     })
 }
@@ -1438,5 +1538,46 @@ mod tests {
         let file = parse(GET);
         let error = resolve(&file, &[FieldEdit::BodyMode("yaml".into())]).unwrap_err();
         assert_eq!(error, EditError::UnknownBodyMode);
+    }
+
+    #[test]
+    fn body_text_creates_missing_block_at_canonical_anchor() {
+        let source = "post {\n  url: http://a\n  body: json\n}\n\nheaders {\n  Content-Type: application/json\n}\n";
+        let out = apply(source, &[FieldEdit::BodyText("{\n  \"a\": 1\n}".into())]);
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: json\n}\n\nheaders {\n  Content-Type: application/json\n}\n\nbody:json {\n  {\n    \"a\": 1\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn body_text_removes_cleared_block() {
+        let source =
+            "post {\n  url: http://a\n  body: json\n}\n\nbody:json {\n  {\n    \"a\": 1\n  }\n}\n";
+        let out = apply(source, &[FieldEdit::BodyText("".into())]);
+        assert_eq!(out, "post {\n  url: http://a\n  body: json\n}\n");
+    }
+
+    #[test]
+    fn body_text_does_not_create_block_if_empty() {
+        let source = "post {\n  url: http://a\n  body: json\n}\n";
+        let out = apply(source, &[FieldEdit::BodyText("   \n  ".into())]);
+        assert_eq!(out, "post {\n  url: http://a\n  body: json\n}\n");
+    }
+
+    #[test]
+    fn body_text_creates_block_alongside_body_mode_change() {
+        let source = "post {\n  url: http://a\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::BodyMode("text".into()),
+                FieldEdit::BodyText("hello world".into()),
+            ],
+        );
+        assert_eq!(
+            out,
+            "post {\n  url: http://a\n  body: text\n}\n\nbody:text {\n  hello world\n}\n"
+        );
     }
 }
