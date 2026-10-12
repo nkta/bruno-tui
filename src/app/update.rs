@@ -9372,6 +9372,62 @@ mod tests {
     }
 
     #[test]
+    fn settings_refuses_structural_edits_and_accepts_value_edits() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        let source = "meta {\n  name: ping\n  type: http\n  seq: 7\n}\n\nget {\n  url: https://{{host}}/ping\n  body: none\n  auth: none\n}\n\nsettings {\n  encodeUrl: true\n}\n";
+        let ast = crate::collection::BruFile::parse(source.to_owned()).expect("AST");
+        let view = RequestView::from_ast(&ast).expect("vue");
+        if let CollectionState::Loaded(col) = &mut model.collection {
+            for node in &mut col.tree {
+                if let TreeNode::Request(req) = node
+                    && req.path == std::path::Path::new("simple-get.bru")
+                {
+                    req.ast = Some(ast.clone());
+                    req.view = view.clone();
+                }
+            }
+        }
+        let session_mut = model.editing.as_mut().expect("session");
+        session_mut.fields.push(EditableField::SettingsValue(0));
+        session_mut
+            .preview
+            .extra
+            .settings
+            .push(crate::collection::KeyValue {
+                key: "encodeUrl".into(),
+                value: "true".into(),
+                enabled: true,
+            });
+        go_to(&mut model, EditableField::SettingsValue(0));
+
+        // Toggle (Espace) est sans effet
+        update(&mut model, Message::ToggleField);
+        assert!(!session(&model).dirty);
+
+        // Delete ('d') est sans effet
+        update(&mut model, Message::Delete);
+        assert!(!session(&model).dirty);
+
+        // Rename ('c') est sans effet
+        update(&mut model, Message::Rename);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+
+        // Add ('a') est sans effet
+        update(&mut model, Message::Add);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+
+        // Mais Value edit (Enter) est autorisé !
+        update(&mut model, Message::Enter);
+        assert!(matches!(session(&model).state, EditState::Input(_)));
+        press(&mut model, InputKey::Backspace, 4);
+        type_input(&mut model, "false");
+        update(&mut model, Message::ValidateInput);
+        assert_eq!(session(&model).state, EditState::FieldSelect);
+        assert!(session(&model).dirty);
+        assert_eq!(session(&model).preview.extra.settings[0].value, "false");
+    }
+
+    #[test]
     fn rename_keeps_value_and_disabled_state() {
         let mut model = edit_session("scripted.bru", (100, 30));
         go_to(&mut model, EditableField::HeaderValue(1));

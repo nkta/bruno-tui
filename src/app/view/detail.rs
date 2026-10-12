@@ -188,10 +188,6 @@ fn field(label: &str, value: impl Into<String>) -> Line<'static> {
     ])
 }
 
-fn yes_no(value: bool) -> &'static str {
-    if value { "oui" } else { "non" }
-}
-
 /// Style d'une entrée désactivée : atténué comme [`theme::LABEL`], mais en
 /// italique en plus pour rester distinct du style de la clé qui précède
 /// (les deux seraient sinon indiscernables, `theme::LABEL` n'étant que
@@ -986,8 +982,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Variables pré-requête".to_owned(),
-                |lines, _| {
-                    entries(lines, view.vars_pre_request());
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        shown.vars_pre_request(),
+                        session,
+                        EntrySection::VarsPreRequest,
+                    );
                 },
             );
             boxed_section(
@@ -995,8 +997,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Variables post-réponse".to_owned(),
-                |lines, _| {
-                    entries(lines, view.vars_post_response());
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        shown.vars_post_response(),
+                        session,
+                        EntrySection::VarsPostResponse,
+                    );
                 },
             );
         }
@@ -1034,10 +1042,21 @@ pub fn request_text_and_fields(
             );
         }
         RequestTab::Assert => {
-            lines.push(field("Assertions", yes_no(view.has_assert)));
-            if !view.assertions().is_empty() {
-                entries(&mut lines, view.assertions());
-            }
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Assertions".to_owned(),
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        shown.assertions(),
+                        session,
+                        EntrySection::Assert,
+                    );
+                },
+            );
         }
         RequestTab::Tests => {
             boxed_section(
@@ -1072,8 +1091,14 @@ pub fn request_text_and_fields(
                 &mut field_lines,
                 &mut boxes,
                 "Settings".to_owned(),
-                |lines, _| {
-                    entries(lines, view.settings());
+                |lines, field_lines| {
+                    editable_entries(
+                        lines,
+                        field_lines,
+                        shown.settings(),
+                        session,
+                        EntrySection::Settings,
+                    );
                 },
             );
         }
@@ -2570,7 +2595,7 @@ mod tests {
             "1 test(\"ok\", function () {",
             "2   expect(res.getStatus()).to.equal(200);",
             "3 });",
-            "Assertions : oui",
+            "── Assertions",
             "res.status: eq 200",
             "Auth : bearer",
         ] {
@@ -3194,6 +3219,9 @@ auth:basic {
             EntrySection::Headers,
             EntrySection::QueryParams,
             EntrySection::PathParams,
+            EntrySection::VarsPreRequest,
+            EntrySection::VarsPostResponse,
+            EntrySection::Assert,
         ] {
             // Chaque section est dans son onglet.
             let tab = RequestTab::of_field(EditableField::AddRow(section)).expect("onglet");
@@ -3665,5 +3693,73 @@ auth:basic {
         let labels: Vec<&str> = bar.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(labels.contains(&"Console"));
         assert!(labels.contains(&"Timeline"));
+    }
+
+    #[test]
+    fn session_navigation_and_edits_for_assert_and_vars() {
+        use crate::app::message::{InputKey, Message};
+        use crate::app::update::update;
+
+        let mut model = loaded_model((100, 30));
+        session_on(&mut model, "scripted.bru");
+
+        // Trouver la position de AssertValue(0) dans la liste des champs
+        let assert_val0 = EditableField::AssertValue(0);
+        let assert_index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == assert_val0))
+            .expect("champ assert 0");
+
+        model.editing.as_mut().expect("session").cursor = assert_index;
+        assert_eq!(model.shown_request_tab(), RequestTab::Assert);
+
+        // Toggle avec Espace
+        update(&mut model, Message::ToggleField);
+        let text = plain(&detail_text(&model));
+        assert!(text.contains("res.status: eq 200 (désactivé)"), "{text}");
+
+        // Retoggle avec Espace
+        update(&mut model, Message::ToggleField);
+        let text = plain(&detail_text(&model));
+        assert!(text.contains("res.status: eq 200"), "{text}");
+        assert!(!text.contains("res.status: eq 200 (désactivé)"), "{text}");
+
+        // Aller sur AddRow(Assert)
+        let add_assert = EditableField::AddRow(EntrySection::Assert);
+        let add_index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == add_assert))
+            .expect("ligne add assert");
+        model.editing.as_mut().expect("session").cursor = add_index;
+        assert_eq!(model.shown_request_tab(), RequestTab::Assert);
+
+        // Saisir une nouvelle assertion avec espaces dans la clé : res.headers['content-type'] : isDefined
+        update(&mut model, Message::Enter);
+        for c in "res.headers['content-type']".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+        update(&mut model, Message::ValidateInput);
+        for c in "isDefined".chars() {
+            update(&mut model, Message::InputKey(InputKey::Char(c)));
+        }
+        update(&mut model, Message::InputKey(InputKey::Enter));
+
+        let text = plain(&detail_text(&model));
+        assert!(
+            text.contains("res.headers['content-type']: isDefined"),
+            "{text}"
+        );
+
+        // Aller sur AddRow(VarsPreRequest)
+        let add_vars_pre = EditableField::AddRow(EntrySection::VarsPreRequest);
+        let add_vars_index = model
+            .editing
+            .as_ref()
+            .and_then(|s| s.fields.iter().position(|f| *f == add_vars_pre))
+            .expect("ligne add vars_pre");
+        model.editing.as_mut().expect("session").cursor = add_vars_index;
+        assert_eq!(model.shown_request_tab(), RequestTab::Vars);
     }
 }
