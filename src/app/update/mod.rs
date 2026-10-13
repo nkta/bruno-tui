@@ -5,7 +5,7 @@
 use super::global_search::GlobalSearchPopup;
 use super::message::{Message, MouseKind};
 use super::model::{
-    CampaignView, CollectionState, EditSession, EditState, EditableField, Exit, Focus, Model,
+    CampaignView, CollectionState, EditSession, EditableField, Exit, Focus, Model,
     RunnerOptionsPopup, SecretInput, StatusMessage, field_value_committed, secret_lookups,
     selected_response_body,
 };
@@ -295,6 +295,15 @@ fn apply(model: &mut Model, message: Message) -> Command {
         return apply_global_search(model, message);
     }
 
+    // Popup d'édition : modal, il garde les touches de navigation et
+    // laisse passer la saisie, la sauvegarde et les résultats de fond.
+    if model.editing.is_some()
+        && !is_background_result(&message)
+        && let Some(command) = edit_popup_message(model, &message)
+    {
+        return command;
+    }
+
     match message {
         Message::Quit | Message::ForceQuit => {
             if model.editing.as_ref().is_some_and(EditSession::has_unsaved) {
@@ -531,35 +540,25 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::FocusTree => {
-            if let Some(session) = &model.editing {
-                model.last_status = None;
-                if session.has_unsaved() {
-                    model.confirm = Some(crate::app::model::PendingConfirm::DiscardEdit);
+            // `Échap` annule d'abord la sélection visuelle du panneau
+            // focalisé, s'il y en a une, avant de rendre le focus à
+            // l'arbre (`search-and-yank`, généralisé au détail et à
+            // la réponse par `split-request-response-panels`).
+            let cancelled_selection = match model.focus {
+                Focus::Detail => model.detail_selection.take().is_some(),
+                Focus::Response => model.response_selection.take().is_some(),
+                _ => false,
+            };
+            if !cancelled_selection {
+                if model.focus == Focus::Tree && has_active_tree_filter(model) {
+                    clear_tree_filter(model);
+                    scroll_tree_into_view(model);
                 } else {
-                    model.editing = None;
-                }
-            } else {
-                // `Échap` annule d'abord la sélection visuelle du panneau
-                // focalisé, s'il y en a une, avant de rendre le focus à
-                // l'arbre (`search-and-yank`, généralisé au détail et à
-                // la réponse par `split-request-response-panels`).
-                let cancelled_selection = match model.focus {
-                    Focus::Detail => model.detail_selection.take().is_some(),
-                    Focus::Response => model.response_selection.take().is_some(),
-                    _ => false,
-                };
-                if !cancelled_selection {
-                    if model.focus == Focus::Tree && has_active_tree_filter(model) {
-                        clear_tree_filter(model);
-                        scroll_tree_into_view(model);
-                    } else {
-                        model.zoom = false;
-                        model.focus = Focus::Tree;
-                        scroll_tree_into_view(model);
-                        model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
-                        model.response_scroll =
-                            model.response_scroll.min(response_max_scroll(model));
-                    }
+                    model.zoom = false;
+                    model.focus = Focus::Tree;
+                    scroll_tree_into_view(model);
+                    model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
+                    model.response_scroll = model.response_scroll.min(response_max_scroll(model));
                 }
             }
             Command::None
@@ -800,6 +799,12 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 } else {
                     open_environment_editing(model, model.environment_selected);
                 }
+            }
+            Command::None
+        }
+        Message::OpenRequestEdit => {
+            if model.focus == Focus::Detail {
+                start_request_edit(model);
             }
             Command::None
         }
@@ -1067,44 +1072,30 @@ fn apply(model: &mut Model, message: Message) -> Command {
         navigation => {
             match model.focus {
                 Focus::Tree => navigate_tree(model, navigation),
-                Focus::Detail => match model.editing.as_ref().map(|s| &s.state) {
-                    Some(EditState::FieldSelect) => match navigation {
-                        Message::Up => move_field_cursor(model, -1),
-                        Message::Down => move_field_cursor(model, 1),
-                        other => scroll_detail(model, other),
-                    },
-                    Some(EditState::Picker { .. }) => match navigation {
-                        Message::Up => move_picker(model, -1),
-                        Message::Down => move_picker(model, 1),
-                        _ => {}
-                    },
-                    // Hors session : ←/→ changent d'onglet de requête ou dossier/collection.
-                    None => match navigation {
-                        Message::Left => {
-                            if model.is_folder_or_collection_selected() {
-                                select_request_tab(
-                                    model,
-                                    crate::app::model::previous_folder_tab(
-                                        model.shown_request_tab(),
-                                    ),
-                                );
-                            } else {
-                                select_request_tab(model, model.request_tab.previous());
-                            }
+                // ←/→ changent d'onglet de requête ou dossier/collection ;
+                // le popup d'édition, modal, a ses propres touches.
+                Focus::Detail => match navigation {
+                    Message::Left => {
+                        if model.is_folder_or_collection_selected() {
+                            select_request_tab(
+                                model,
+                                crate::app::model::previous_folder_tab(model.shown_request_tab()),
+                            );
+                        } else {
+                            select_request_tab(model, model.request_tab.previous());
                         }
-                        Message::Right => {
-                            if model.is_folder_or_collection_selected() {
-                                select_request_tab(
-                                    model,
-                                    crate::app::model::next_folder_tab(model.shown_request_tab()),
-                                );
-                            } else {
-                                select_request_tab(model, model.request_tab.next());
-                            }
+                    }
+                    Message::Right => {
+                        if model.is_folder_or_collection_selected() {
+                            select_request_tab(
+                                model,
+                                crate::app::model::next_folder_tab(model.shown_request_tab()),
+                            );
+                        } else {
+                            select_request_tab(model, model.request_tab.next());
                         }
-                        other => scroll_detail(model, other),
-                    },
-                    _ => scroll_detail(model, navigation),
+                    }
+                    other => scroll_detail(model, other),
                 },
                 Focus::Response => match navigation {
                     Message::Left => previous_response_tab(model),
@@ -1271,8 +1262,10 @@ mod tests {
         model.editing = Some(EditSession {
             path: PathBuf::from("req.bru"),
             stamp,
+            scope: crate::app::model::EditScope::Request,
             fields: vec![EditableField::Url],
             cursor: 0,
+            scroll: 0,
             state: EditState::FieldSelect,
             target: super::super::model::InputTarget::Field,
             pending: vec![],
@@ -1327,8 +1320,10 @@ mod tests {
         model.editing = Some(EditSession {
             path: PathBuf::from("req.bru"),
             stamp,
+            scope: crate::app::model::EditScope::Request,
             fields: vec![EditableField::Url],
             cursor: 0,
+            scroll: 0,
             state: EditState::FieldSelect,
             target: super::super::model::InputTarget::Field,
             pending: vec![],

@@ -115,8 +115,10 @@ pub enum Message {
     Left,
     /// `→` ou `l` (et `Entrée` hors du détail, via `Enter`).
     Right,
-    /// `Tab` : bascule le focus.
+    /// `Tab` : bascule le focus ; dans un popup d'édition, partie suivante.
     NextFocus,
+    /// `Maj+Tab` : partie précédente d'un popup d'édition.
+    PreviousPart,
     /// `Échap` : rend le focus à l'arbre.
     FocusTree,
     /// `q`.
@@ -188,6 +190,8 @@ pub enum Message {
     },
     /// `e`, hors saisie.
     StartEdit,
+    /// `m` hors saisie : ouvre le popup d'édition de la requête (méthode et URL).
+    OpenRequestEdit,
     /// `Entrée`, hors saisie : ouvre la session ou la saisie d'un champ
     /// dans le détail, équivaut à `Right` partout ailleurs.
     Enter,
@@ -452,6 +456,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::PageUp => Message::PageUp,
         KeyCode::PageDown => Message::PageDown,
         KeyCode::Tab => Message::NextFocus,
+        KeyCode::BackTab => Message::PreviousPart,
         KeyCode::Esc => Message::FocusTree,
         KeyCode::Char('q') => Message::Quit,
         KeyCode::Char('r') => Message::RunSelected,
@@ -475,6 +480,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('v') => Message::ToggleVisual,
         KeyCode::Char('y') => Message::Yank,
         KeyCode::Char('e') => Message::StartEdit,
+        KeyCode::Char('m') => Message::OpenRequestEdit,
         KeyCode::Char(' ') => Message::ToggleField,
         KeyCode::Char('M') => Message::ToggleMouseCapture,
         KeyCode::Char('?') => Message::ToggleHelp,
@@ -711,6 +717,7 @@ mod tests {
             (KeyCode::Char('v'), none, "ToggleVisual"),
             (KeyCode::Char('y'), none, "Yank"),
             (KeyCode::Char('e'), none, "StartEdit"),
+            (KeyCode::Char('m'), none, "OpenRequestEdit"),
             (KeyCode::Char(' '), none, "ToggleField"),
             (KeyCode::Char('s'), KeyModifiers::CONTROL, "SaveEdit"),
             (KeyCode::Char('s'), none, "SaveEdit"),

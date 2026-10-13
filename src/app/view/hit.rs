@@ -393,7 +393,8 @@ mod tests {
         let view = request.view.clone();
         let stamp = FileStamp::capture(&model.loaded().expect("chargée").root.join(&path))
             .expect("instantané");
-        let mut session = EditSession::new(path, stamp, view);
+        let mut session =
+            EditSession::new(path, stamp, view, crate::app::model::EditScope::Request);
         session.state = EditState::Input(TextInput::new("https://{{host}}/items", false));
         model.editing = Some(session);
         model.focus = Focus::Detail;

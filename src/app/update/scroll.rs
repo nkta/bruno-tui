@@ -202,12 +202,9 @@ pub(crate) fn body_height(model: &Model) -> usize {
 mod tests {
     use super::*;
     use crate::app::message::Message;
-    use crate::app::model::{
-        DetailSelection, EditSession, EditableField, Focus, RequestTab, ResponseTab,
-    };
+    use crate::app::model::{DetailSelection, Focus, RequestTab, ResponseTab};
     use crate::app::test_support::{loaded_model, runner_probe_model, select};
     use crate::app::update::update;
-    use crate::app::view::detail::plain_lines;
 
     #[test]
     fn detail_scroll_is_bounded_and_reset() {
@@ -251,28 +248,18 @@ mod tests {
         update(&mut model, Message::Left);
         assert_eq!(model.shown_request_tab(), RequestTab::Settings);
 
-        // Session : Méthode puis URL gardent l'onglet choisi ; le premier
-        // en-tête affiche l'onglet En-têtes.
+        // Session : StartEdit ouvre le popup de l'onglet actif (Settings)
         update(&mut model, Message::StartEdit);
-        assert_eq!(model.shown_request_tab(), RequestTab::Settings);
-        update(&mut model, Message::Down);
-        update(&mut model, Message::Down);
         assert_eq!(
-            model.editing.as_ref().and_then(EditSession::current_field),
-            Some(EditableField::HeaderValue(0))
+            model.editing.as_ref().map(|s| s.scope),
+            Some(crate::app::model::EditScope::Tab(RequestTab::Settings))
         );
-        assert_eq!(model.shown_request_tab(), RequestTab::Headers);
-        assert!(
-            plain_lines(&model)
-                .iter()
-                .any(|l| l.contains("Content-Type"))
-        );
-        // ←/→ ne changent pas d'onglet pendant la session.
+        // ←/→ ne changent pas d'onglet pendant la session
         update(&mut model, Message::Right);
-        assert_eq!(model.shown_request_tab(), RequestTab::Headers);
+        assert_eq!(model.shown_request_tab(), RequestTab::Settings);
         update(&mut model, Message::FocusTree);
         assert!(model.editing.is_none());
-        assert_eq!(model.request_tab, RequestTab::Headers);
+        assert_eq!(model.request_tab, RequestTab::Settings);
     }
 
     #[test]
