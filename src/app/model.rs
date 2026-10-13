@@ -142,7 +142,7 @@ impl RequestTab {
     }
 
     /// Onglet qui affiche `field` ; `None` pour la méthode et l'URL,
-    /// affichées en tête du détail quel que soit l'onglet.
+    /// éditées dans le popup Requête quel que soit l'onglet.
     pub fn of_field(field: EditableField) -> Option<Self> {
         match field {
             EditableField::Method | EditableField::Url => None,

@@ -131,9 +131,10 @@ pub(crate) fn open_popup_on(model: &mut Model, field: EditableField) -> bool {
     true
 }
 
-/// `Entrée` dans le détail : ouvre la session, ou commence la saisie du
-/// champ sous le curseur (`improve-direct-editing`, D3), ou ouvre l'éditeur
-/// externe pour un bloc de texte.
+/// `Entrée` : dans le détail, ouvre le popup de l'onglet affiché ; dans
+/// le popup, commence la saisie de la ligne sous le curseur, ouvre la
+/// liste d'un choix ou l'éditeur externe d'un bloc de texte, ou valide la
+/// liste ouverte.
 pub(crate) fn enter_in_detail(model: &mut Model) -> Command {
     match &model.editing {
         None => {

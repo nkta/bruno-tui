@@ -29,9 +29,6 @@ use crate::collection::{
 use crate::runner::report::{AssertionResult, ResultStatus, TestResult};
 use crate::writer::EntrySection;
 
-/// Style de mise en valeur de la ligne du champ sous le curseur en session d'édition (D8).
-pub const FIELD_CURSOR_STYLE: Style = Style::new().add_modifier(Modifier::REVERSED);
-
 /// Texte brut du détail, une entrée par ligne logique (`Text.lines`),
 /// spans concaténés. Utilisé par la recherche et par la copie : c'est
 /// cette même unité de ligne que `update::detail_line_count` compte pour
