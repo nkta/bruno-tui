@@ -17,6 +17,7 @@ pub mod loader;
 pub mod opencollection;
 pub mod tree;
 pub mod view;
+pub mod workspace;
 
 pub use ast::{Block, BlockBody, BruFile, Declaration, Entry, Node, NodeKind};
 pub use auth::{

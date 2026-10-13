@@ -16,6 +16,10 @@ pub enum LoadError {
     )]
     NotACollection { path: PathBuf },
 
+    /// Membre d'un workspace qui ne désigne pas la racine d'une collection.
+    #[error("`{path}` n'est pas une collection Bruno : ni bruno.json ni opencollection.yml")]
+    NotACollectionRoot { path: PathBuf },
+
     /// Seule la position est conservée : le message serde brut peut citer
     /// des valeurs du fichier.
     #[error("bruno.json invalide dans `{path}` (ligne {line}, colonne {column})")]

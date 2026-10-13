@@ -1,0 +1,16 @@
+opencollection: 1.0.0
+info:
+  name: Demo
+  type: workspace
+collections:
+  - name: Runner probe
+    path: ../../collections/runner-probe
+  - name: Multi-env
+    path: ../../collections/multi-env-probe
+    remote: https://exemple.invalid/multi-env.git
+  - name: Secrets
+    path: /BRUNO_TUI_FIXTURES/collections/secret-probe
+  - name: Absente
+    path: ../collection-absente
+specs: []
+docs: ''
