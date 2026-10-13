@@ -275,7 +275,8 @@ pub async fn run<B: Backend>(
                                         view,
                                     })
                                 });
-                            let _ = sender.blocking_send(AppEvent::EditSaved { path, result });
+                            let _ =
+                                sender.blocking_send(AppEvent::EditSaved { root, path, result });
                         });
                     }
                     Command::SaveEnvironment {
@@ -325,8 +326,11 @@ pub async fn run<B: Backend>(
                                             ast,
                                         })
                                     });
-                            let _ =
-                                sender.blocking_send(AppEvent::EnvironmentSaved { path, result });
+                            let _ = sender.blocking_send(AppEvent::EnvironmentSaved {
+                                root,
+                                path,
+                                result,
+                            });
                         });
                     }
                     Command::SetMouseCapture(enabled) => {

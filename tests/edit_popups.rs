@@ -158,9 +158,11 @@ impl Ui {
         let ast = BruFile::parse(text).expect("AST");
         let view = RequestView::from_ast(&ast)
             .unwrap_or_else(|_| FileMeta::from_ast(ast.clone()).to_request_view());
+        let saved_root = self.model.loaded().expect("chargée").root.clone();
         update(
             &mut self.model,
             Message::EditSaved {
+                root: saved_root,
                 path,
                 result: Ok(SavedEdit {
                     stamp: new_stamp,

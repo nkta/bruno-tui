@@ -207,7 +207,7 @@ fn sync_active_member(model: &mut Model) {
     if row.member == active {
         return;
     }
-    if crate::app::workspace::run_in_progress(model) || selection_locked(model) {
+    if crate::app::workspace::run_in_progress(model) || tree::member_switch_locked(model) {
         if let Some(index) = model
             .tree
             .rows
@@ -956,12 +956,18 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
                 }
             }
         }
-        Message::EditSaved { path, result } => {
-            edit_saved(model, path, result);
+        Message::EditSaved { root, path, result } => {
+            // Écriture d'une autre collection que celle chargée : ignorée
+            // (en workspace, elle est routée vers son emplacement avant).
+            if model.loaded().is_some_and(|c| c.root == root) {
+                edit_saved(model, path, result);
+            }
             Command::None
         }
-        Message::EnvironmentSaved { path, result } => {
-            environment_saved(model, path, result);
+        Message::EnvironmentSaved { root, path, result } => {
+            if model.loaded().is_some_and(|c| c.root == root) {
+                environment_saved(model, path, result);
+            }
             Command::None
         }
         Message::OpenResponseInEditor => match selected_response_body(model) {

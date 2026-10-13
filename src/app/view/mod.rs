@@ -1866,9 +1866,11 @@ mod tests {
             ast: request.ast.clone().expect("ast"),
             view: request.view.clone(),
         };
+        let saved_root = model.loaded().expect("chargée").root.clone();
         update(
             &mut model,
             Message::EditSaved {
+                root: saved_root,
                 path: "post-json.bru".into(),
                 result: Ok(saved),
             },

@@ -1743,9 +1743,11 @@ mod tests {
         };
 
         let path = std::path::PathBuf::from("simple-get.bru");
+        let saved_root = model.loaded().expect("chargée").root.clone();
         update(
             &mut model,
             Message::EditSaved {
+                root: saved_root,
                 path: path.clone(),
                 result: Ok(saved),
             },
@@ -1784,9 +1786,11 @@ mod tests {
         let path = std::path::PathBuf::from("simple-get.bru");
         let error = crate::writer::WriteError::Stale { path: path.clone() };
 
+        let saved_root = model.loaded().expect("chargée").root.clone();
         update(
             &mut model,
             Message::EditSaved {
+                root: saved_root,
                 path,
                 result: Err(error),
             },
@@ -1833,9 +1837,11 @@ mod tests {
             view: new_view,
         };
 
+        let saved_root = model.loaded().expect("chargée").root.clone();
         update(
             &mut model,
             Message::EditSaved {
+                root: saved_root,
                 path: other_path,
                 result: Ok(saved),
             },
@@ -2889,9 +2895,11 @@ mod tests {
         let saved_view = RequestView::from_ast(&saved_ast).expect("vue");
         assert_eq!(bytes, saved_view);
         let stamp = session(&model).stamp;
+        let saved_root = model.loaded().expect("chargée").root.clone();
         update(
             &mut model,
             Message::EditSaved {
+                root: saved_root,
                 path: "simple-get.bru".into(),
                 result: Ok(SavedEdit {
                     stamp,

@@ -51,13 +51,17 @@ pub enum AppEvent {
         field: EditableField,
         result: Result<String, String>,
     },
-    /// Issue d'une écriture sur disque (`Command::SaveEdit`).
+    /// Issue d'une écriture sur disque (`Command::SaveEdit`) dans la
+    /// collection de racine `root`.
     EditSaved {
+        root: PathBuf,
         path: PathBuf,
         result: Result<SavedEdit, WriteError>,
     },
-    /// Issue d'une écriture sur disque d'un environnement (`Command::SaveEnvironment`).
+    /// Issue d'une écriture sur disque d'un environnement
+    /// (`Command::SaveEnvironment`) dans la collection de racine `root`.
     EnvironmentSaved {
+        root: PathBuf,
         path: PathBuf,
         result: Result<SavedEnvironment, WriteError>,
     },

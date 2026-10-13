@@ -219,13 +219,17 @@ pub enum Message {
         field: super::model::EditableField,
         result: Result<String, String>,
     },
-    /// Renvoyé par la boucle après `Command::SaveEdit`.
+    /// Renvoyé par la boucle après `Command::SaveEdit` ; `root` est la
+    /// racine de la collection écrite.
     EditSaved {
+        root: PathBuf,
         path: PathBuf,
         result: Result<super::model::SavedEdit, crate::writer::WriteError>,
     },
-    /// Renvoyé par la boucle après `Command::SaveEnvironment`.
+    /// Renvoyé par la boucle après `Command::SaveEnvironment` ; `root` est
+    /// la racine de la collection écrite.
     EnvironmentSaved {
+        root: PathBuf,
         path: PathBuf,
         result: Result<super::model::SavedEnvironment, crate::writer::WriteError>,
     },
@@ -392,9 +396,11 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
         AppEvent::TextEditorClosed { field, result } => {
             Some(Message::TextEditorClosed { field, result })
         }
-        AppEvent::EditSaved { path, result } => Some(Message::EditSaved { path, result }),
-        AppEvent::EnvironmentSaved { path, result } => {
-            Some(Message::EnvironmentSaved { path, result })
+        AppEvent::EditSaved { root, path, result } => {
+            Some(Message::EditSaved { root, path, result })
+        }
+        AppEvent::EnvironmentSaved { root, path, result } => {
+            Some(Message::EnvironmentSaved { root, path, result })
         }
         AppEvent::SecretsResolved { root, resolved } => {
             Some(Message::SecretsResolved { root, resolved })

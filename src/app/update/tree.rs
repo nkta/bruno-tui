@@ -238,7 +238,7 @@ pub(crate) fn finish_tree_selection(
 fn change_member(model: &mut Model, before: usize, row: Row) {
     let refusal = if run_in_progress(model) {
         Some(StatusMessage::RunLocked)
-    } else if super::selection_locked(model) {
+    } else if member_switch_locked(model) {
         Some(StatusMessage::EditLocked)
     } else {
         None
@@ -255,8 +255,22 @@ fn change_member(model: &mut Model, before: usize, row: Row) {
     switch_member(model, row);
 }
 
-/// Rend active la collection de `row` et y place la sélection.
+/// Vrai si une session d'édition (requête ou environnement) porte des
+/// modifications non enregistrées : elle appartient à la collection
+/// active, qui ne peut donc pas changer.
+pub(crate) fn member_switch_locked(model: &Model) -> bool {
+    super::selection_locked(model)
+        || model
+            .environment_editing
+            .as_ref()
+            .is_some_and(EnvironmentEditSession::has_unsaved)
+}
+
+/// Rend active la collection de `row` et y place la sélection. Une
+/// session d'édition d'environnement sans modification est fermée : elle
+/// décrit un fichier de la collection quittée.
 pub(crate) fn switch_member(model: &mut Model, row: Row) {
+    model.environment_editing = None;
     let key = (
         row.member,
         model.row_node(&row).map(|node| node.path().to_path_buf()),
