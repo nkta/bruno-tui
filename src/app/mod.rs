@@ -65,7 +65,7 @@ use update::{Command, update};
 pub async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     loader: Arc<dyn CollectionLoader>,
-    source: PathBuf,
+    launch: impl Into<workspace::Launch>,
     sender: mpsc::Sender<AppEvent>,
     mut events: mpsc::Receiver<AppEvent>,
     bru_program: OsString,
@@ -79,6 +79,17 @@ pub async fn run<B: Backend>(
     editor: Option<String>,
 ) -> Result<Exit, B::Error> {
     let size = terminal.size()?;
+    let (source, members) = match launch.into() {
+        workspace::Launch::Single(source) => (source, None),
+        workspace::Launch::Workspace(ws) => {
+            let first = ws
+                .members
+                .first()
+                .map(|member| member.root.clone())
+                .unwrap_or_default();
+            (first, Some(ws))
+        }
+    };
     let mut model = Model::new(source.clone(), (size.width, size.height));
     model.secrets.mappings = secrets;
     model.mouse.capture = mouse.enabled;
@@ -87,13 +98,36 @@ pub async fn run<B: Backend>(
     if let Some(reason) = mouse.startup_error {
         model.last_status = Some(model::StatusMessage::MouseCaptureError(reason));
     }
+    // Racines des membres du workspace, dans l'ordre ; vide hors workspace.
+    let member_roots: Vec<PathBuf> = members
+        .as_ref()
+        .map(|ws| ws.members.iter().map(|m| m.root.clone()).collect())
+        .unwrap_or_default();
+    if let Some(ws) = members {
+        // `--workspace-path` par défaut : le dossier de `workspace.yml`.
+        model.runner_options.workspace_path = ws.path.clone();
+        workspace::install(&mut model, ws);
+    }
 
-    let mut _watcher = if watch {
+    let mut _watcher = if watch && member_roots.is_empty() {
         crate::collection::config::find_root(&source)
             .ok()
             .and_then(|root| watch::start_watcher(root, sender.clone()).ok())
     } else {
         None
+    };
+    // Un watcher par collection du workspace ; un chemin invalide n'en a pas.
+    let _member_watchers: Vec<watch::CollectionWatcher> = if watch {
+        member_roots
+            .iter()
+            .enumerate()
+            .filter_map(|(member, root)| {
+                let root = std::fs::canonicalize(root).ok()?;
+                watch::start_member_watcher(member, root, sender.clone()).ok()
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
 
     let (run_tx, mut run_rx) = mpsc::channel(EVENT_BUFFER);
@@ -109,7 +143,7 @@ pub async fn run<B: Backend>(
         });
     }
 
-    {
+    if member_roots.is_empty() {
         let sender = sender.clone();
         let init_loader = Arc::clone(&loader);
         tokio::task::spawn_blocking(move || {
@@ -117,6 +151,9 @@ pub async fn run<B: Backend>(
             // Boucle terminée : plus personne n'attend la collection.
             let _ = sender.blocking_send(AppEvent::CollectionLoaded(result));
         });
+    }
+    for member in 0..member_roots.len() {
+        spawn_member_load(&loader, &member_roots, member, &sender);
     }
 
     terminal.draw(|frame| view::view(&model, frame))?;
@@ -130,6 +167,7 @@ pub async fn run<B: Backend>(
         if let AppEvent::CollectionLoaded(Ok(ref collection)) = event
             && _watcher.is_none()
             && watch
+            && member_roots.is_empty()
         {
             _watcher = watch::start_watcher(collection.root.clone(), sender.clone()).ok();
         }
@@ -375,6 +413,14 @@ pub async fn run<B: Backend>(
                             })
                             .await;
                     }
+                    Command::ReloadMember(member) => {
+                        spawn_member_load(&loader, &member_roots, member, &sender);
+                    }
+                    Command::ReloadCollection if !member_roots.is_empty() => {
+                        if let Some(member) = workspace::active_member(&model) {
+                            spawn_member_load(&loader, &member_roots, member, &sender);
+                        }
+                    }
                     Command::ReloadCollection => {
                         let loader = Arc::clone(&loader);
                         let source = model.source.clone();
@@ -416,6 +462,24 @@ pub async fn run<B: Backend>(
         }
         terminal.draw(|frame| view::view(&model, frame))?;
     }
+}
+
+/// Charge hors de la boucle la collection d'un membre du workspace.
+fn spawn_member_load(
+    loader: &Arc<dyn CollectionLoader>,
+    roots: &[PathBuf],
+    member: usize,
+    sender: &mpsc::Sender<AppEvent>,
+) {
+    let Some(root) = roots.get(member).cloned() else {
+        return;
+    };
+    let loader = Arc::clone(loader);
+    let sender = sender.clone();
+    tokio::task::spawn_blocking(move || {
+        let result = crate::collection::workspace::load_member(&*loader, &root);
+        let _ = sender.blocking_send(AppEvent::MemberLoaded { member, result });
+    });
 }
 
 #[cfg(test)]

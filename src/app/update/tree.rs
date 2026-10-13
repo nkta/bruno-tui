@@ -296,31 +296,7 @@ pub(crate) fn read_only_collection(model: &Model) -> bool {
 
 /// Traite une notification de modification de fichiers surveillés sur disque.
 pub(crate) fn handle_watch_reload(model: &mut Model, paths: Vec<std::path::PathBuf>) -> Command {
-    let relevant_paths: Vec<std::path::PathBuf> =
-        paths.into_iter().filter(|p| is_watched_path(p)).collect();
-    if relevant_paths.is_empty() {
-        return Command::None;
-    }
-
-    // Vérifie si ces modifications proviennent de nos propres écritures du TUI (Ctrl+S).
-    // Si tous les chemins modifiés correspondent à un fichier enregistré récemment par le TUI
-    // dont le FileStamp sur disque correspond à notre empreinte, il ne s'agit pas d'une modification externe.
-    let root = model
-        .loaded()
-        .map(|c| c.root.clone())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-    // Chemins relatifs à la racine, comme les clés de `last_saved_stamps`.
-    let all_self_saved = relevant_paths.iter().all(|path| {
-        model
-            .last_saved_stamps
-            .get(path)
-            .is_some_and(|saved_stamp| {
-                FileStamp::capture(&root.join(path)).is_ok_and(|current| current == *saved_stamp)
-            })
-    });
-
-    if all_self_saved {
+    if !external_change(model, &paths) {
         return Command::None;
     }
 
@@ -343,6 +319,35 @@ pub(crate) fn handle_watch_reload(model: &mut Model, paths: Vec<std::path::PathB
         model.pending_reload = false;
         Command::ReloadCollection
     }
+}
+
+/// Vrai si un des chemins modifiés justifie un rechargement de la
+/// collection active et ne vient pas d'une écriture du TUI lui-même.
+pub(crate) fn external_change(model: &Model, paths: &[std::path::PathBuf]) -> bool {
+    let relevant_paths: Vec<&std::path::PathBuf> =
+        paths.iter().filter(|p| is_watched_path(p)).collect();
+    if relevant_paths.is_empty() {
+        return false;
+    }
+
+    // Vérifie si ces modifications proviennent de nos propres écritures du TUI (Ctrl+S).
+    // Si tous les chemins modifiés correspondent à un fichier enregistré récemment par le TUI
+    // dont le FileStamp sur disque correspond à notre empreinte, il ne s'agit pas d'une modification externe.
+    let root = model
+        .loaded()
+        .map(|c| c.root.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    // Chemins relatifs à la racine, comme les clés de `last_saved_stamps`.
+    let all_self_saved = relevant_paths.iter().all(|path| {
+        model
+            .last_saved_stamps
+            .get(*path)
+            .is_some_and(|saved_stamp| {
+                FileStamp::capture(&root.join(path)).is_ok_and(|current| current == *saved_stamp)
+            })
+    });
+    !all_self_saved
 }
 
 /// Dossier sélectionné : (chemin, déplié, vide).

@@ -32,6 +32,11 @@ pub enum AppEvent {
     TerminalClosed(io::Error),
     /// Fin du chargement de la collection.
     CollectionLoaded(Result<Collection, LoadError>),
+    /// Fin du chargement de la collection d'un membre du workspace.
+    MemberLoaded {
+        member: usize,
+        result: Result<Collection, LoadError>,
+    },
     /// Issue d'une exécution `bru run`.
     Run(runner::RunEvent),
     /// Issue d'une copie vers le presse-papiers (`Command::CopyToClipboard`).
@@ -66,6 +71,8 @@ pub enum AppEvent {
     /// un ou plusieurs fichiers de la collection ont été modifiés sur disque
     /// (chemins relatifs à la racine).
     WatchReload(Vec<PathBuf>),
+    /// Comme `WatchReload`, pour la collection d'un membre du workspace.
+    MemberWatchReload { member: usize, paths: Vec<PathBuf> },
     /// Issue d'une exportation de corps de réponse (`Command::ExportResponseBody`).
     ResponseBodyExported {
         path: PathBuf,

@@ -44,8 +44,13 @@ fn main() -> ExitCode {
             }
         };
 
-    // Provisoire : seul le premier chemin est ouvert.
-    let path = paths.into_iter().next().unwrap_or_else(|| ".".into());
+    let launch = match bruno_tui::app::workspace::resolve_launch(&paths) {
+        Ok(launch) => launch,
+        Err(error) => {
+            eprintln!("bruno-tui : {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     // Vérifié avant toute modification de l'état du terminal.
     if !io::stdout().is_terminal() {
@@ -99,7 +104,7 @@ fn main() -> ExitCode {
         Ok(()) => runtime.block_on(run(
             &mut terminal,
             Arc::new(AutoLoader),
-            path,
+            launch,
             sender,
             events,
             "bru".into(),

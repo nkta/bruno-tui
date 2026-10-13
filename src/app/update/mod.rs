@@ -27,6 +27,7 @@ pub mod scroll;
 #[cfg(test)]
 pub(super) mod test_support;
 pub mod tree;
+pub mod workspace;
 
 pub(crate) use self::edit::*;
 pub(crate) use self::pointer::*;
@@ -125,6 +126,9 @@ pub enum Command {
         path: std::path::PathBuf,
         bytes: Vec<u8>,
     },
+    /// Recharger la collection d'un membre du workspace ; la boucle renvoie
+    /// le résultat via `Message::MemberLoaded`.
+    ReloadMember(usize),
     /// Regroupe plusieurs commandes à exécuter séquentiellement par la boucle.
     Batch(Vec<Command>),
     /// Charger l'historique persistant depuis le disque.
@@ -141,7 +145,10 @@ pub enum Command {
 /// Applique un message au modèle.
 pub fn update(model: &mut Model, message: Message) -> Command {
     let had_session = model.editing.is_some() || model.environment_editing.is_some();
-    let mut command = apply(model, message);
+    let mut command = match workspace::route(model, message) {
+        Ok(command) => command,
+        Err(message) => apply(model, *message),
+    };
     // Pendant une session d'édition, l'onglet affiché du détail suit le
     // champ sous le curseur : il devient l'onglet choisi, pour que le
     // détail ne saute pas d'onglet à la fin de la session.
@@ -161,6 +168,29 @@ pub fn update(model: &mut Model, message: Message) -> Command {
     }
     sync_active_member(model);
     command
+}
+
+/// Effets qui suivent le chargement d'une collection : résolution des
+/// secrets et lecture de l'historique persistant.
+pub(crate) fn load_commands(model: &Model, collection: &crate::collection::Collection) -> Command {
+    let mut commands = Vec::new();
+    let lookups = secret_lookups(&model.secrets.mappings, collection);
+    if !lookups.is_empty() {
+        commands.push(Command::ResolveSecrets {
+            root: collection.root.clone(),
+            lookups,
+        });
+    }
+    if model.history_enabled {
+        commands.push(Command::LoadHistory {
+            root: collection.root.clone(),
+        });
+    }
+    match commands.len() {
+        0 => Command::None,
+        1 => commands.pop().unwrap_or(Command::None),
+        _ => Command::Batch(commands),
+    }
 }
 
 /// Filet de sécurité du mode workspace : la ligne sélectionnée appartient
@@ -193,7 +223,7 @@ fn sync_active_member(model: &mut Model) {
     tree::switch_member(model, row);
 }
 
-fn apply(model: &mut Model, message: Message) -> Command {
+pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
     // Un statut (copie, campagne terminée…) masque le rappel des touches :
     // il ne dure que jusqu'à l'action suivante de l'utilisateur. Le
     // traitement du message peut ensuite en poser un nouveau.
@@ -355,25 +385,9 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::CollectionLoaded(result) => {
-            let mut commands = Vec::new();
-            if let Ok(collection) = &result {
-                let lookups = secret_lookups(&model.secrets.mappings, collection);
-                if !lookups.is_empty() {
-                    commands.push(Command::ResolveSecrets {
-                        root: collection.root.clone(),
-                        lookups,
-                    });
-                }
-                if model.history_enabled {
-                    commands.push(Command::LoadHistory {
-                        root: collection.root.clone(),
-                    });
-                }
-            }
-            let command = match commands.len() {
-                0 => Command::None,
-                1 => commands.pop().unwrap(),
-                _ => Command::Batch(commands),
+            let command = match &result {
+                Ok(collection) => load_commands(model, collection),
+                Err(_) => Command::None,
             };
             let is_reloading = matches!(model.collection, CollectionState::Loaded(_));
             // Échec d'un rechargement automatique (fichier momentanément
