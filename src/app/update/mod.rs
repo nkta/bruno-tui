@@ -159,7 +159,38 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             command = Command::ReloadCollection;
         }
     }
+    sync_active_member(model);
     command
+}
+
+/// Filet de sécurité du mode workspace : la ligne sélectionnée appartient
+/// toujours à la collection active. Si elle a changé de collection hors
+/// des déplacements ordinaires, la collection devient active, sauf pendant
+/// une exécution, où la sélection revient sur l'en-tête de la collection.
+fn sync_active_member(model: &mut Model) {
+    let Some(active) = crate::app::workspace::active_member(model) else {
+        return;
+    };
+    let Some(row) = model.selected_row().cloned() else {
+        return;
+    };
+    if row.member == active {
+        return;
+    }
+    if crate::app::workspace::run_in_progress(model) || selection_locked(model) {
+        if let Some(index) = model
+            .tree
+            .rows
+            .iter()
+            .position(|candidate| candidate.member == active)
+        {
+            model.tree.selected = index;
+            model.selected_collection = true;
+        }
+        scroll_tree_into_view(model);
+        return;
+    }
+    tree::switch_member(model, row);
 }
 
 fn apply(model: &mut Model, message: Message) -> Command {
@@ -379,11 +410,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
 
                     // Conserver la sélection par chemin
                     if let Some(prev_path) = prev_selected_path {
-                        if let Some(index) = model.tree.rows.iter().position(|row| {
-                            model
-                                .node_at(&row.address)
-                                .is_some_and(|n| n.path() == prev_path)
-                        }) {
+                        if let Some(index) = model.active_row_position(|n| n.path() == prev_path) {
                             model.tree.selected = index;
                         } else {
                             model.tree.selected = model

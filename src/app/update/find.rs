@@ -109,6 +109,7 @@ fn search_tree(model: &mut Model, pattern: &str, forward: bool) -> bool {
         .tree
         .rows
         .get(model.tree.selected)
+        .filter(|row| model.is_active_row(row))
         .map(|row| row.address.clone());
     let from = current
         .as_ref()
@@ -144,15 +145,14 @@ fn search_tree(model: &mut Model, pattern: &str, forward: bool) -> bool {
     for path in ancestors {
         model.tree.expanded.insert(path);
     }
+    crate::app::workspace::open_active(model);
     refresh_rows(model);
     let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
-    if let Some(index) = model
-        .tree
-        .rows
-        .iter()
-        .position(|row| row.address == address)
-    {
+    if let Some(index) = model.active_row_index(&address) {
         model.tree.selected = index;
+        if model.workspace.is_some() {
+            model.selected_collection = false;
+        }
     }
     clear_detail_view_state(model);
     reset_filter_if_selection_changed(model, previous_path.as_deref());

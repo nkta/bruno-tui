@@ -138,18 +138,12 @@ fn filter_rows_walk(
         match node {
             TreeNode::Request(_) | TreeNode::Error(_) => {
                 if matches_tree_filter(node, pattern) {
-                    rows.push(Row {
-                        address: prefix.clone(),
-                        depth: prefix.len() - 1,
-                    });
+                    rows.push(Row::node(prefix.clone(), prefix.len() - 1));
                 }
             }
             TreeNode::Folder(folder) => {
                 if has_matching_descendants(node, pattern) {
-                    rows.push(Row {
-                        address: prefix.clone(),
-                        depth: prefix.len() - 1,
-                    });
+                    rows.push(Row::node(prefix.clone(), prefix.len() - 1));
                     expanded.insert(folder.path.clone());
                     filter_rows_walk(&folder.children, prefix, pattern, rows, expanded);
                 }

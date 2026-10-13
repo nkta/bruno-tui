@@ -99,6 +99,41 @@ pub fn row_line(node: &TreeNode, depth: usize, expanded: bool, status: RunStatus
     }
 }
 
+/// État d'une collection tel qu'affiché sur son en-tête (mode workspace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderState<'a> {
+    Loading,
+    Loaded,
+    /// Chargement impossible : message de l'erreur.
+    Failed(&'a str),
+}
+
+/// Ligne d'en-tête d'une collection du workspace : dépliable comme un
+/// dossier, en erreur si la collection n'a pas pu être chargée. La
+/// collection active est soulignée.
+pub fn header_line(name: &str, open: bool, state: HeaderState<'_>, active: bool) -> Line<'static> {
+    let mut name_style = Style::new().add_modifier(Modifier::BOLD);
+    if active {
+        name_style = name_style.add_modifier(Modifier::UNDERLINED);
+    }
+    match state {
+        HeaderState::Failed(message) => Line::from(vec![
+            Span::styled(format!("{ERROR_MARK} "), theme::LOAD_ERROR),
+            Span::styled(name.to_owned(), name_style),
+            Span::styled(format!(" — {message}"), theme::LOAD_ERROR),
+        ]),
+        HeaderState::Loading => Line::from(vec![
+            Span::raw("▸ "),
+            Span::styled(name.to_owned(), name_style),
+            Span::styled(" (chargement…)", theme::EMPTY_MESSAGE),
+        ]),
+        HeaderState::Loaded => Line::from(vec![
+            Span::raw(if open { "▾ " } else { "▸ " }),
+            Span::styled(name.to_owned(), name_style),
+        ]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +144,31 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>()
+    }
+
+    #[test]
+    fn header_lines() {
+        assert_eq!(
+            plain(&header_line("Clients", false, HeaderState::Loaded, true)),
+            "▸ Clients"
+        );
+        assert_eq!(
+            plain(&header_line("Clients", true, HeaderState::Loaded, false)),
+            "▾ Clients"
+        );
+        assert_eq!(
+            plain(&header_line("X", false, HeaderState::Loading, false)),
+            "▸ X (chargement…)"
+        );
+        assert_eq!(
+            plain(&header_line(
+                "X",
+                true,
+                HeaderState::Failed("absent"),
+                false
+            )),
+            "✗ X — absent"
+        );
     }
 
     fn request_node() -> TreeNode {

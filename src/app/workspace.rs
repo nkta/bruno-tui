@@ -171,6 +171,8 @@ pub fn install(model: &mut Model, workspace: Workspace) {
         swap_slot(model, first);
     }
     model.workspace = Some(state);
+    // La sélection part de l'en-tête de la première collection.
+    model.selected_collection = true;
 }
 
 /// Échange les champs propres à la collection active du `Model` avec un
@@ -242,6 +244,16 @@ pub fn activate(model: &mut Model, index: usize) {
         model.tree.expanded = filter.saved_expanded;
     }
     swap_active(model, index);
+}
+
+/// Déplie l'en-tête de la collection active, avant de sélectionner un de
+/// ses nœuds (recherche, diagnostics, historique...).
+pub fn open_active(model: &mut Model) {
+    if let Some(state) = model.workspace.as_mut()
+        && let Some(open) = state.open.get_mut(state.active)
+    {
+        *open = true;
+    }
 }
 
 /// Membre actif, `None` hors workspace.
@@ -359,29 +371,13 @@ mod tests {
         assert_eq!(ws.members[0].root, a);
     }
 
-    /// Modèle en mode workspace sur `runner-probe` et `multi-env-probe`,
-    /// toutes deux chargées, la première active.
-    pub(crate) fn two_member_model() -> Model {
-        use crate::collection::{BruLoader, CollectionLoader};
-        let a = fixtures().join("collections/runner-probe");
-        let b = fixtures().join("collections/multi-env-probe");
-        let mut model = Model::new(a.clone(), (100, 30));
-        install(&mut model, workspace::from_paths(&[a.clone(), b.clone()]));
-        model.collection = CollectionState::Loaded(BruLoader.load(&a).expect("runner-probe"));
-        if let Some(state) = model.workspace.as_mut() {
-            state.slots[1].collection =
-                CollectionState::Loaded(BruLoader.load(&b).expect("multi-env-probe"));
-        }
-        model
-    }
-
     fn loaded_name(model: &Model) -> String {
         model.loaded().map(|c| c.name.clone()).unwrap_or_default()
     }
 
     #[test]
     fn install_puts_the_first_member_in_the_model() {
-        let model = two_member_model();
+        let model = crate::app::test_support::workspace_model();
         let state = model.workspace.as_ref().expect("workspace");
         assert_eq!(state.active, 0);
         assert_eq!(state.open, [false, false]);
@@ -391,7 +387,7 @@ mod tests {
     #[test]
     fn each_collection_keeps_its_own_state() {
         use crate::runner::SecretString;
-        let mut model = two_member_model();
+        let mut model = crate::app::test_support::workspace_model();
         let first = loaded_name(&model);
         model.current_environment = Some("local".into());
         model
@@ -428,7 +424,7 @@ mod tests {
 
     #[test]
     fn activation_out_of_range_or_outside_a_workspace_is_ignored() {
-        let mut model = two_member_model();
+        let mut model = crate::app::test_support::workspace_model();
         activate(&mut model, 7);
         assert_eq!(active_member(&model), Some(0));
         let mut single = Model::new(".".into(), (100, 30));
@@ -438,7 +434,7 @@ mod tests {
 
     #[test]
     fn member_lookups_follow_the_active_member() {
-        let mut model = two_member_model();
+        let mut model = crate::app::test_support::workspace_model();
         let root_b = match member_collection(&model, 1) {
             Some(CollectionState::Loaded(c)) => c.root.clone(),
             _ => panic!("chargée"),
@@ -452,7 +448,7 @@ mod tests {
 
     #[test]
     fn run_in_progress_covers_series() {
-        let mut model = two_member_model();
+        let mut model = crate::app::test_support::workspace_model();
         assert!(!run_in_progress(&model));
         model.series = Some(EnvSeries::new(PathBuf::new(), vec!["up".into()]));
         assert!(run_in_progress(&model));
@@ -466,5 +462,144 @@ mod tests {
         let error = resolve_launch(std::slice::from_ref(&dir)).expect_err("YAML invalide");
         assert!(matches!(error, WorkspaceError::InvalidYaml { .. }));
         std::fs::remove_dir_all(&dir).expect("nettoyage");
+    }
+}
+
+/// Arbre multi-collection : en-têtes, navigation, changement de collection
+/// active et rendu.
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+    use crate::app::message::Message;
+    use crate::app::model::{ActiveRun, StatusMessage};
+    use crate::app::test_support::{render, selected_name, workspace_model};
+    use crate::app::update::update;
+    use crate::runner::RunId;
+
+    fn names(model: &Model) -> Vec<String> {
+        model
+            .tree
+            .rows
+            .iter()
+            .map(|row| match model.row_node(row) {
+                Some(node) => format!(
+                    "{}{}",
+                    "  ".repeat(row.depth),
+                    crate::app::view::tree::display_name(node)
+                ),
+                None => format!("# {}", member_name(model, row.member)),
+            })
+            .collect()
+    }
+
+    fn loaded_name(model: &Model) -> String {
+        model.loaded().map(|c| c.name.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn headers_are_folded_at_start_and_unfold_with_right() {
+        let mut model = workspace_model();
+        assert_eq!(names(&model), ["# runner-probe", "# multi-env-probe"]);
+        assert!(
+            model.selected_collection,
+            "en-tête = collection sélectionnée"
+        );
+        update(&mut model, Message::Right);
+        let rows = names(&model);
+        assert_eq!(rows[0], "# runner-probe");
+        assert!(rows[1].starts_with("  "), "nœuds indentés : {rows:?}");
+        assert_eq!(rows.last().map(String::as_str), Some("# multi-env-probe"));
+        update(&mut model, Message::Right);
+        assert_eq!(model.tree.selected, 1, "→ sur un en-tête déplié entre");
+        assert!(!model.selected_collection);
+        update(&mut model, Message::Left);
+        update(&mut model, Message::Left);
+        assert_eq!(model.tree.selected, 0, "← remonte à l'en-tête");
+        update(&mut model, Message::Left);
+        assert_eq!(names(&model), ["# runner-probe", "# multi-env-probe"]);
+    }
+
+    #[test]
+    fn moving_to_another_collection_activates_it() {
+        let mut model = workspace_model();
+        let first = loaded_name(&model);
+        model.current_environment = Some("local".into());
+        update(&mut model, Message::Down);
+        assert_eq!(active_member(&model), Some(1));
+        assert_ne!(loaded_name(&model), first);
+        assert_eq!(model.current_environment, None);
+        assert!(model.selected_collection);
+        update(&mut model, Message::Right);
+        update(&mut model, Message::Down);
+        assert_eq!(selected_name(&model), "data");
+        update(&mut model, Message::Home);
+        assert_eq!(active_member(&model), Some(0));
+        assert_eq!(model.current_environment.as_deref(), Some("local"));
+        // Les deux collections restent dépliées ensemble.
+        update(&mut model, Message::Right);
+        let rows = names(&model);
+        assert!(rows.contains(&"  data".to_owned()), "{rows:?}");
+        assert!(rows.contains(&"  ok".to_owned()), "{rows:?}");
+    }
+
+    #[test]
+    fn selection_cannot_leave_the_collection_during_a_run() {
+        let mut model = workspace_model();
+        model.run.active = Some(ActiveRun {
+            id: RunId(1),
+            target: "ok.bru".into(),
+            recursive: false,
+            is_campaign: false,
+            handle: None,
+        });
+        update(&mut model, Message::Down);
+        assert_eq!(active_member(&model), Some(0));
+        assert_eq!(model.tree.selected, 0);
+        assert!(matches!(model.last_status, Some(StatusMessage::RunLocked)));
+        update(&mut model, Message::End);
+        assert_eq!(active_member(&model), Some(0));
+        model.run.active = None;
+        update(&mut model, Message::End);
+        assert_eq!(active_member(&model), Some(1));
+    }
+
+    #[test]
+    fn tree_panel_shows_headers_and_workspace_title() {
+        let mut model = workspace_model();
+        update(&mut model, Message::Right);
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Collections"), "{screen}");
+        assert!(screen.contains("▾ runner-probe"), "{screen}");
+        assert!(screen.contains("▸ multi-env-probe"), "{screen}");
+        if let Some(state) = model.workspace.as_mut() {
+            state.name = Some("Demo".into());
+        }
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Workspace : Demo"), "{screen}");
+    }
+
+    #[test]
+    fn failed_member_shows_an_error_line() {
+        let mut model = workspace_model();
+        if let Some(state) = model.workspace.as_mut() {
+            state.slots[1].collection =
+                CollectionState::Failed(crate::collection::LoadError::NotACollectionRoot {
+                    path: "/absent".into(),
+                });
+        }
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("✗ multi-env-probe"), "{screen}");
+        update(&mut model, Message::Down);
+        assert_eq!(active_member(&model), Some(1));
+        update(&mut model, Message::Right);
+        assert_eq!(model.tree.rows.len(), 2, "rien à déplier");
+    }
+
+    #[test]
+    fn search_opens_the_active_collection() {
+        let mut model = workspace_model();
+        crate::app::test_support::select(&mut model, "folder/down.bru");
+        assert_eq!(selected_name(&model), "down");
+        assert_eq!(active_member(&model), Some(0));
     }
 }

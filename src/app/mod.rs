@@ -469,9 +469,29 @@ pub(crate) mod test_support {
         model
     }
 
+    /// Modèle en mode workspace sur `runner-probe` et `multi-env-probe`,
+    /// toutes deux chargées et repliées, la première active.
+    pub fn workspace_model() -> Model {
+        use crate::collection::workspace::from_paths;
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections");
+        let a = fixtures.join("runner-probe");
+        let b = fixtures.join("multi-env-probe");
+        let mut model = Model::new(a.clone(), (100, 30));
+        super::workspace::install(&mut model, from_paths(&[a.clone(), b.clone()]));
+        model.collection =
+            super::model::CollectionState::Loaded(BruLoader.load(&a).expect("runner-probe"));
+        if let Some(state) = model.workspace.as_mut() {
+            state.slots[1].collection =
+                super::model::CollectionState::Loaded(BruLoader.load(&b).expect("multi-env-probe"));
+        }
+        refresh_rows(&mut model);
+        model
+    }
+
     /// Déplie les dossiers parents et sélectionne le nœud de ce chemin.
     pub fn select(model: &mut Model, path: &str) {
         let target = Path::new(path);
+        super::workspace::open_active(model);
         for ancestor in target.ancestors().skip(1) {
             if !ancestor.as_os_str().is_empty() {
                 model.tree.expanded.insert(ancestor.to_path_buf());
@@ -479,14 +499,7 @@ pub(crate) mod test_support {
         }
         refresh_rows(model);
         let index = model
-            .tree
-            .rows
-            .iter()
-            .position(|row| {
-                model
-                    .node_at(&row.address)
-                    .is_some_and(|node| node.path() == target)
-            })
+            .active_row_position(|node| node.path() == target)
             .unwrap_or_else(|| panic!("`{path}` introuvable"));
         model.tree.selected = index;
         model.detail_scroll = 0;

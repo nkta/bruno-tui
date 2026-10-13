@@ -284,6 +284,21 @@ fn click_tree_row(model: &mut Model, index: usize) {
         select_row(model, index);
         return;
     }
+    if let Some(member) = super::tree::selected_header(model) {
+        let open = model
+            .workspace
+            .as_ref()
+            .and_then(|state| state.open.get(member).copied())
+            .unwrap_or(false);
+        if open {
+            super::tree::collapse_or_parent(model);
+        } else {
+            super::tree::expand_or_enter(model);
+        }
+        model.selected_collection = true;
+        scroll_tree_into_view(model);
+        return;
+    }
     if let Some((path, expanded, _)) = selected_folder(model) {
         if expanded {
             model.tree.expanded.remove(&path);
