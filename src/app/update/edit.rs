@@ -2,7 +2,7 @@
 
 use ratatui::text::Line;
 
-use crate::app::message::InputKey;
+use crate::app::message::{InputKey, Message};
 use crate::app::model::{
     EditScope, EditSession, EditState, EditableField, Focus, InputTarget, Model, PendingConfirm,
     PickerKind, SavedEdit, StatusMessage, field_enabled, field_value, field_value_committed,
@@ -12,7 +12,7 @@ use crate::app::text_input::TextInput;
 use crate::app::update::Command;
 use crate::app::update::output::resolve_editor;
 use crate::app::update::tree::read_only_collection;
-use crate::app::view::inner;
+use crate::app::view::edit_popup_layout;
 use crate::collection::TreeNode;
 use crate::writer::{EntrySection, FieldEdit, FileStamp};
 
@@ -63,9 +63,11 @@ pub(crate) fn start_edit(model: &mut Model) {
     let session = EditSession::new(path, stamp, view, EditScope::Tab(shown));
     model.editing = Some(session);
     model.last_status = None;
+    scroll_edit_into_view(model);
 }
 
-/// Ouvre le popup d'édition Requête (méthode et URL) via `m`.
+/// `m` : ouvre le popup Requête (méthode et URL) de la requête
+/// sélectionnée ; sans effet sur un dossier ou la collection.
 pub(crate) fn start_request_edit(model: &mut Model) {
     if model.focus != Focus::Detail || model.editing.is_some() {
         return;
@@ -98,6 +100,35 @@ pub(crate) fn start_request_edit(model: &mut Model) {
     let session = EditSession::new(path, stamp, view, EditScope::Request);
     model.editing = Some(session);
     model.last_status = None;
+    scroll_edit_into_view(model);
+}
+
+/// Ouvre, si aucun popup n'est ouvert, le popup qui édite `field` (clic
+/// sur un champ du détail ou de la barre d'URL), puis y place le curseur.
+/// Renvoie vrai si le curseur est sur `field`.
+pub(crate) fn open_popup_on(model: &mut Model, field: EditableField) -> bool {
+    if model.editing.is_none() {
+        model.focus = Focus::Detail;
+        match EditScope::of_field(field) {
+            EditScope::Request => start_request_edit(model),
+            EditScope::Tab(tab) => {
+                model.request_tab = tab;
+                start_edit(model);
+            }
+        }
+    }
+    let Some(session) = &mut model.editing else {
+        return false;
+    };
+    if session.state != EditState::FieldSelect {
+        return false;
+    }
+    let Some(index) = session.fields.iter().position(|f| *f == field) else {
+        return false;
+    };
+    session.cursor = index;
+    scroll_edit_into_view(model);
+    true
 }
 
 /// `Entrée` dans le détail : ouvre la session, ou commence la saisie du
@@ -115,6 +146,75 @@ pub(crate) fn enter_in_detail(model: &mut Model) -> Command {
             Command::None
         }
         Some(_) => Command::None,
+    }
+}
+
+/// Message reçu pendant que le popup d'édition est ouvert
+/// (`docs/edition-popups.md` § 2) : `Some` s'il est traité ici, ou écarté
+/// parce que le popup est modal ; `None` s'il suit son traitement habituel
+/// (saisie, sauvegarde, quitter, aide, éditeur externe).
+pub(crate) fn edit_popup_message(model: &mut Model, message: &Message) -> Option<Command> {
+    let state = model.editing.as_ref().map(|s| s.state.clone())?;
+    let picker = matches!(state, EditState::Picker { .. });
+    match message {
+        Message::Up if picker => move_picker(model, -1),
+        Message::Down if picker => move_picker(model, 1),
+        Message::Up => move_field_cursor(model, -1),
+        Message::Down => move_field_cursor(model, 1),
+        Message::MoveFieldCursor(delta) => move_field_cursor(model, *delta),
+        Message::Home | Message::End => {
+            if let Some(session) = &mut model.editing
+                && session.state == EditState::FieldSelect
+            {
+                session.cursor = match message {
+                    Message::Home => 0,
+                    _ => session.fields.len().saturating_sub(1),
+                };
+            }
+            scroll_edit_into_view(model);
+        }
+        Message::Left => cycle_choice(model, -1),
+        Message::Right => cycle_choice(model, 1),
+        Message::NextFocus => move_part(model, true),
+        Message::PreviousPart => move_part(model, false),
+        Message::Enter => return Some(enter_in_detail(model)),
+        Message::Add => add_entry(model),
+        Message::Delete => delete_entry(model),
+        Message::Rename => start_rename(model),
+        Message::ToggleField => toggle_field(model),
+        Message::FocusTree => close_popup(model),
+        Message::Mouse(input) => return Some(super::pointer::mouse(model, *input)),
+        Message::Quit
+        | Message::ForceQuit
+        | Message::TerminalClosed(_)
+        | Message::Resize { .. }
+        | Message::ToggleHelp
+        | Message::ToggleMouseCapture
+        | Message::InputKey(_)
+        | Message::ValidateInput
+        | Message::CancelInput
+        | Message::ReplacePlaintextSecret
+        | Message::KeepPlaintextSecret
+        | Message::CancelPlaintextSecretPrompt
+        | Message::ToggleRevealSecret
+        | Message::TextEditorClosed { .. }
+        | Message::SaveEdit => return None,
+        _ => {}
+    }
+    Some(Command::None)
+}
+
+/// `Échap` hors saisie : ferme le popup, après confirmation s'il porte
+/// des modifications non enregistrées.
+fn close_popup(model: &mut Model) {
+    let Some(session) = &model.editing else {
+        return;
+    };
+    model.last_status = None;
+    if session.has_unsaved() {
+        model.confirm = Some(PendingConfirm::DiscardEdit);
+    } else {
+        model.editing = None;
     }
 }
 
@@ -183,10 +283,22 @@ pub(crate) fn confirm_picker(model: &mut Model) {
     let EditState::Picker { kind, selected } = session.state else {
         return;
     };
-    let Some(&choice) = kind.options().get(selected) else {
+    if let Some(&choice) = kind.options().get(selected) {
+        apply_choice(model, kind, choice);
+    }
+    close_input(model);
+}
+
+/// Applique `choice` au champ que pilote `kind`, s'il diffère de la
+/// valeur courante.
+fn apply_choice(model: &mut Model, kind: PickerKind, choice: &str) {
+    let Some(session) = &model.editing else {
         return;
     };
     let current = picker_current(session, kind);
+    if choice.eq_ignore_ascii_case(&current) {
+        return;
+    }
     let edit = match kind {
         PickerKind::Method => FieldEdit::Method(choice.to_owned()),
         PickerKind::BodyMode => FieldEdit::BodyMode(choice.to_owned()),
@@ -195,7 +307,6 @@ pub(crate) fn confirm_picker(model: &mut Model) {
         }
         PickerKind::ApiKeyPlacement => {
             let Some(EditableField::AuthParamValue(index)) = session.current_field() else {
-                close_input(model);
                 return;
             };
             FieldEdit::AuthParamValue {
@@ -204,10 +315,87 @@ pub(crate) fn confirm_picker(model: &mut Model) {
             }
         }
     };
-    if !choice.eq_ignore_ascii_case(&current) {
-        try_commit(model, edit);
+    try_commit(model, edit);
+}
+
+/// Liste de choix du champ `field`, s'il en est un (`docs/edition-popups.md`
+/// § 2 : méthode, mode du corps, mode d'auth, placement d'API key).
+fn choice_kind(model: &Model, field: EditableField) -> Option<PickerKind> {
+    let session = model.editing.as_ref()?;
+    if !crate::app::view::edit_popup::is_choice(session, field) {
+        return None;
     }
-    close_input(model);
+    Some(match field {
+        EditableField::Method => PickerKind::Method,
+        EditableField::BodyMode => PickerKind::BodyMode,
+        EditableField::AuthMode if model.selected_collection => PickerKind::CollectionAuthMode,
+        EditableField::AuthMode => PickerKind::AuthMode,
+        _ => PickerKind::ApiKeyPlacement,
+    })
+}
+
+/// `←` `→` sur un choix : valeur précédente ou suivante, en boucle,
+/// appliquée aussitôt à l'aperçu.
+pub(crate) fn cycle_choice(model: &mut Model, delta: i8) {
+    let Some(session) = &model.editing else {
+        return;
+    };
+    if session.state != EditState::FieldSelect {
+        return;
+    }
+    let Some(field) = session.current_field() else {
+        return;
+    };
+    let Some(kind) = choice_kind(model, field) else {
+        return;
+    };
+    let options = kind.options();
+    let current = picker_current(session, kind);
+    let position = options
+        .iter()
+        .position(|candidate| current.eq_ignore_ascii_case(candidate));
+    let next = match (position, delta < 0) {
+        (Some(index), true) => (index + options.len() - 1) % options.len(),
+        (Some(index), false) => (index + 1) % options.len(),
+        (None, _) => 0,
+    };
+    if let Some(&choice) = options.get(next) {
+        apply_choice(model, kind, choice);
+    }
+    scroll_edit_into_view(model);
+}
+
+/// `Tab` / `Maj+Tab` en sélection : premier champ de la partie suivante
+/// ou précédente du popup, en boucle.
+pub(crate) fn move_part(model: &mut Model, forward: bool) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    if session.state != EditState::FieldSelect || session.fields.is_empty() {
+        return;
+    }
+    let fields = &session.fields;
+    let count = fields.len();
+    // Début de la partie qui contient l'indice `index`.
+    let part_start = |mut index: usize| {
+        while index > 0 && fields[index - 1].same_part(fields[index]) {
+            index -= 1;
+        }
+        index
+    };
+    let start = part_start(session.cursor.min(count - 1));
+    let target = if forward {
+        (start..count)
+            .find(|&index| !fields[index].same_part(fields[start]))
+            .unwrap_or(0)
+    } else if start == 0 {
+        part_start(count - 1)
+    } else {
+        part_start(start - 1)
+    };
+    session.cursor = target;
+    model.last_status = None;
+    scroll_edit_into_view(model);
 }
 
 /// Déplace le curseur de champ en sélection de champ.
@@ -862,46 +1050,53 @@ pub(crate) fn try_commit(model: &mut Model, edit: FieldEdit) -> bool {
     }
 }
 
-/// Fait défiler le détail pour que le champ sous le curseur (en sélection)
-/// ou la ligne du curseur de texte (en saisie) soit visible, et ajuste le
-/// décalage horizontal de la valeur en saisie (`improve-direct-editing`,
-/// D7).
+/// Fait défiler le popup pour que la ligne utile (champ sous le curseur,
+/// ligne du curseur de texte, choix présélectionné) soit visible, et
+/// ajuste le décalage horizontal de la valeur en saisie
+/// (`improve-direct-editing`, D7).
 pub(crate) fn scroll_edit_into_view(model: &mut Model) {
     let screen = ratatui::layout::Rect::new(0, 0, model.size.0, model.size.1);
     let Some(session) = &mut model.editing else {
         return;
     };
-    let popup_rect = crate::app::view::edit_popup_area(screen, session);
-    let area = inner(popup_rect);
-    let height = usize::from(area.height.max(1));
-    let width = area.width;
-
-    let (target_line, hscroll) = match &session.state {
-        EditState::FieldSelect
-        | EditState::Picker { .. }
-        | EditState::PlaintextSecretPrompt { .. } => (session.cursor, 0),
-        EditState::Input(input) => {
-            let (line, _) = input.cursor_line_col();
-            let column = u16::try_from(Line::raw(input.text_before_cursor_on_line()).width())
-                .unwrap_or(u16::MAX);
-            let available = width.saturating_sub(15).max(1);
-            let mut hscroll = session.hscroll;
-            if column < hscroll {
-                hscroll = column;
-            } else if column >= hscroll.saturating_add(available) {
-                hscroll = column - available + 1;
-            }
-            (session.cursor + line, hscroll)
+    if let EditState::Input(input) = &session.state {
+        let layout = edit_popup_layout(screen, session);
+        let masked = matches!(
+            (session.target.clone(), session.current_field()),
+            (InputTarget::Field, Some(EditableField::AuthParamValue(index)))
+                if !session.unmasked
+                    && session.preview.auth_params().get(index)
+                        .is_some_and(|kv| crate::collection::auth::is_sensitive_auth_key(&kv.key))
+        );
+        let before = input.text_before_cursor_on_line();
+        let column = if masked {
+            before.chars().count()
+        } else {
+            Line::raw(before).width()
+        };
+        let column = u16::try_from(column).unwrap_or(u16::MAX);
+        let prefix = u16::try_from(layout.content.input_prefix).unwrap_or(u16::MAX);
+        let available = layout.body.width.saturating_sub(prefix).max(1);
+        let mut hscroll = session.hscroll;
+        if column < hscroll {
+            hscroll = column;
+        } else if column >= hscroll.saturating_add(available) {
+            hscroll = column - available + 1;
         }
-    };
-    let mut scroll = session.scroll;
-    if target_line < scroll {
-        scroll = target_line;
-    } else if target_line >= scroll.saturating_add(height) {
-        scroll = target_line - height + 1;
+        session.hscroll = hscroll;
+    } else {
+        session.hscroll = 0;
+    }
+    let layout = edit_popup_layout(screen, session);
+    let height = usize::from(layout.body.height.max(1));
+    let target = layout.content.focus_line;
+    let mut scroll = layout.scroll;
+    if target < scroll {
+        scroll = target;
+    } else if target >= scroll + height {
+        scroll = target + 1 - height;
     }
     session.scroll = scroll;
-    session.hscroll = hscroll;
 }
 
 /// Une session porte des modifications non enregistrées : tout changement
@@ -1555,7 +1750,10 @@ mod tests {
             },
         );
 
-        assert!(model.editing.is_none(), "le popup est fermé après enregistrement réussi");
+        assert!(
+            model.editing.is_none(),
+            "le popup est fermé après enregistrement réussi"
+        );
         assert_eq!(model.last_saved_stamps.get(&path), Some(&new_stamp));
         assert_ne!(new_stamp, initial_stamp);
 
@@ -1759,7 +1957,10 @@ mod tests {
         select(&mut model, path);
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::OpenRequestEdit);
-        assert!(model.editing.is_some(), "session requête ouverte sur {path}");
+        assert!(
+            model.editing.is_some(),
+            "session requête ouverte sur {path}"
+        );
         model
     }
 
@@ -1994,7 +2195,7 @@ mod tests {
     /// modifiée (`add-method-editing`).
     #[test]
     fn method_picker_validation_without_change_does_not_mark_modified() {
-        let mut model = edit_session("simple-get.bru", (100, 30));
+        let mut model = request_edit_session("simple-get.bru", (100, 30));
         update(&mut model, Message::Enter);
         update(&mut model, Message::Enter);
         assert_eq!(session(&model).state, EditState::FieldSelect);
@@ -2195,62 +2396,53 @@ mod tests {
         );
     }
 
+    /// Le popup est modal : ni le focus, ni l'arbre, ni la recherche ne
+    /// bougent tant qu'il est ouvert (`docs/edition-popups.md` § 1).
     #[test]
-    fn selection_change_is_refused_while_the_session_is_modified() {
-        let mut model = edit_session("simple-get.bru", (100, 30));
+    fn the_popup_is_modal_and_keeps_the_selection() {
+        let mut model = request_edit_session("simple-get.bru", (100, 30));
         move_to_field(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         type_input(&mut model, "!");
         update(&mut model, Message::ValidateInput);
         let selected = model.tree.selected;
 
-        // Navigation dans l'arbre.
+        // `Tab` change de partie, jamais de panneau.
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::NextFocus);
-        assert_eq!(model.focus, Focus::Tree);
+        assert_eq!(model.focus, Focus::Detail);
+        // `↓` déplace le curseur de champ, pas la sélection de l'arbre.
         update(&mut model, Message::Down);
         assert_eq!(model.tree.selected, selected);
-        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
-        assert!(session(&model).dirty);
-
-        // Recherche dans l'arbre.
-        model.last_status = None;
+        // Recherche, panneaux, exécution : sans effet.
         update(&mut model, Message::StartSearch);
-        for c in "inherit".chars() {
-            update(&mut model, Message::SearchInput(c));
-        }
-        update(&mut model, Message::ConfirmSearch);
-        assert_eq!(model.tree.selected, selected);
-        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
-        assert!(!model.tree.expanded.contains(Path::new("grp")));
-
-        // Navigation croisée depuis les diagnostics.
-        model.last_status = None;
-        model.focus = Focus::Diagnostics;
-        model.diagnostics_selected = 1;
-        update(&mut model, Message::Right);
-        assert_eq!(model.tree.selected, selected);
-        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
+        assert!(model.search.is_none());
+        update(&mut model, Message::ToggleHistory);
+        update(&mut model, Message::RunSelected);
+        assert_eq!(model.focus, Focus::Detail);
+        assert!(model.run.active.is_none());
         assert!(session(&model).dirty);
 
-        // Une navigation qui ne change pas de nœud reste permise.
-        model.last_status = None;
-        model.focus = Focus::Tree;
-        update(&mut model, Message::Left);
-        assert!(model.last_status.is_none());
+        // `Échap` demande confirmation ; `n` garde le popup.
+        update(&mut model, Message::FocusTree);
+        assert_eq!(model.confirm, Some(PendingConfirm::DiscardEdit));
+        update(&mut model, Message::ConfirmNo);
         assert!(model.editing.is_some());
+        assert_eq!(model.tree.selected, selected);
     }
 
     #[test]
-    fn clean_session_is_closed_on_selection_change() {
+    fn clean_popup_closes_on_escape_then_the_selection_moves() {
         let mut model = edit_session("simple-get.bru", (100, 30));
         update(&mut model, Message::Enter);
         update(&mut model, Message::CancelInput);
+        update(&mut model, Message::FocusTree);
+        assert!(model.editing.is_none());
+        assert!(model.confirm.is_none());
         model.focus = Focus::Tree;
         let before = model.tree.selected;
         update(&mut model, Message::Down);
         assert_ne!(model.tree.selected, before);
-        assert!(model.editing.is_none());
     }
 
     #[test]
@@ -2259,7 +2451,7 @@ mod tests {
         let mut model = edit_session("post-json.bru", (100, 10));
         let screen = ratatui::layout::Rect::new(0, 0, model.size.0, model.size.1);
         move_to_field(&mut model, EditableField::BodyText);
-        let height = usize::from(inner(crate::app::view::edit_popup_area(screen, session(&model))).height);
+        let height = usize::from(edit_popup_layout(screen, session(&model)).body.height);
         assert_eq!(session(&model).scroll, 0);
 
         // Nouvelle ligne en bas du corps : le défilement du popup suit le curseur.
@@ -2275,7 +2467,7 @@ mod tests {
         // URL plus large que le popup : décalage horizontal.
         let mut model = request_edit_session("simple-get.bru", (60, 20));
         let screen = ratatui::layout::Rect::new(0, 0, model.size.0, model.size.1);
-        let width = inner(crate::app::view::edit_popup_area(screen, session(&model))).width;
+        let width = edit_popup_layout(screen, session(&model)).body.width;
         go_to(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         type_input(&mut model, &"a".repeat(usize::from(width) * 2));
@@ -2321,11 +2513,12 @@ mod tests {
         };
         if let Some(session) = &mut model.editing {
             session.scope = EditScope::Tab(tab);
-            session.active_part = match section {
-                EntrySection::PathParams | EntrySection::VarsPostResponse => 1,
-                _ => 0,
-            };
             session.fields = EditableField::list_for_scope(&session.preview, session.scope);
+            session.cursor = session
+                .fields
+                .iter()
+                .position(|f| f.section() == Some(section))
+                .expect("partie du tableau");
         }
         update(model, Message::Add);
         type_input(model, key);
@@ -2457,7 +2650,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_query_param_updates_the_url_and_locks_the_selection() {
+    fn deleting_a_query_param_updates_the_url_and_asks_before_closing() {
         let mut model = edit_session("simple-get.bru", (100, 30));
         add_via_row(&mut model, EntrySection::QueryParams, "page", "2");
         add_via_row(&mut model, EntrySection::QueryParams, "size", "10");
@@ -2469,12 +2662,9 @@ mod tests {
         update(&mut model, Message::Delete);
         assert_eq!(session(&model).preview.url, "https://{{host}}/ping?page=2");
 
-        let selected = model.tree.selected;
-        update(&mut model, Message::NextFocus);
-        update(&mut model, Message::NextFocus);
-        update(&mut model, Message::Down);
-        assert_eq!(model.tree.selected, selected);
-        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
+        // Fermer le popup demande confirmation : la suppression est en attente.
+        update(&mut model, Message::FocusTree);
+        assert_eq!(model.confirm, Some(PendingConfirm::DiscardEdit));
     }
 
     #[test]

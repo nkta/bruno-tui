@@ -1,702 +1,1241 @@
-//! Rendu des popups d'édition modaux centrés (`docs/edition-popups.md`).
+//! Popup d'édition d'un onglet ou de la requête (`docs/edition-popups.md`).
+//!
+//! Le contenu du popup est décrit par [`edit_popup_layout`], fonction pure
+//! partagée par le rendu, le défilement (`update::edit`) et la souris :
+//! chaque position du curseur de champ y a ses lignes, la saisie en cours
+//! sa colonne. Les valeurs sont celles de l'aperçu de la session, telles
+//! qu'elles seraient écrites : aucune variable n'est résolue.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
-use super::inner;
+use super::detail::skip_columns;
 use super::theme;
 use crate::app::model::{
-    EditScope, EditSession, EditState, EditableField, InputTarget, Model, PickerKind, RequestTab,
-    field_value,
+    EditScope, EditSession, EditState, EditableField, InputTarget, PickerKind, RequestTab,
+    field_enabled, field_value, section_entries,
 };
-use crate::collection::KeyValue;
+use crate::app::text_input::TextInput;
+use crate::collection::auth::{is_sensitive_auth_key, mask_auth_value};
+use crate::collection::{BodyContent, BodyKind};
+use crate::writer::EntrySection;
 
-pub const TABLE_SEPARATOR: &str = " │ ";
-pub const DISABLED_ENTRY_VALUE: Style =
-    Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC));
+/// Mise en valeur de la ligne sous le curseur de champ, et du choix
+/// présélectionné d'une liste.
+pub const CURSOR_STYLE: Style = Style::new().add_modifier(Modifier::REVERSED);
 
-/// Zone du popup d'édition : centrée sur l'écran, largeur bornée entre 50 et 80 colonnes,
-/// hauteur adaptée au contenu.
-pub fn edit_popup_area(screen: Rect, session: &EditSession) -> Rect {
-    let width = (screen.width * 3 / 4).clamp(50, 80).min(screen.width);
-    let max_height = screen.height.saturating_sub(4).max(6);
-    let is_adding = matches!(
-        session.target,
-        InputTarget::NewKey { .. } | InputTarget::NewValue { .. }
-    );
-    let add_extra = if is_adding { 1 } else { 0 };
+/// Ligne désactivée d'un tableau : grisée, suivie de « (désactivé) ».
+pub const DISABLED_STYLE: Style = Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC));
 
-    let content_rows = match session.scope {
-        EditScope::Request => 2,
-        EditScope::Tab(RequestTab::Headers) => {
-            session.preview.headers.len().max(1) + add_extra + 1
-        }
-        EditScope::Tab(RequestTab::Params) => {
-            session.preview.query_params.len().max(1)
-                + session.preview.path_params.len().max(1)
-                + add_extra
-                + 2
-        }
-        EditScope::Tab(RequestTab::Auth) => 1 + session.preview.auth_params().len().max(1) + 1,
-        EditScope::Tab(RequestTab::Vars) => {
-            session.preview.extra.vars_pre_request.len().max(1)
-                + session.preview.extra.vars_post_response.len().max(1)
-                + add_extra
-                + 2
-        }
-        EditScope::Tab(RequestTab::Assert) => {
-            session.preview.extra.assertions.len().max(1) + add_extra + 1
-        }
-        EditScope::Tab(RequestTab::Settings) => session.preview.extra.settings.len().max(1) + 1,
-        EditScope::Tab(RequestTab::Body) => 10,
-        EditScope::Tab(RequestTab::Script) => 8,
-        EditScope::Tab(RequestTab::Tests | RequestTab::Docs) => 6,
-    };
-    // +2 bordures + 1 ligne d'aide
-    let height = (content_rows as u16 + 3).clamp(6, max_height);
-    let x = screen.x + screen.width.saturating_sub(width) / 2;
-    let y = screen.y + screen.height.saturating_sub(height) / 2;
-    Rect::new(x, y, width, height)
+/// Valeur en lecture seule (entrée `@file(...)`, corps `file`).
+const READ_ONLY_STYLE: Style = Style::new()
+    .fg(Color::Rgb(150, 150, 155))
+    .add_modifier(Modifier::ITALIC);
+
+/// Question du secret en clair, dans le bas du popup.
+const WARNING_STYLE: Style = Style::new().fg(Color::Yellow);
+
+/// Séparateur des colonnes Clé et Valeur, comme le popup d'environnement.
+const SEPARATOR: &str = " │ ";
+
+/// Largeur minimale de la colonne des libellés (Méthode, URL, Mode, clés
+/// d'auth).
+const LABEL_WIDTH: usize = 10;
+
+/// Lignes montrées d'un script, des tests ou de la documentation, édités
+/// dans l'éditeur externe.
+const PREVIEW_LINES: usize = 6;
+
+/// Lignes occupées par une position du curseur de champ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldRows {
+    pub field: EditableField,
+    pub line: usize,
+    pub count: usize,
 }
 
-/// Dessine le popup d'édition de la session active.
-pub fn render_edit_popup(
-    _model: &Model,
-    session: &EditSession,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let file_name = session
+/// Contenu du popup, avant découpage par le défilement.
+#[derive(Debug, Default)]
+pub struct PopupContent {
+    pub lines: Vec<Line<'static>>,
+    pub fields: Vec<FieldRows>,
+    /// Ligne et colonne d'affichage du curseur de texte pendant une saisie.
+    pub text_cursor: Option<(usize, usize)>,
+    /// Colonne où commence le texte en saisie : la place restante sert au
+    /// décalage horizontal.
+    pub input_prefix: usize,
+    /// Ligne à garder visible : champ sous le curseur, ligne du curseur
+    /// de texte ou choix présélectionné.
+    pub focus_line: usize,
+}
+
+impl PopupContent {
+    /// Position du curseur de champ affichée à la ligne `line`.
+    pub fn field_at_line(&self, line: usize) -> Option<EditableField> {
+        self.fields
+            .iter()
+            .find(|rows| (rows.line..rows.line + rows.count).contains(&line))
+            .map(|rows| rows.field)
+    }
+}
+
+/// Zones et contenu du popup pour un écran donné.
+#[derive(Debug)]
+pub struct EditPopupLayout {
+    /// Cadre complet, bordure comprise.
+    pub area: Rect,
+    /// Zone du contenu défilant.
+    pub body: Rect,
+    /// Zone des lignes d'aide, en bas du cadre.
+    pub help: Rect,
+    pub content: PopupContent,
+    pub help_lines: Vec<Line<'static>>,
+    /// Défilement effectif : celui de la session, borné au contenu.
+    pub scroll: usize,
+}
+
+/// Calcule le popup de `session` centré sur `screen` : au plus 100
+/// colonnes, hauteur ajustée au contenu dans la limite de l'écran.
+pub fn edit_popup_layout(screen: Rect, session: &EditSession) -> EditPopupLayout {
+    let content = popup_content(session);
+    let width = screen
+        .width
+        .saturating_sub(8)
+        .min(100)
+        .max(screen.width.min(40));
+    let inner_width = usize::from(width.saturating_sub(2));
+    let help_lines = help_lines(session, inner_width);
+    let wanted = content.lines.len().max(1) + help_lines.len() + 2;
+    let height = u16::try_from(wanted)
+        .unwrap_or(u16::MAX)
+        .min(screen.height.saturating_sub(2))
+        .max(screen.height.min(5));
+    let area = Rect::new(
+        screen.x + screen.width.saturating_sub(width) / 2,
+        screen.y + screen.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let inner = super::inner(area);
+    let help_height = u16::try_from(help_lines.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height.saturating_sub(1));
+    let body = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(help_height),
+    );
+    let help = Rect::new(inner.x, body.bottom(), inner.width, help_height);
+    let max_scroll = content.lines.len().saturating_sub(usize::from(body.height));
+    let scroll = session.scroll.min(max_scroll);
+    EditPopupLayout {
+        area,
+        body,
+        help,
+        content,
+        help_lines,
+        scroll,
+    }
+}
+
+/// Cadre du popup de `session` sur `screen`.
+pub fn edit_popup_area(screen: Rect, session: &EditSession) -> Rect {
+    edit_popup_layout(screen, session).area
+}
+
+/// Titre du popup : portée, fichier édité et indicateur de modification
+/// non enregistrée.
+pub fn edit_popup_title(session: &EditSession) -> String {
+    let file = session
         .path
         .file_name()
-        .map_or("", |s| s.to_str().unwrap_or(""));
-    let title = format!(" {} — {} ", session.scope.title(), file_name);
-    let block = Block::bordered()
-        .title(title)
-        .border_type(BorderType::Rounded)
-        .border_style(theme::FOCUS);
-    frame.render_widget(block, area);
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let unsaved = if session.has_unsaved() {
+        " ● non enregistré"
+    } else {
+        ""
+    };
+    format!(" {} — {file}{unsaved} ", session.scope.title())
+}
 
-    let inner_area = inner(area);
-    if inner_area.width == 0 || inner_area.height == 0 {
+/// Dessine le popup d'édition par-dessus l'écran.
+pub fn render_edit_popup(session: &EditSession, frame: &mut Frame) {
+    let layout = edit_popup_layout(frame.area(), session);
+    frame.render_widget(Clear, layout.area);
+    let block = Block::bordered()
+        .title(edit_popup_title(session))
+        .border_type(BorderType::Rounded)
+        .border_style(theme::FOCUS)
+        .style(theme::BACKGROUND);
+    frame.render_widget(block, layout.area);
+    if layout.body.width == 0 || layout.body.height == 0 {
         return;
     }
+    let visible: Vec<Line<'static>> = layout
+        .content
+        .lines
+        .iter()
+        .skip(layout.scroll)
+        .take(usize::from(layout.body.height))
+        .cloned()
+        .collect();
+    frame.render_widget(Paragraph::new(visible), layout.body);
+    frame.render_widget(Paragraph::new(layout.help_lines.clone()), layout.help);
 
-    match session.scope {
-        EditScope::Tab(RequestTab::Headers) => {
-            render_headers_popup(session, frame, inner_area);
-        }
-        EditScope::Request => {
-            render_request_popup(session, frame, inner_area);
-        }
-        EditScope::Tab(RequestTab::Params) => {
-            render_params_popup(session, frame, inner_area);
-        }
-        EditScope::Tab(RequestTab::Auth) => {
-            render_auth_popup(session, frame, inner_area);
-        }
-        EditScope::Tab(RequestTab::Vars) => {
-            render_vars_popup(session, frame, inner_area);
-        }
-        EditScope::Tab(RequestTab::Assert) => {
-            render_assert_popup(session, frame, inner_area);
-        }
-        EditScope::Tab(RequestTab::Settings) => {
-            render_settings_popup(session, frame, inner_area);
-        }
-        EditScope::Tab(RequestTab::Body) => {
-            render_body_popup(session, frame, inner_area);
-        }
-        EditScope::Tab(RequestTab::Script) => {
-            render_script_popup(session, frame, inner_area);
-        }
-        EditScope::Tab(RequestTab::Tests | RequestTab::Docs) => {
-            render_text_block_popup(session, frame, inner_area);
-        }
+    if let Some((line, column)) = layout.content.text_cursor
+        && line >= layout.scroll
+        && line < layout.scroll + usize::from(layout.body.height)
+    {
+        let row = u16::try_from(line - layout.scroll).unwrap_or(0);
+        let column = u16::try_from(column)
+            .unwrap_or(u16::MAX)
+            .min(layout.body.width.saturating_sub(1));
+        frame.set_cursor_position((layout.body.x + column, layout.body.y + row));
     }
 }
 
-/// Dessine un tableau clé/valeur pour les en-têtes.
-fn render_headers_popup(session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    let headers = &session.preview.headers;
-    let is_adding = matches!(
-        session.target,
-        InputTarget::NewKey { .. } | InputTarget::NewValue { .. }
-    );
+/// Lignes du popup de `session`, sans défilement.
+pub fn popup_content(session: &EditSession) -> PopupContent {
+    let mut builder = Builder {
+        session,
+        content: PopupContent::default(),
+    };
+    match session.scope {
+        EditScope::Request => builder.request(),
+        EditScope::Tab(RequestTab::Headers) => builder.table(EntrySection::Headers, None),
+        EditScope::Tab(RequestTab::Params) => {
+            builder.table(EntrySection::QueryParams, Some("Paramètres de requête"));
+            builder.blank();
+            builder.table(EntrySection::PathParams, Some("Paramètres de chemin"));
+        }
+        EditScope::Tab(RequestTab::Vars) => {
+            builder.table(EntrySection::VarsPreRequest, Some("Pré-requête"));
+            builder.blank();
+            builder.table(EntrySection::VarsPostResponse, Some("Post-réponse"));
+        }
+        EditScope::Tab(RequestTab::Assert) => builder.table(EntrySection::Assert, None),
+        EditScope::Tab(RequestTab::Settings) => builder.table(EntrySection::Settings, None),
+        EditScope::Tab(RequestTab::Auth) => builder.auth(),
+        EditScope::Tab(RequestTab::Body) => builder.body(),
+        EditScope::Tab(RequestTab::Script) => {
+            builder.title("Pré-requête");
+            builder.text_preview(EditableField::ScriptPreRequest);
+            builder.blank();
+            builder.title("Post-réponse");
+            builder.text_preview(EditableField::ScriptPostResponse);
+        }
+        EditScope::Tab(RequestTab::Tests) => builder.text_preview(EditableField::Tests),
+        EditScope::Tab(RequestTab::Docs) => builder.text_preview(EditableField::Docs),
+    }
+    builder.secret_prompt();
+    builder.content
+}
 
-    // Ligne d'aide au bas du popup
-    let help_text = match &session.state {
-        EditState::Input(_) => "Entrée/Tab valider  Échap annuler",
-        EditState::Picker { .. } => "↑↓ choisir  Entrée valider  Échap annuler",
-        EditState::FieldSelect => {
-            if headers.is_empty() && !is_adding {
-                "a ajouter  Ctrl+S fermer  Échap fermer"
+/// Construit le contenu ligne à ligne.
+struct Builder<'a> {
+    session: &'a EditSession,
+    content: PopupContent,
+}
+
+impl Builder<'_> {
+    fn push(&mut self, line: Line<'static>) {
+        self.content.lines.push(line);
+    }
+
+    fn blank(&mut self) {
+        self.push(Line::default());
+    }
+
+    fn title(&mut self, text: &str) {
+        self.push(Line::styled(text.to_owned(), theme::TITLE));
+    }
+
+    fn next_line(&self) -> usize {
+        self.content.lines.len()
+    }
+
+    /// Un ajout est en cours : la ligne provisoire porte la mise en valeur.
+    fn adding(&self) -> Option<EntrySection> {
+        match (&self.session.state, &self.session.target) {
+            (
+                EditState::Input(_),
+                InputTarget::NewKey { section, .. } | InputTarget::NewValue { section, .. },
+            ) => Some(*section),
+            _ => None,
+        }
+    }
+
+    fn is_cursor(&self, field: EditableField) -> bool {
+        self.adding().is_none() && self.session.current_field() == Some(field)
+    }
+
+    /// Saisie en cours sur la valeur de `field`.
+    fn value_input(&self, field: EditableField) -> Option<&TextInput> {
+        match &self.session.state {
+            EditState::Input(input)
+                if self.session.target == InputTarget::Field
+                    && self.session.current_field() == Some(field) =>
+            {
+                Some(input)
+            }
+            _ => None,
+        }
+    }
+
+    /// Ajoute les lignes de `field`, mises en valeur sous le curseur.
+    fn field(&mut self, field: EditableField, lines: Vec<Line<'static>>) {
+        let first = self.next_line();
+        let cursor = self.is_cursor(field);
+        if cursor && self.content.text_cursor.is_none() {
+            self.content.focus_line = first;
+        }
+        let count = lines.len();
+        for line in lines {
+            self.push(if cursor {
+                line.patch_style(CURSOR_STYLE)
             } else {
-                "↑↓ naviguer  Entrée modifier  a ajouter  d supprimer  c renommer  Espace activer  Ctrl+S enregistrer  Échap fermer"
+                line
+            });
+        }
+        self.content.fields.push(FieldRows {
+            field,
+            line: first,
+            count,
+        });
+    }
+
+    /// Texte visible d'une saisie sur une ligne commençant à la colonne
+    /// `prefix`, et place le curseur de texte sur la ligne suivante.
+    fn input_text(&mut self, input: &TextInput, prefix: usize, masked: bool) -> String {
+        let hscroll = usize::from(self.session.hscroll);
+        let (text, before) = if masked {
+            (
+                "•".repeat(input.text().chars().count()),
+                "•".repeat(input.text_before_cursor_on_line().chars().count()),
+            )
+        } else {
+            (
+                input.text().to_owned(),
+                input.text_before_cursor_on_line().to_owned(),
+            )
+        };
+        let (visible, skipped) = skip_columns(&text, hscroll);
+        let line = self.next_line();
+        let column = prefix + Line::raw(before).width().saturating_sub(skipped);
+        self.content.text_cursor = Some((line, column));
+        self.content.input_prefix = prefix;
+        self.content.focus_line = line;
+        visible.to_owned()
+    }
+
+    /// Choix présélectionnable d'une liste ouverte sous `field`.
+    fn picker_rows(&mut self, field: EditableField) {
+        let EditState::Picker { kind, selected } = self.session.state else {
+            return;
+        };
+        if self.session.current_field() != Some(field) {
+            return;
+        }
+        for (index, option) in kind.options().iter().enumerate() {
+            let label = if kind == PickerKind::Method {
+                option.to_ascii_uppercase()
+            } else {
+                (*option).to_owned()
+            };
+            let line = Line::raw(format!("{}  {label}", " ".repeat(LABEL_WIDTH)));
+            if index == selected {
+                self.content.focus_line = self.next_line();
+                self.push(line.patch_style(CURSOR_STYLE));
+            } else {
+                self.push(line);
             }
         }
-        EditState::PlaintextSecretPrompt { .. } => "",
-    };
-    let help_rect = Rect::new(
-        inner_area.x,
-        inner_area.bottom().saturating_sub(1),
-        inner_area.width,
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::styled(help_text, theme::LABEL)),
-        help_rect,
-    );
-
-    let content_height = inner_area.height.saturating_sub(1);
-    if content_height == 0 {
-        return;
     }
 
-    // Largeur de la colonne clé
-    let provisional_key_len = match &session.target {
-        InputTarget::NewKey { .. } => match &session.state {
-            EditState::Input(input) => Some(input.text().len()),
-            _ => None,
-        },
-        InputTarget::NewValue { key, .. } => Some(key.len()),
-        InputTarget::RenameKey { .. } => match &session.state {
-            EditState::Input(input) => Some(input.text().len()),
-            _ => None,
-        },
-        _ => None,
-    };
-    let max_key_len = headers
-        .iter()
-        .map(|h| h.key.len())
-        .chain(provisional_key_len)
-        .max()
-        .unwrap_or(3);
-    let key_width = max_key_len.clamp(3, 25);
+    /// Ligne « libellé ‹ valeur › » d'un choix, suivie de sa liste ouverte.
+    fn choice(&mut self, field: EditableField, label: &str, width: usize, value: Span<'static>) {
+        let line = Line::from(vec![
+            Span::styled(pad(label, width), theme::LABEL),
+            Span::raw("‹ "),
+            value,
+            Span::raw(" ›"),
+        ]);
+        self.field(field, vec![line]);
+        self.picker_rows(field);
+    }
 
-    // En-tête de colonnes
-    let col_header = Line::styled(
-        format!("{:<key_width$}{TABLE_SEPARATOR}Valeur", "Clé"),
-        theme::LABEL,
-    );
-    frame.render_widget(
-        Paragraph::new(col_header),
-        Rect::new(inner_area.x, inner_area.y, inner_area.width, 1),
-    );
+    /// Ligne « libellé valeur » d'un champ texte d'une ligne.
+    fn labelled(&mut self, field: EditableField, label: &str, width: usize, masked: bool) {
+        let prefix = width;
+        let value = match self.value_input(field) {
+            Some(input) => {
+                let input = input.clone();
+                Span::raw(self.input_text(&input, prefix, masked))
+            }
+            None => Span::raw(display_value(self.session, field)),
+        };
+        let line = Line::from(vec![Span::styled(pad(label, width), theme::LABEL), value]);
+        self.field(field, vec![line]);
+    }
 
-    let table_rows = content_height.saturating_sub(1) as usize;
-    if headers.is_empty() && !is_adding {
-        let empty_rect = Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, 1);
-        frame.render_widget(
-            Paragraph::new(Line::styled("aucun en-tête", theme::EMPTY_MESSAGE)),
-            empty_rect,
+    fn request(&mut self) {
+        let method = field_value(self.session, &EditableField::Method).to_ascii_uppercase();
+        let style = theme::method_style(&method).add_modifier(Modifier::BOLD);
+        self.choice(
+            EditableField::Method,
+            "Méthode",
+            LABEL_WIDTH,
+            Span::styled(method, style),
         );
-        return;
+        self.labelled(EditableField::Url, "URL", LABEL_WIDTH, false);
     }
 
-    let cursor_row = if is_adding {
-        headers.len()
-    } else {
-        session.cursor.min(headers.len().saturating_sub(1))
-    };
-    let scroll = if cursor_row < session.scroll {
-        cursor_row
-    } else if cursor_row >= session.scroll + table_rows {
-        cursor_row + 1 - table_rows
-    } else {
-        session.scroll
-    };
+    fn auth(&mut self) {
+        let params = self.session.preview.auth_params().to_vec();
+        let width = params
+            .iter()
+            .map(|kv| Line::raw(kv.key.as_str()).width() + 1)
+            .max()
+            .unwrap_or(0)
+            .max(LABEL_WIDTH);
+        let mode = field_value(self.session, &EditableField::AuthMode).to_owned();
+        self.choice(
+            EditableField::AuthMode,
+            "Mode",
+            width,
+            Span::styled(mode, theme::FOCUS),
+        );
+        if params.is_empty() {
+            self.push(Line::styled("aucun paramètre", theme::EMPTY_MESSAGE));
+        }
+        for (index, param) in params.iter().enumerate() {
+            let field = EditableField::AuthParamValue(index);
+            if param.key == "placement" {
+                let value = field_value(self.session, &field).to_owned();
+                self.choice(field, &param.key, width, Span::raw(value));
+            } else {
+                let masked = is_sensitive_auth_key(&param.key) && !self.session.unmasked;
+                self.labelled(field, &param.key, width, masked);
+            }
+        }
+    }
 
-    for r in 0..table_rows {
-        let idx = scroll + r;
-        let y = inner_area.y + 1 + r as u16;
-        let row_rect = Rect::new(inner_area.x, y, inner_area.width, 1);
-
-        if idx < headers.len() {
-            let entry = &headers[idx];
-            let is_selected = idx == session.cursor && session.state == EditState::FieldSelect;
-            let is_editing = idx == session.cursor && matches!(session.state, EditState::Input(_));
-
-            let key_str = if is_editing
-                && matches!(session.target, InputTarget::RenameKey { index, .. } if index == idx)
-            {
-                if let EditState::Input(input) = &session.state {
-                    input.text().to_owned()
-                } else {
-                    entry.key.clone()
+    fn body(&mut self) {
+        let preview = &self.session.preview;
+        let is_graphql = preview.kind.as_deref() == Some("graphql");
+        if !is_graphql {
+            let mode = field_value(self.session, &EditableField::BodyMode).to_owned();
+            self.choice(
+                EditableField::BodyMode,
+                "Mode",
+                LABEL_WIDTH,
+                Span::styled(mode, theme::FOCUS),
+            );
+        }
+        let kind = preview.body.as_ref().map(|body| body.kind.clone());
+        match kind {
+            Some(BodyKind::Json | BodyKind::Text | BodyKind::Xml | BodyKind::Sparql) => {
+                self.blank();
+                self.title("Contenu");
+                self.text_area(EditableField::BodyText);
+            }
+            Some(BodyKind::Graphql) => self.graphql(),
+            None if is_graphql => self.graphql(),
+            Some(BodyKind::FormUrlEncoded) => {
+                self.blank();
+                self.table(EntrySection::FormUrlEncoded, None);
+            }
+            Some(BodyKind::MultipartForm) => {
+                self.blank();
+                self.table(EntrySection::MultipartForm, None);
+            }
+            Some(BodyKind::File | BodyKind::Other(_)) => {
+                self.blank();
+                self.push(Line::styled(
+                    "Lecture seule : ce mode ne se modifie pas ici.",
+                    theme::EMPTY_MESSAGE,
+                ));
+                let lines: Vec<String> = match preview.body.as_ref().map(|b| &b.content) {
+                    Some(BodyContent::Text(text)) => text.lines().map(str::to_owned).collect(),
+                    Some(BodyContent::Entries(entries)) => entries
+                        .iter()
+                        .map(|kv| format!("{}{SEPARATOR}{}", kv.key, kv.value))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                for line in lines {
+                    self.push(Line::styled(line, READ_ONLY_STYLE));
                 }
+            }
+            None => {}
+        }
+    }
+
+    fn graphql(&mut self) {
+        if self.next_line() > 0 {
+            self.blank();
+        }
+        self.title("Requête");
+        self.text_area(EditableField::BodyText);
+        self.blank();
+        self.title("Variables");
+        self.text_area(EditableField::GraphqlVars);
+    }
+
+    /// Zone de texte multiligne, éditée dans le popup.
+    fn text_area(&mut self, field: EditableField) {
+        let hscroll = usize::from(self.session.hscroll);
+        let first = self.next_line();
+        let lines: Vec<Line<'static>> = match self.value_input(field) {
+            Some(input) => {
+                let (line, _) = input.cursor_line_col();
+                let column = Line::raw(input.text_before_cursor_on_line()).width();
+                let rows: Vec<Line<'static>> = input
+                    .text()
+                    .split('\n')
+                    .map(|text| {
+                        let (visible, _) = skip_columns(text, hscroll);
+                        Line::raw(format!("  {visible}"))
+                    })
+                    .collect();
+                self.content.text_cursor = Some((first + line, 2 + column.saturating_sub(hscroll)));
+                self.content.input_prefix = 2;
+                self.content.focus_line = first + line;
+                rows
+            }
+            None => {
+                let text = field_value(self.session, &field);
+                if text.is_empty() {
+                    vec![Line::styled("  (vide)", theme::EMPTY_MESSAGE)]
+                } else {
+                    text.split('\n')
+                        .map(|line| Line::raw(format!("  {line}")))
+                        .collect()
+                }
+            }
+        };
+        let lines = lines
+            .into_iter()
+            .map(|line| line.patch_style(theme::EDITABLE_BODY))
+            .collect();
+        self.field(field, lines);
+    }
+
+    /// Aperçu des premières lignes d'un bloc édité dans l'éditeur externe.
+    fn text_preview(&mut self, field: EditableField) {
+        let text = field_value(self.session, &field);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        if text.trim().is_empty() {
+            lines.push(Line::styled("  aucun", theme::EMPTY_MESSAGE));
+        } else {
+            let all: Vec<&str> = text.lines().collect();
+            for line in all.iter().take(PREVIEW_LINES) {
+                lines.push(Line::raw(format!("  {line}")));
+            }
+            if all.len() > PREVIEW_LINES {
+                lines.push(Line::styled(
+                    format!("  … (+{} lignes)", all.len() - PREVIEW_LINES),
+                    theme::EMPTY_MESSAGE,
+                ));
+            }
+        }
+        self.field(field, lines);
+    }
+
+    /// Tableau clé / valeur d'une section, précédé de son titre s'il y en
+    /// a un ; ligne d'ajout si la section est vide, ligne provisoire
+    /// pendant un ajout.
+    fn table(&mut self, section: EntrySection, title: Option<&str>) {
+        if let Some(title) = title {
+            self.title(title);
+        }
+        let entries = section_entries(&self.session.preview, section).to_vec();
+        let adding = self.adding() == Some(section);
+        let provisional_key = match (&self.session.state, &self.session.target) {
+            (EditState::Input(input), InputTarget::NewKey { section: s, .. }) if *s == section => {
+                Some(input.text().to_owned())
+            }
+            (
+                EditState::Input(_),
+                InputTarget::NewValue {
+                    section: s, key, ..
+                },
+            ) if *s == section => Some(key.clone()),
+            (EditState::Input(input), InputTarget::RenameKey { section: s, .. })
+                if *s == section =>
+            {
+                Some(input.text().to_owned())
+            }
+            _ => None,
+        };
+        let key_width = entries
+            .iter()
+            .map(|kv| Line::raw(kv.key.as_str()).width())
+            .chain(provisional_key.map(|key| Line::raw(key).width()))
+            .max()
+            .unwrap_or(0)
+            .clamp(3, 24);
+
+        if entries.is_empty() && !adding {
+            if section == EntrySection::Settings {
+                self.push(Line::styled("aucun paramètre", theme::EMPTY_MESSAGE));
+            } else {
+                let line = Line::styled("aucune ligne · a ajouter", theme::EMPTY_MESSAGE);
+                self.field(EditableField::AddRow(section), vec![line]);
+            }
+            return;
+        }
+        self.push(Line::styled(
+            format!("{}{SEPARATOR}Valeur", pad("Clé", key_width)),
+            theme::LABEL,
+        ));
+        for (index, entry) in entries.iter().enumerate() {
+            let field = EditableField::of_entry(section, index);
+            let renaming = matches!(
+                (&self.session.state, &self.session.target),
+                (EditState::Input(_), InputTarget::RenameKey { section: s, index: i })
+                    if *s == section && *i == index
+            );
+            let key = if renaming {
+                let EditState::Input(input) = &self.session.state else {
+                    continue;
+                };
+                let input = input.clone();
+                self.input_text(&input, 0, false)
             } else {
                 entry.key.clone()
             };
-
-            let key_span = Span::styled(
-                format!("{:<key_width$}{TABLE_SEPARATOR}", key_str),
-                theme::LABEL,
-            );
-
-            let val_span = if is_editing && session.target == InputTarget::Field {
-                if let EditState::Input(input) = &session.state {
-                    Span::raw(input.text().to_owned())
-                } else {
-                    Span::raw(entry.value.clone())
+            let key_cell = pad(&key, key_width);
+            let prefix = Line::raw(key_cell.as_str()).width() + separator_width();
+            let enabled = field_enabled(self.session, &field);
+            let is_file = section == EntrySection::MultipartForm
+                && entry.value.trim_start().starts_with("@file(");
+            let value = match self.value_input(field) {
+                Some(input) => {
+                    let input = input.clone();
+                    Span::raw(self.input_text(&input, prefix, false))
                 }
-            } else if entry.enabled {
-                Span::raw(entry.value.clone())
+                None if !enabled => {
+                    Span::styled(format!("{} (désactivé)", entry.value), DISABLED_STYLE)
+                }
+                None if is_file => {
+                    Span::styled(format!("{} (lecture seule)", entry.value), READ_ONLY_STYLE)
+                }
+                None => Span::raw(entry.value.clone()),
+            };
+            let key_style = if enabled {
+                theme::LABEL
             } else {
-                Span::styled(
-                    format!("{} (désactivé)", entry.value),
-                    DISABLED_ENTRY_VALUE,
-                )
+                DISABLED_STYLE
             };
+            let line = Line::from(vec![
+                Span::styled(format!("{key_cell}{SEPARATOR}"), key_style),
+                value,
+            ]);
+            self.field(field, vec![line]);
+        }
+        if adding {
+            self.provisional_row(section, key_width, entries.is_empty());
+        }
+    }
 
-            let mut line = Line::from(vec![key_span, val_span]);
-            if is_selected {
-                line = line.style(theme::SELECTION);
+    /// Ligne de l'entrée en cours d'ajout, en fin de tableau.
+    fn provisional_row(&mut self, section: EntrySection, key_width: usize, empty: bool) {
+        let EditState::Input(input) = &self.session.state else {
+            return;
+        };
+        let input = input.clone();
+        let line = match &self.session.target {
+            InputTarget::NewKey { .. } => {
+                let key = self.input_text(&input, 0, false);
+                Line::from(vec![Span::styled(
+                    format!("{}{SEPARATOR}", pad(&key, key_width)),
+                    theme::LABEL,
+                )])
             }
-            frame.render_widget(Paragraph::new(line), row_rect);
-        } else if idx == headers.len() && is_adding {
-            let prov_line = match &session.target {
-                InputTarget::NewKey { .. } => {
-                    let text = if let EditState::Input(input) = &session.state {
-                        input.text().to_owned()
-                    } else {
-                        String::new()
-                    };
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{:<key_width$}{TABLE_SEPARATOR}", text),
-                            theme::LABEL,
-                        ),
-                        Span::raw(""),
-                    ])
-                }
-                InputTarget::NewValue { key, .. } => {
-                    let text = if let EditState::Input(input) = &session.state {
-                        input.text().to_owned()
-                    } else {
-                        String::new()
-                    };
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{key:<key_width$}{TABLE_SEPARATOR}"),
-                            theme::LABEL,
-                        ),
-                        Span::raw(text),
-                    ])
-                }
-                _ => Line::default(),
-            };
-            let prov_line = prov_line.style(theme::SELECTION);
-            frame.render_widget(Paragraph::new(prov_line), row_rect);
-        }
-    }
-
-    // Positionnement du curseur de texte
-    if let EditState::Input(input) = &session.state {
-        let rel_row = cursor_row.saturating_sub(scroll);
-        if rel_row < table_rows {
-            let cursor_y = inner_area.y + 1 + rel_row as u16;
-            let prefix_col = match &session.target {
-                InputTarget::Field => key_width + TABLE_SEPARATOR.len(),
-                InputTarget::RenameKey { .. } => 0,
-                InputTarget::NewKey { .. } => 0,
-                InputTarget::NewValue { key, .. } => {
-                    key_width.max(key.len()) + TABLE_SEPARATOR.len()
-                }
-            };
-            let text_offset = Line::raw(input.text_before_cursor_on_line()).width();
-            let cursor_x = inner_area.x + prefix_col as u16 + text_offset as u16;
-            frame.set_cursor_position((cursor_x, cursor_y));
-        }
-    }
-}
-
-/// Rendu du popup Requête (Méthode + URL).
-fn render_request_popup(session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    let help_text = match &session.state {
-        EditState::Input(_) => "Entrée/Tab valider  Échap annuler",
-        EditState::Picker { .. } => "↑↓ choisir  Entrée valider  Échap annuler",
-        EditState::FieldSelect => "↑↓ champ  ←→ méthode  Entrée modifier  Ctrl+S enregistrer  Échap fermer",
-        _ => "",
-    };
-    let help_rect = Rect::new(
-        inner_area.x,
-        inner_area.bottom().saturating_sub(1),
-        inner_area.width,
-        1,
-    );
-    frame.render_widget(Paragraph::new(Line::styled(help_text, theme::LABEL)), help_rect);
-
-    let method_field = EditableField::Method;
-    let url_field = EditableField::Url;
-
-    let is_method_cursor = session.current_field() == Some(method_field);
-    let is_url_cursor = session.current_field() == Some(url_field);
-
-    let method_val = field_value(session, &method_field);
-    let url_val = field_value(session, &url_field);
-
-    // Ligne Méthode : Méthode ‹ GET ›
-    let method_line_spans = vec![
-        Span::styled("Méthode   ‹ ", theme::LABEL),
-        Span::styled(
-            method_val.to_ascii_uppercase(),
-            theme::method_style(method_val).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ›", theme::LABEL),
-    ];
-    let mut method_line = Line::from(method_line_spans);
-    if is_method_cursor && session.state == EditState::FieldSelect {
-        method_line = method_line.style(theme::SELECTION.add_modifier(Modifier::REVERSED));
-    }
-    frame.render_widget(
-        Paragraph::new(method_line),
-        Rect::new(inner_area.x, inner_area.y, inner_area.width, 1),
-    );
-
-    // Ligne URL : URL       https://...
-    let url_str = if is_url_cursor && matches!(session.state, EditState::Input(_)) {
-        if let EditState::Input(input) = &session.state {
-            let (visible, _) =
-                crate::app::view::detail::skip_columns(input.text(), usize::from(session.hscroll));
-            visible.to_owned()
+            InputTarget::NewValue { key, .. } => {
+                let key_cell = pad(key, key_width);
+                let prefix = Line::raw(key_cell.as_str()).width() + separator_width();
+                let value = self.input_text(&input, prefix, false);
+                Line::from(vec![
+                    Span::styled(format!("{key_cell}{SEPARATOR}"), theme::LABEL),
+                    Span::raw(value),
+                ])
+            }
+            InputTarget::Field | InputTarget::RenameKey { .. } => return,
+        };
+        let line = line.patch_style(CURSOR_STYLE);
+        if empty {
+            // La ligne d'ajout de la section vide devient la ligne provisoire.
+            let first = self.next_line();
+            self.push(line);
+            self.content.fields.push(FieldRows {
+                field: EditableField::AddRow(section),
+                line: first,
+                count: 1,
+            });
         } else {
-            url_val.to_owned()
+            self.push(line);
         }
-    } else {
-        url_val.to_owned()
-    };
-    let url_line_spans = vec![
-        Span::styled("URL       ", theme::LABEL),
-        Span::raw(url_str),
-    ];
-    let mut url_line = Line::from(url_line_spans);
-    if is_url_cursor && session.state == EditState::FieldSelect {
-        url_line = url_line.style(theme::SELECTION.add_modifier(Modifier::REVERSED));
-    }
-    frame.render_widget(
-        Paragraph::new(url_line),
-        Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, 1),
-    );
-
-    // Curseur de saisie sur URL
-    if is_url_cursor && let EditState::Input(input) = &session.state {
-        let cursor_y = inner_area.y + 1;
-        let prefix_col = 10; // "URL       ".len()
-        let text_offset = Line::raw(input.text_before_cursor_on_line())
-            .width()
-            .saturating_sub(usize::from(session.hscroll));
-        let cursor_x = inner_area.x + prefix_col as u16 + text_offset as u16;
-        frame.set_cursor_position((cursor_x, cursor_y));
     }
 
-    // Sélecteur méthode ouvert
-    if let EditState::Picker { kind: PickerKind::Method, selected } = session.state {
-        let picker_y = inner_area.y + 2;
-        let picker_height = inner_area.height.saturating_sub(3).min(PickerKind::Method.options().len() as u16);
-        for (i, opt) in PickerKind::Method.options().iter().enumerate().take(picker_height as usize) {
-            let mut line = Line::raw(format!("  {}", opt.to_ascii_uppercase()));
-            if i == selected {
-                line = line.style(theme::SELECTION);
+    /// Question du secret en clair, dans le bas du popup (§ 3.1).
+    fn secret_prompt(&mut self) {
+        let EditState::PlaintextSecretPrompt { key, var_name, .. } = &self.session.state else {
+            return;
+        };
+        let (key, var_name) = (key.clone(), var_name.clone());
+        self.blank();
+        self.content.focus_line = self.next_line();
+        self.push(Line::styled(
+            format!(
+                "Secret en clair pour « {key} » dans le fichier .bru (souvent partagé via git)."
+            ),
+            WARNING_STYLE,
+        ));
+        self.push(Line::from(vec![
+            Span::styled("  Entrée  ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw(format!("remplacer par {{{{{var_name}}}}}")),
+        ]));
+        self.push(Line::from(vec![
+            Span::styled("  g       ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw("garder en clair"),
+        ]));
+        self.content.focus_line = self.next_line();
+        self.push(Line::from(vec![
+            Span::styled("  Échap   ", Style::new().add_modifier(Modifier::BOLD)),
+            Span::raw("revenir à la saisie"),
+        ]));
+    }
+}
+
+/// Valeur affichée d'un champ hors saisie : secrets d'auth masqués.
+fn display_value(session: &EditSession, field: EditableField) -> String {
+    let value = field_value(session, &field);
+    match field {
+        EditableField::AuthParamValue(index) => session
+            .preview
+            .auth_params()
+            .get(index)
+            .map_or_else(|| value.to_owned(), |kv| mask_auth_value(&kv.key, value)),
+        _ => value.to_owned(),
+    }
+}
+
+/// Largeur d'affichage de [`SEPARATOR`].
+fn separator_width() -> usize {
+    Line::raw(SEPARATOR).width()
+}
+
+/// `text` complété d'espaces jusqu'à `width` colonnes d'affichage.
+fn pad(text: &str, width: usize) -> String {
+    let used = Line::raw(text).width();
+    format!("{text}{}", " ".repeat(width.saturating_sub(used)))
+}
+
+/// Le popup a plusieurs parties : `Tab` y a un effet.
+fn has_several_parts(session: &EditSession) -> bool {
+    session
+        .fields
+        .windows(2)
+        .any(|pair| !pair[0].same_part(pair[1]))
+}
+
+/// Champ sur lequel `←` `→` changent la valeur.
+pub fn is_choice(session: &EditSession, field: EditableField) -> bool {
+    match field {
+        EditableField::Method | EditableField::BodyMode | EditableField::AuthMode => true,
+        EditableField::AuthParamValue(index) => session
+            .preview
+            .auth_params()
+            .get(index)
+            .is_some_and(|kv| kv.key == "placement"),
+        _ => false,
+    }
+}
+
+/// Touches utiles à l'endroit du curseur, découpées en lignes de
+/// `width` colonnes au plus.
+pub fn help_lines(session: &EditSession, width: usize) -> Vec<Line<'static>> {
+    let chunks = help_chunks(session);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for chunk in chunks {
+        let candidate = if current.is_empty() {
+            chunk.clone()
+        } else {
+            format!("{current}  {chunk}")
+        };
+        if !current.is_empty() && Line::raw(candidate.as_str()).width() > width {
+            lines.push(Line::styled(std::mem::take(&mut current), theme::LABEL));
+            current = chunk;
+        } else {
+            current = candidate;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(Line::styled(current, theme::LABEL));
+    }
+    lines
+}
+
+/// Touches utiles à l'endroit du curseur, une par élément.
+pub fn help_chunks(session: &EditSession) -> Vec<String> {
+    let owned = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    match &session.state {
+        EditState::PlaintextSecretPrompt { var_name, .. } => vec![
+            format!("Entrée remplacer par {{{{{var_name}}}}}"),
+            "g garder".to_owned(),
+            "Échap revenir".to_owned(),
+        ],
+        EditState::Picker { .. } => owned(&["↑↓ choisir", "Entrée valider", "Échap annuler"]),
+        EditState::Input(input) if input.is_multiline() => owned(&[
+            "Entrée nouvelle ligne",
+            "Tab sortir",
+            "Échap annuler",
+            "Ctrl+S enregistrer",
+        ]),
+        EditState::Input(_) => {
+            let mut chunks = owned(&["Entrée valider", "Échap annuler", "Ctrl+S enregistrer"]);
+            let sensitive = matches!(session.target, InputTarget::Field)
+                && matches!(
+                    session.current_field(),
+                    Some(EditableField::AuthParamValue(index))
+                        if session.preview.auth_params().get(index)
+                            .is_some_and(|kv| is_sensitive_auth_key(&kv.key))
+                );
+            if sensitive {
+                chunks.push("Ctrl+R afficher".to_owned());
             }
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(inner_area.x, picker_y + i as u16, inner_area.width, 1),
-            );
+            chunks
         }
-    }
-}
-
-/// Rendu du popup Params (Requête & Chemin).
-fn render_params_popup(session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    render_two_tables_popup(
-        session,
-        frame,
-        inner_area,
-        "Paramètres de requête",
-        &session.preview.query_params,
-        "Paramètres de chemin",
-        &session.preview.path_params,
-    );
-}
-
-/// Rendu du popup Vars (Pré-requête & Post-réponse).
-fn render_vars_popup(session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    render_two_tables_popup(
-        session,
-        frame,
-        inner_area,
-        "Variables pré-requête",
-        &session.preview.extra.vars_pre_request,
-        "Variables post-réponse",
-        &session.preview.extra.vars_post_response,
-    );
-}
-
-/// Rendu d'un popup à deux sections de tableau avec Tab / Maj+Tab.
-fn render_two_tables_popup(
-    session: &EditSession,
-    frame: &mut Frame,
-    inner_area: Rect,
-    title1: &str,
-    entries1: &[KeyValue],
-    title2: &str,
-    entries2: &[KeyValue],
-) {
-    let help_text = match &session.state {
-        EditState::Input(_) => "Entrée/Tab valider  Échap annuler",
         EditState::FieldSelect => {
-            "↑↓ naviguer  Tab/Maj+Tab section  Entrée modifier  a ajouter  d supprimer  c renommer  Espace activer  Ctrl+S enregistrer  Échap fermer"
+            let mut chunks = vec!["↑↓ ligne".to_owned()];
+            match session.current_field() {
+                Some(field) if is_choice(session, field) => {
+                    chunks.extend(owned(&["←→ changer", "Entrée liste"]));
+                }
+                Some(EditableField::AddRow(_)) => chunks.push("a ajouter".to_owned()),
+                Some(EditableField::SettingsValue(_)) => chunks.push("Entrée modifier".to_owned()),
+                Some(EditableField::MultipartFormValue(index))
+                    if section_entries(&session.preview, EntrySection::MultipartForm)
+                        .get(index)
+                        .is_some_and(|kv| kv.value.trim_start().starts_with("@file(")) =>
+                {
+                    chunks.extend(owned(&["Espace activer", "d supprimer"]));
+                }
+                Some(field) if field.entry().is_some() => chunks.extend(owned(&[
+                    "Entrée modifier",
+                    "c renommer",
+                    "a ajouter",
+                    "d supprimer",
+                    "Espace activer",
+                ])),
+                Some(
+                    EditableField::ScriptPreRequest
+                    | EditableField::ScriptPostResponse
+                    | EditableField::Tests
+                    | EditableField::Docs,
+                ) => chunks.push("Entrée éditeur externe".to_owned()),
+                Some(_) => chunks.push("Entrée modifier".to_owned()),
+                None => {}
+            }
+            if has_several_parts(session) {
+                chunks.push("Tab partie".to_owned());
+            }
+            chunks.extend(owned(&["Ctrl+S enregistrer", "Échap fermer"]));
+            chunks
         }
-        _ => "",
-    };
-    let help_rect = Rect::new(
-        inner_area.x,
-        inner_area.bottom().saturating_sub(1),
-        inner_area.width,
-        1,
-    );
-    frame.render_widget(Paragraph::new(Line::styled(help_text, theme::LABEL)), help_rect);
-
-    let active_part = session.active_part;
-    let mut y = inner_area.y;
-
-    // Titre 1
-    let t1_style = if active_part == 0 { theme::FOCUS } else { theme::LABEL };
-    frame.render_widget(
-        Paragraph::new(Line::styled(format!("▸ {title1}"), t1_style)),
-        Rect::new(inner_area.x, y, inner_area.width, 1),
-    );
-    y += 1;
-
-    for (i, e) in entries1.iter().enumerate() {
-        if y >= inner_area.bottom().saturating_sub(2) {
-            break;
-        }
-        let is_sel = active_part == 0 && session.cursor == i && session.state == EditState::FieldSelect;
-        let mut line = Line::from(vec![
-            Span::styled(format!("  {}: ", e.key), theme::LABEL),
-            Span::raw(e.value.clone()),
-        ]);
-        if is_sel {
-            line = line.style(theme::SELECTION);
-        }
-        frame.render_widget(Paragraph::new(line), Rect::new(inner_area.x, y, inner_area.width, 1));
-        y += 1;
     }
-    if entries1.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::styled("  aucun", theme::EMPTY_MESSAGE)),
-            Rect::new(inner_area.x, y, inner_area.width, 1),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::message::{InputKey, Message};
+    use crate::app::model::Model;
+    use crate::app::test_support::{loaded_model, render, select};
+    use crate::app::update::update;
+
+    /// Ouvre le popup de l'onglet `tab` de `path` (`Entrée`), ou le popup
+    /// Requête (`m`) si `tab` vaut `None`.
+    fn popup_on(path: &str, tab: Option<RequestTab>, size: (u16, u16)) -> Model {
+        let mut model = loaded_model(size);
+        select(&mut model, path);
+        update(&mut model, Message::NextFocus);
+        match tab {
+            Some(tab) => {
+                model.request_tab = tab;
+                update(&mut model, Message::Enter);
+            }
+            None => {
+                update(&mut model, Message::OpenRequestEdit);
+            }
+        }
+        assert!(model.editing.is_some(), "popup ouvert sur {path}");
+        model
+    }
+
+    fn session(model: &Model) -> &EditSession {
+        model.editing.as_ref().expect("popup")
+    }
+
+    fn content(model: &Model) -> PopupContent {
+        popup_content(session(model))
+    }
+
+    fn plain(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn texts(model: &Model) -> Vec<String> {
+        content(model).lines.iter().map(plain).collect()
+    }
+
+    fn line_of(model: &Model, needle: &str) -> usize {
+        texts(model)
+            .iter()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("ligne {needle:?} absente : {:#?}", texts(model)))
+    }
+
+    fn type_text(model: &mut Model, text: &str) {
+        for c in text.chars() {
+            update(model, Message::InputKey(InputKey::Char(c)));
+        }
+    }
+
+    fn go_to(model: &mut Model, field: EditableField) {
+        let index = session(model)
+            .fields
+            .iter()
+            .position(|f| *f == field)
+            .expect("champ du popup");
+        model.editing.as_mut().expect("popup").cursor = index;
+    }
+
+    /// Chaque popup tient dans l'écran, centré, avec son titre, son
+    /// contenu et sa ligne d'aide, sur 80 et 120 colonnes (§ 6.5).
+    #[test]
+    fn popups_render_inside_the_screen_at_80_and_120_columns() {
+        let cases: [(&str, Option<RequestTab>, &str, &[&str]); 9] = [
+            (
+                "post-json.bru",
+                None,
+                "Requête — post-json.bru",
+                &["‹ POST ›", "https://{{host}}/items"],
+            ),
+            (
+                "scripted.bru",
+                Some(RequestTab::Headers),
+                "En-têtes — scripted.bru",
+                &[
+                    "Clé",
+                    "Accept",
+                    "application/json",
+                    "X-Debug",
+                    "(désactivé)",
+                ],
+            ),
+            (
+                "multiline.bru",
+                Some(RequestTab::Params),
+                "Params — multiline.bru",
+                &["Paramètres de requête", "page", "Paramètres de chemin"],
+            ),
+            (
+                "scripted.bru",
+                Some(RequestTab::Auth),
+                "Authentification — scripted.bru",
+                &["Mode", "‹ bearer ›", "token", "{{tok}}"],
+            ),
+            (
+                "post-json.bru",
+                Some(RequestTab::Body),
+                "Corps — post-json.bru",
+                &["‹ json ›", "Contenu", "\"a\": {"],
+            ),
+            (
+                "scripted.bru",
+                Some(RequestTab::Vars),
+                "Vars — scripted.bru",
+                &["Pré-requête", "Post-réponse", "a ajouter"],
+            ),
+            (
+                "scripted.bru",
+                Some(RequestTab::Assert),
+                "Assert — scripted.bru",
+                &["res.status", "eq 200", "isTrue"],
+            ),
+            (
+                "scripted.bru",
+                Some(RequestTab::Script),
+                "Script — scripted.bru",
+                &["Pré-requête", "bru.setVar", "Post-réponse", "console.log"],
+            ),
+            (
+                "scripted.bru",
+                Some(RequestTab::Tests),
+                "Tests — scripted.bru",
+                &["test(\"ok\""],
+            ),
+        ];
+        for width in [80u16, 120] {
+            for (path, tab, title, needles) in cases {
+                let model = popup_on(path, tab, (width, 30));
+                let screen = render(&model, width, 30).join("\n");
+                assert!(screen.contains(title), "{width} {title}\n{screen}");
+                for needle in needles {
+                    assert!(
+                        screen.contains(needle),
+                        "{width} {title} {needle}\n{screen}"
+                    );
+                }
+                assert!(screen.contains("Échap fermer"), "{width} {title}\n{screen}");
+                let area = edit_popup_area(Rect::new(0, 0, width, 30), session(&model));
+                assert!(
+                    area.right() <= width && area.bottom() <= 30,
+                    "{width} {title}"
+                );
+                assert_eq!(area.x, (width - area.width) / 2, "centré : {title}");
+                assert!(area.width <= 100);
+            }
+        }
+    }
+
+    /// Une ligne désactivée est grisée, suivie de « (désactivé) ».
+    #[test]
+    fn disabled_row_is_greyed_with_a_marker() {
+        let model = popup_on("scripted.bru", Some(RequestTab::Headers), (100, 30));
+        let lines = content(&model).lines;
+        let line = &lines[line_of(&model, "X-Debug")];
+        let value = line.spans.last().expect("valeur");
+        assert_eq!(value.content.as_ref(), "1 (désactivé)");
+        assert_eq!(value.style, DISABLED_STYLE);
+        assert_eq!(line.spans[0].style, DISABLED_STYLE);
+        // Ligne active : clé en libellé, valeur sans style.
+        let accept = &lines[line_of(&model, "Accept")];
+        assert_ne!(accept.spans[0].style, accept.spans[1].style);
+    }
+
+    /// La liste des méthodes n'existe que pendant qu'elle est ouverte,
+    /// présélection sur la valeur courante.
+    #[test]
+    fn method_list_exists_only_while_open() {
+        let mut model = popup_on("simple-get.bru", None, (100, 30));
+        let before = content(&model).lines.len();
+        assert_eq!(session(&model).current_field(), Some(EditableField::Method));
+        update(&mut model, Message::Enter);
+        let lines = content(&model).lines;
+        assert_eq!(lines.len(), before + 9);
+        let get = &lines[line_of(&model, "    GET")];
+        assert!(get.style.add_modifier.contains(Modifier::REVERSED));
+        assert!(texts(&model).iter().any(|l| l.trim() == "PATCH"));
+        assert_eq!(content(&model).focus_line, line_of(&model, "    GET"));
+        update(&mut model, Message::CancelInput);
+        assert_eq!(content(&model).lines.len(), before);
+    }
+
+    /// Popup Assert : bascule, puis ajout d'une clé avec espaces ; popup
+    /// Vars : `Tab` / `Maj+Tab` passent d'une partie à l'autre.
+    #[test]
+    fn assert_and_vars_popups_toggle_add_and_switch_parts() {
+        let mut model = popup_on("scripted.bru", Some(RequestTab::Assert), (100, 30));
+        assert_eq!(
+            session(&model).current_field(),
+            Some(EditableField::AssertValue(0))
         );
-        y += 1;
-    }
+        update(&mut model, Message::ToggleField);
+        assert!(texts(&model)[line_of(&model, "res.status")].contains("eq 200 (désactivé)"));
+        update(&mut model, Message::ToggleField);
+        assert!(!texts(&model)[line_of(&model, "res.status")].contains("(désactivé)"));
 
-    // Titre 2
-    let t2_style = if active_part == 1 { theme::FOCUS } else { theme::LABEL };
-    frame.render_widget(
-        Paragraph::new(Line::styled(format!("▸ {title2}"), t2_style)),
-        Rect::new(inner_area.x, y, inner_area.width, 1),
-    );
-    y += 1;
+        update(&mut model, Message::Add);
+        type_text(&mut model, "res.headers['content-type']");
+        update(&mut model, Message::ValidateInput);
+        type_text(&mut model, "isDefined");
+        update(&mut model, Message::InputKey(InputKey::Enter));
+        let row = &texts(&model)[line_of(&model, "res.headers['content-type']")];
+        assert!(row.contains("isDefined"), "{row}");
+        assert_eq!(
+            session(&model).current_field(),
+            Some(EditableField::AssertValue(2))
+        );
 
-    for (i, e) in entries2.iter().enumerate() {
-        if y >= inner_area.bottom().saturating_sub(1) {
-            break;
-        }
-        let is_sel = active_part == 1 && session.cursor == (entries1.len() + i) && session.state == EditState::FieldSelect;
-        let mut line = Line::from(vec![
-            Span::styled(format!("  {}: ", e.key), theme::LABEL),
-            Span::raw(e.value.clone()),
-        ]);
-        if is_sel {
-            line = line.style(theme::SELECTION);
-        }
-        frame.render_widget(Paragraph::new(line), Rect::new(inner_area.x, y, inner_area.width, 1));
-        y += 1;
-    }
-    if entries2.is_empty() && y < inner_area.bottom().saturating_sub(1) {
-        frame.render_widget(
-            Paragraph::new(Line::styled("  aucun", theme::EMPTY_MESSAGE)),
-            Rect::new(inner_area.x, y, inner_area.width, 1),
+        let mut model = popup_on("scripted.bru", Some(RequestTab::Vars), (100, 30));
+        use crate::writer::EntrySection::{VarsPostResponse, VarsPreRequest};
+        assert_eq!(
+            session(&model).current_field(),
+            Some(EditableField::AddRow(VarsPreRequest))
+        );
+        update(&mut model, Message::NextFocus);
+        assert_eq!(
+            session(&model).current_field(),
+            Some(EditableField::AddRow(VarsPostResponse))
+        );
+        update(&mut model, Message::NextFocus);
+        assert_eq!(
+            session(&model).current_field(),
+            Some(EditableField::AddRow(VarsPreRequest))
+        );
+        update(&mut model, Message::PreviousPart);
+        assert_eq!(
+            session(&model).current_field(),
+            Some(EditableField::AddRow(VarsPostResponse))
         );
     }
-}
 
-/// Rendu du popup Auth.
-fn render_auth_popup(session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    let help_text = match &session.state {
-        EditState::Input(_) => "Entrée valider  Échap annuler",
-        EditState::Picker { .. } => "↑↓ choisir  Entrée valider  Échap annuler",
-        EditState::FieldSelect => "←→ mode  Entrée modifier  Ctrl+S enregistrer  Échap fermer",
-        _ => "",
-    };
-    let help_rect = Rect::new(
-        inner_area.x,
-        inner_area.bottom().saturating_sub(1),
-        inner_area.width,
-        1,
-    );
-    frame.render_widget(Paragraph::new(Line::styled(help_text, theme::LABEL)), help_rect);
-
-    let mode_str = session.preview.auth.as_ref().map_or("none", |m| m.as_str());
-    let is_mode_cursor = session.current_field() == Some(EditableField::AuthMode);
-    let mut mode_line = Line::from(vec![
-        Span::styled("Mode         ‹ ", theme::LABEL),
-        Span::styled(mode_str, theme::FOCUS),
-        Span::styled(" ›", theme::LABEL),
-    ]);
-    if is_mode_cursor && session.state == EditState::FieldSelect {
-        mode_line = mode_line.style(theme::SELECTION);
-    }
-    frame.render_widget(
-        Paragraph::new(mode_line),
-        Rect::new(inner_area.x, inner_area.y, inner_area.width, 1),
-    );
-
-    let params = session.preview.auth_params();
-    for (i, p) in params.iter().enumerate() {
-        let y = inner_area.y + 1 + i as u16;
-        if y >= inner_area.bottom().saturating_sub(1) {
-            break;
-        }
-        let is_sel = session.cursor == i + 1 && session.state == EditState::FieldSelect;
-        let mut line = Line::from(vec![
-            Span::styled(format!("{:<12} ", p.key), theme::LABEL),
-            Span::raw(p.value.clone()),
-        ]);
-        if is_sel {
-            line = line.style(theme::SELECTION);
-        }
-        frame.render_widget(Paragraph::new(line), Rect::new(inner_area.x, y, inner_area.width, 1));
-    }
-}
-
-/// Rendu du popup Assert.
-fn render_assert_popup(session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    render_single_table_popup(session, frame, inner_area, "Assertions", &session.preview.extra.assertions, "aucune assertion");
-}
-
-/// Rendu du popup Settings.
-fn render_settings_popup(session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    render_single_table_popup(session, frame, inner_area, "Paramètres", &session.preview.extra.settings, "aucun paramètre");
-}
-
-fn render_single_table_popup(
-    session: &EditSession,
-    frame: &mut Frame,
-    inner_area: Rect,
-    _title: &str,
-    entries: &[KeyValue],
-    empty_label: &str,
-) {
-    let help_text = match &session.state {
-        EditState::Input(_) => "Entrée/Tab valider  Échap annuler",
-        EditState::FieldSelect => "↑↓ naviguer  Entrée modifier  a ajouter  d supprimer  Ctrl+S enregistrer  Échap fermer",
-        _ => "",
-    };
-    let help_rect = Rect::new(
-        inner_area.x,
-        inner_area.bottom().saturating_sub(1),
-        inner_area.width,
-        1,
-    );
-    frame.render_widget(Paragraph::new(Line::styled(help_text, theme::LABEL)), help_rect);
-
-    if entries.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::styled(format!("  {empty_label}"), theme::EMPTY_MESSAGE)),
-            Rect::new(inner_area.x, inner_area.y, inner_area.width, 1),
+    #[test]
+    fn body_mode_list_offers_every_mode() {
+        let mut model = popup_on("simple-get.bru", Some(RequestTab::Body), (100, 40));
+        assert_eq!(
+            session(&model).current_field(),
+            Some(EditableField::BodyMode)
         );
-        return;
-    }
-
-    for (i, e) in entries.iter().enumerate() {
-        let y = inner_area.y + i as u16;
-        if y >= inner_area.bottom().saturating_sub(1) {
-            break;
+        assert!(texts(&model)[0].contains("‹ none ›"));
+        update(&mut model, Message::Enter);
+        for mode in crate::writer::BODY_MODES {
+            assert!(texts(&model).iter().any(|l| l.trim() == mode), "{mode}");
         }
-        let is_sel = session.cursor == i && session.state == EditState::FieldSelect;
-        let mut line = Line::from(vec![
-            Span::styled(format!("  {}: ", e.key), theme::LABEL),
-            Span::raw(e.value.clone()),
-        ]);
-        if is_sel {
-            line = line.style(theme::SELECTION);
+    }
+
+    /// Le curseur de texte suit la valeur, la clé renommée, la clé puis la
+    /// valeur d'un ajout, et la ligne d'un corps multiligne.
+    #[test]
+    fn text_cursor_follows_value_key_new_entry_and_body_line() {
+        let mut model = popup_on("post-json.bru", Some(RequestTab::Headers), (100, 30));
+        let row = line_of(&model, "Content-Type");
+        let key_width = Line::raw("Content-Type").width();
+        let value_column = key_width + separator_width();
+
+        // Valeur : curseur en fin de saisie.
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            content(&model).text_cursor,
+            Some((row, value_column + "application/json".len()))
+        );
+        assert_eq!(content(&model).input_prefix, value_column);
+        update(&mut model, Message::CancelInput);
+
+        // Renommage : curseur dans la colonne Clé.
+        update(&mut model, Message::Rename);
+        assert_eq!(content(&model).text_cursor, Some((row, key_width)));
+        update(&mut model, Message::CancelInput);
+
+        // Ajout : la ligne provisoire suit le tableau.
+        update(&mut model, Message::Add);
+        type_text(&mut model, "X-T");
+        let last = content(&model).lines.len() - 1;
+        assert_eq!(content(&model).text_cursor, Some((last, 3)));
+        assert!(texts(&model)[last].starts_with("X-T"));
+        update(&mut model, Message::ValidateInput);
+        type_text(&mut model, "v");
+        assert_eq!(content(&model).text_cursor, Some((last, value_column + 1)));
+
+        // Corps : deuxième ligne, une colonne après l'indentation.
+        let mut model = popup_on("post-json.bru", Some(RequestTab::Body), (100, 40));
+        go_to(&mut model, EditableField::BodyText);
+        update(&mut model, Message::Enter);
+        for _ in 0..10 {
+            update(&mut model, Message::InputKey(InputKey::Up));
         }
-        frame.render_widget(Paragraph::new(line), Rect::new(inner_area.x, y, inner_area.width, 1));
+        update(&mut model, Message::InputKey(InputKey::Down));
+        update(&mut model, Message::InputKey(InputKey::Home));
+        update(&mut model, Message::InputKey(InputKey::Right));
+        let first = content(&model)
+            .fields
+            .iter()
+            .find(|rows| rows.field == EditableField::BodyText)
+            .expect("corps")
+            .line;
+        assert_eq!(content(&model).text_cursor, Some((first + 1, 3)));
     }
-}
 
-/// Rendu du popup Corps.
-fn render_body_popup(session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    let help_text = match &session.state {
-        EditState::Input(_) => "Entrée nouvelle ligne  Tab sortir  Échap annuler",
-        EditState::Picker { .. } => "↑↓ choisir  Entrée valider  Échap annuler",
-        EditState::FieldSelect => "←→ mode  Entrée modifier  Ctrl+S enregistrer  Échap fermer",
-        _ => "",
-    };
-    let help_rect = Rect::new(
-        inner_area.x,
-        inner_area.bottom().saturating_sub(1),
-        inner_area.width,
-        1,
-    );
-    frame.render_widget(Paragraph::new(Line::styled(help_text, theme::LABEL)), help_rect);
+    /// Un secret d'auth est masqué, en saisie comme hors saisie, sauf
+    /// `Ctrl+R` ; un secret en clair ouvre la question dans le bas du popup.
+    #[test]
+    fn secrets_are_masked_and_the_plaintext_question_is_in_the_popup() {
+        let mut model = popup_on("scripted.bru", Some(RequestTab::Auth), (100, 30));
+        go_to(&mut model, EditableField::AuthParamValue(0));
+        update(&mut model, Message::Enter);
+        for _ in 0.."{{tok}}".len() {
+            update(&mut model, Message::InputKey(InputKey::Backspace));
+        }
+        type_text(&mut model, "abc");
+        let row = line_of(&model, "token");
+        assert!(
+            texts(&model)[row].ends_with("•••"),
+            "{}",
+            texts(&model)[row]
+        );
+        assert!(help_chunks(session(&model)).contains(&"Ctrl+R afficher".to_owned()));
+        update(&mut model, Message::ToggleRevealSecret);
+        assert!(texts(&model)[row].ends_with("abc"));
+        update(&mut model, Message::ToggleRevealSecret);
 
-    let mode_str = session.preview.body_mode();
-    let is_mode_cursor = session.current_field() == Some(EditableField::BodyMode);
-    let mut mode_line = Line::from(vec![
-        Span::styled("Mode       ‹ ", theme::LABEL),
-        Span::styled(mode_str, theme::FOCUS),
-        Span::styled(" ›", theme::LABEL),
-    ]);
-    if is_mode_cursor && session.state == EditState::FieldSelect {
-        mode_line = mode_line.style(theme::SELECTION);
+        update(&mut model, Message::ValidateInput);
+        assert!(matches!(
+            session(&model).state,
+            EditState::PlaintextSecretPrompt { .. }
+        ));
+        let lines = texts(&model);
+        let question = line_of(&model, "Secret en clair");
+        assert!(question > row);
+        assert!(lines[question + 1].contains("remplacer par {{bearerToken}}"));
+        assert!(lines[question + 2].contains("garder en clair"));
+        assert!(lines[question + 3].contains("revenir à la saisie"));
+        assert!(help_chunks(session(&model)).contains(&"g garder".to_owned()));
+        // Hors saisie, la valeur en clair ne s'affiche jamais.
+        update(&mut model, Message::KeepPlaintextSecret);
+        assert!(
+            !texts(&model)[row].contains("abc"),
+            "{}",
+            texts(&model)[row]
+        );
     }
-    frame.render_widget(
-        Paragraph::new(mode_line),
-        Rect::new(inner_area.x, inner_area.y, inner_area.width, 1),
-    );
-}
 
-/// Rendu du popup Script (Pré-requête & Post-réponse).
-fn render_script_popup(session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    let help_text = "Entrée éditer dans l'éditeur externe  Ctrl+S enregistrer  Échap fermer";
-    let help_rect = Rect::new(
-        inner_area.x,
-        inner_area.bottom().saturating_sub(1),
-        inner_area.width,
-        1,
-    );
-    frame.render_widget(Paragraph::new(Line::styled(help_text, theme::LABEL)), help_rect);
+    /// Les touches d'aide se replient sur la largeur du popup.
+    #[test]
+    fn help_lines_wrap_to_the_popup_width() {
+        let model = popup_on("scripted.bru", Some(RequestTab::Headers), (100, 30));
+        let chunks = help_chunks(session(&model));
+        let lines = help_lines(session(&model), 30);
+        assert!(lines.len() > 1);
+        for line in &lines {
+            assert!(line.width() <= 30, "{}", plain(line));
+        }
+        let joined: Vec<String> = lines.iter().map(plain).collect();
+        for chunk in chunks {
+            assert!(joined.iter().any(|l| l.contains(&chunk)), "{chunk}");
+        }
+    }
 
-    let pre_cursor = session.cursor == 0 && session.state == EditState::FieldSelect;
-    let post_cursor = session.cursor == 1 && session.state == EditState::FieldSelect;
-
-    let mut l1 = Line::raw("▸ Script pré-requête");
-    if pre_cursor { l1 = l1.style(theme::SELECTION); }
-    frame.render_widget(Paragraph::new(l1), Rect::new(inner_area.x, inner_area.y, inner_area.width, 1));
-
-    let mut l2 = Line::raw("▸ Script post-réponse");
-    if post_cursor { l2 = l2.style(theme::SELECTION); }
-    frame.render_widget(Paragraph::new(l2), Rect::new(inner_area.x, inner_area.y + 2, inner_area.width, 1));
-}
-
-/// Rendu du popup Tests / Docs.
-fn render_text_block_popup(_session: &EditSession, frame: &mut Frame, inner_area: Rect) {
-    let help_text = "Entrée éditer dans l'éditeur externe  Ctrl+S enregistrer  Échap fermer";
-    let help_rect = Rect::new(
-        inner_area.x,
-        inner_area.bottom().saturating_sub(1),
-        inner_area.width,
-        1,
-    );
-    frame.render_widget(Paragraph::new(Line::styled(help_text, theme::LABEL)), help_rect);
-
-    let line = Line::raw("Entrée pour ouvrir l'éditeur externe");
-    frame.render_widget(Paragraph::new(line.style(theme::SELECTION)), Rect::new(inner_area.x, inner_area.y, inner_area.width, 1));
+    /// Un script trop long montre ses premières lignes et le nombre de
+    /// lignes restantes.
+    #[test]
+    fn long_text_blocks_show_a_preview() {
+        let mut model = popup_on("scripted.bru", Some(RequestTab::Script), (100, 30));
+        let text = (1..=9)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        update(
+            &mut model,
+            Message::TextEditorClosed {
+                field: EditableField::ScriptPreRequest,
+                result: Ok(text),
+            },
+        );
+        let lines = texts(&model);
+        assert!(lines.iter().any(|l| l.trim() == "line6"));
+        assert!(!lines.iter().any(|l| l.trim() == "line7"));
+        assert!(lines.iter().any(|l| l.contains("… (+3 lignes)")));
+        assert!(session(&model).dirty);
+        assert!(edit_popup_title(session(&model)).contains("● non enregistré"));
+    }
 }

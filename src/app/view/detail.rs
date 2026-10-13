@@ -17,8 +17,8 @@ use super::theme;
 use super::tree::file_name;
 use crate::app::filter::{FilterResult, FilterState};
 use crate::app::model::{
-    EditSession, EditState, EditableField, FOLDER_TABS, InputTarget, Model, PickerKind,
-    RequestOutcome, RequestTab, ResponseTab, add_row_label, field_enabled, field_value,
+    EditScope, EditableField, FOLDER_TABS, Model, RequestOutcome, RequestTab, ResponseTab,
+    field_value,
 };
 use crate::app::update::{response_selection_range, selection_range};
 use crate::collection::{
@@ -58,17 +58,13 @@ pub fn detail_text_fields_boxes(model: &Model) -> (Text<'static>, Vec<FieldLine>
     let tab = model.shown_request_tab();
     if model.selected_collection {
         if let Some(collection) = model.loaded() {
-            return collection_text_and_boxes(collection, None, tab);
+            return collection_text_and_boxes(collection, tab);
         }
         return (Text::default(), Vec::new(), Vec::new());
     }
     match model.selected_node() {
-        Some(TreeNode::Request(request)) => {
-            request_text_and_fields(request, None, tab)
-        }
-        Some(TreeNode::Folder(folder)) => {
-            folder_text_and_boxes(folder, None, tab)
-        }
+        Some(TreeNode::Request(request)) => request_text_and_fields(request, tab),
+        Some(TreeNode::Folder(folder)) => folder_text_and_boxes(folder, tab),
         Some(TreeNode::Error(error)) => (error_text(error), Vec::new(), Vec::new()),
         None => (Text::default(), Vec::new(), Vec::new()),
     }
@@ -167,11 +163,6 @@ fn section(text: &str) -> Line<'static> {
     Line::from(Span::styled(text.to_owned(), theme::SECTION))
 }
 
-/// Libellés des champs Méthode et URL, courts pour que l'URL tienne sur
-/// sa ligne dans un panneau étroit.
-const METHOD_LABEL: &str = "Méthode : ";
-const URL_LABEL: &str = "URL : ";
-
 fn field(label: &str, value: impl Into<String>) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{label} : "), theme::LABEL),
@@ -218,41 +209,27 @@ fn render_code_block(lines: &mut Vec<Line<'static>>, code: Option<&str>) {
     }
 }
 
-/// Affiche un bloc de code éditable (scripts, tests, docs), avec mise en valeur
-/// sous le curseur et enregistrement dans `field_lines` lors d'une session d'édition.
+/// Affiche un bloc de code éditable (scripts, tests, docs) et l'enregistre
+/// dans `field_lines` : un clic ouvre son popup d'édition.
 fn render_editable_code_block(
     lines: &mut Vec<Line<'static>>,
     field_lines: &mut Vec<FieldLine>,
     code: Option<&str>,
-    session: Option<&EditSession>,
     field: EditableField,
 ) {
     let first = lines.len();
-    let is_cursor = is_field_cursor(session, &field);
-    let val = session
-        .map(|s| field_value(s, &field))
-        .or(code)
-        .unwrap_or("");
-    let trimmed = val.trim();
-    if trimmed.is_empty() {
+    let val = code.unwrap_or("");
+    if val.trim().is_empty() {
         let empty_label = match field {
             EditableField::Docs => "  aucune",
             _ => "  aucun",
         };
-        let mut line = Line::raw(empty_label);
-        if is_cursor {
-            line = tint_line(line, FIELD_CURSOR_STYLE);
-        }
-        lines.push(line);
+        lines.push(Line::raw(empty_label));
     } else {
         match field {
             EditableField::Docs => {
                 for l in val.lines() {
-                    let mut line = Line::raw(format!("  {l}"));
-                    if is_cursor {
-                        line = tint_line(line, FIELD_CURSOR_STYLE);
-                    }
-                    lines.push(line);
+                    lines.push(Line::raw(format!("  {l}")));
                 }
             }
             _ => {
@@ -261,23 +238,17 @@ fn render_editable_code_block(
                 for (idx, line_str) in code_lines.iter().enumerate() {
                     let num_span = Span::styled(format!("  {:>width$} ", idx + 1), theme::LABEL);
                     let code_span = Span::raw((*line_str).to_owned());
-                    let mut line = Line::from(vec![num_span, code_span]);
-                    if is_cursor {
-                        line = tint_line(line, FIELD_CURSOR_STYLE);
-                    }
-                    lines.push(line);
+                    lines.push(Line::from(vec![num_span, code_span]));
                 }
             }
         }
     }
-    if session.is_some() {
-        field_lines.push(FieldLine {
-            field,
-            line: first,
-            count: lines.len() - first,
-            prefix_width: 2,
-        });
-    }
+    field_lines.push(FieldLine {
+        field,
+        line: first,
+        count: lines.len() - first,
+        prefix_width: 2,
+    });
 }
 
 /// Mode d'auth tel qu'écrit dans le fichier.
@@ -552,43 +523,24 @@ pub(crate) fn skip_columns(text: &str, columns: usize) -> (&str, usize) {
     ("", skipped)
 }
 
-/// Décalage horizontal à appliquer à la valeur de `field` : celui de la
-/// session si ce champ est en saisie, zéro sinon.
-fn value_hscroll(session: Option<&EditSession>, field: &EditableField) -> usize {
-    session
-        .filter(|s| matches!(s.state, EditState::Input(_)) && s.current_field() == Some(*field))
-        .map_or(0, |s| usize::from(s.hscroll))
-}
-
-fn is_field_cursor(session: Option<&EditSession>, field: &EditableField) -> bool {
-    session.is_some_and(|s| s.fields.get(s.cursor) == Some(field))
-}
-
 fn render_multiline_text(
     lines: &mut Vec<Line<'static>>,
     field_lines: &mut Vec<FieldLine>,
     field: EditableField,
     text: &str,
-    session: Option<&EditSession>,
     view: &crate::collection::RequestView,
 ) {
-    let is_cursor = is_field_cursor(session, &field);
-    let is_editable = EditableField::list_for(view).contains(&field);
-    let val = session.map_or(text, |s| field_value(s, &field));
-    let hscroll = value_hscroll(session, &field);
+    let is_editable =
+        EditableField::list_for_scope(view, EditScope::Tab(RequestTab::Body)).contains(&field);
     let first = lines.len();
-    if val.is_empty() && !is_editable {
+    if text.is_empty() && !is_editable {
         lines.push(Line::raw("  aucun"));
         return;
     }
-    for l in val.split('\n') {
-        let (l, _) = skip_columns(l, hscroll);
+    for l in text.split('\n') {
         let mut line = Line::raw(format!("  {l}"));
         if is_editable {
             line = tint_line(line, theme::EDITABLE_BODY);
-        }
-        if is_cursor {
-            line = tint_line(line, FIELD_CURSOR_STYLE);
         }
         lines.push(line);
     }
@@ -602,79 +554,50 @@ fn render_multiline_text(
     }
 }
 
-/// Saisie en cours de la session sur la cible `target`, s'il y en a une.
-fn input_for(
-    session: Option<&EditSession>,
-    matches: impl Fn(&InputTarget) -> bool,
-) -> Option<&str> {
-    let session = session?;
-    match &session.state {
-        EditState::Input(input) if matches(&session.target) => Some(input.text()),
-        _ => None,
-    }
-}
-
-/// Entrées d'une section, suivies en session de sa ligne d'ajout (ou de
-/// l'entrée provisoire pendant un ajout).
+/// Entrées d'une section, chacune enregistrée dans `field_lines` (ou la
+/// ligne « aucun » comme ligne d'ajout) : un clic ouvre le popup
+/// d'édition sur elle.
 fn editable_entries(
     lines: &mut Vec<Line<'static>>,
     field_lines: &mut Vec<FieldLine>,
     values: &[KeyValue],
-    session: Option<&EditSession>,
     section: EntrySection,
 ) {
-    if values.is_empty() && session.is_none() {
+    if values.is_empty() {
+        // Un clic sur « aucun » ouvre le popup et commence un ajout ; les
+        // paramètres de `settings` ne s'ajoutent pas.
+        if section != EntrySection::Settings {
+            field_lines.push(FieldLine {
+                field: EditableField::AddRow(section),
+                line: lines.len(),
+                count: 1,
+                prefix_width: 2,
+            });
+        }
         lines.push(Line::raw("  aucun"));
         return;
     }
     for (i, entry) in values.iter().enumerate() {
-        let field = match section {
-            EntrySection::Headers => EditableField::HeaderValue(i),
-            EntrySection::QueryParams => EditableField::QueryParamValue(i),
-            EntrySection::PathParams => EditableField::PathParamValue(i),
-            EntrySection::VarsPreRequest => EditableField::VarsPreRequestValue(i),
-            EntrySection::VarsPostResponse => EditableField::VarsPostResponseValue(i),
-            EntrySection::Assert => EditableField::AssertValue(i),
-            EntrySection::Settings => EditableField::SettingsValue(i),
-            EntrySection::FormUrlEncoded => EditableField::FormUrlEncodedValue(i),
-            EntrySection::MultipartForm => EditableField::MultipartFormValue(i),
-        };
-        let hscroll = value_hscroll(session, &field);
-        let renamed = input_for(session, |target| {
-            *target == InputTarget::RenameKey { section, index: i }
-        });
-        let (key_text, value_text, prefix_width) = match renamed {
-            Some(key) => {
-                let (key, _) = skip_columns(key, hscroll);
-                (format!("  {key}: "), entry.value.clone(), 2)
-            }
-            None => {
-                let val = session.map_or(entry.value.as_str(), |s| field_value(s, &field));
-                let (val, _) = skip_columns(val, hscroll);
-                let prefix = format!("  {}: ", entry.key);
-                let width = Line::raw(prefix.as_str()).width();
-                (prefix, val.to_owned(), width)
-            }
-        };
+        let field = EditableField::of_entry(section, i);
+        let key_text = format!("  {}: ", entry.key);
         field_lines.push(FieldLine {
             field,
             line: lines.len(),
             count: 1,
-            prefix_width,
+            prefix_width: Line::raw(key_text.as_str()).width(),
         });
         let is_file = section == EntrySection::MultipartForm
             && entry.value.trim_start().starts_with("@file(");
-        let enabled = session.map_or(entry.enabled, |s| field_enabled(s, &field));
-        let mut line = if !enabled {
+        let line = if !entry.enabled {
             Line::from(vec![
                 Span::styled(key_text, theme::LABEL),
-                Span::styled(format!("{value_text} (désactivé)"), DISABLED_ENTRY_VALUE),
+                Span::styled(format!("{} (désactivé)", entry.value), DISABLED_ENTRY_VALUE),
             ])
         } else if is_file {
             Line::from(vec![
                 Span::styled(key_text, theme::LABEL),
                 Span::styled(
-                    format!("{value_text} (lecture seule)"),
+                    format!("{} (lecture seule)", entry.value),
                     Style::new()
                         .fg(Color::Rgb(150, 150, 155))
                         .add_modifier(Modifier::ITALIC),
@@ -683,70 +606,11 @@ fn editable_entries(
         } else {
             Line::from(vec![
                 Span::styled(key_text, theme::LABEL),
-                Span::raw(value_text),
+                Span::raw(entry.value.clone()),
             ])
         };
-        if is_field_cursor(session, &field) {
-            line = tint_line(line, FIELD_CURSOR_STYLE);
-        }
         lines.push(line);
     }
-    let Some(session) = session else {
-        return;
-    };
-    if section == EntrySection::Settings {
-        return;
-    }
-    let field = EditableField::AddRow(section);
-    let hscroll = value_hscroll(Some(session), &field);
-    let new_key = input_for(
-        Some(session),
-        |target| matches!(target, InputTarget::NewKey { section: s, .. } if *s == section),
-    );
-    let new_value = match &session.target {
-        InputTarget::NewValue {
-            section: s, key, ..
-        } if *s == section => input_for(Some(session), |_| true).map(|value| (key.as_str(), value)),
-        _ => None,
-    };
-    let (mut line, prefix_width) = match (new_key, new_value) {
-        (Some(key), _) => {
-            let (key, _) = skip_columns(key, hscroll);
-            (
-                Line::from(vec![Span::styled(format!("  {key}"), theme::LABEL)]),
-                2,
-            )
-        }
-        (None, Some((key, value))) => {
-            let prefix = format!("  {key}: ");
-            let width = Line::raw(prefix.as_str()).width();
-            let (value, _) = skip_columns(value, hscroll);
-            (
-                Line::from(vec![
-                    Span::styled(prefix, theme::LABEL),
-                    Span::raw(value.to_owned()),
-                ]),
-                width,
-            )
-        }
-        (None, None) => (
-            Line::styled(
-                format!("  {}", add_row_label(section)),
-                Style::new().add_modifier(Modifier::DIM),
-            ),
-            2,
-        ),
-    };
-    field_lines.push(FieldLine {
-        field,
-        line: lines.len(),
-        count: 1,
-        prefix_width,
-    });
-    if is_field_cursor(Some(session), &field) {
-        line = tint_line(line, FIELD_CURSOR_STYLE);
-    }
-    lines.push(line);
 }
 
 /// Séparateur entre la méthode et l'URL dans la barre d'URL : la flèche
@@ -806,86 +670,6 @@ pub fn url_bar_line(method: &str, url: &str, method_picker: bool) -> Line<'stati
     Line::from(spans)
 }
 
-/// Lignes Méthode et URL du détail, avec leurs champs éditables et, pendant
-/// le choix de la méthode, la boîte du sélecteur.
-fn push_method_and_url(
-    lines: &mut Vec<Line<'static>>,
-    field_lines: &mut Vec<FieldLine>,
-    boxes: &mut Vec<SectionBox>,
-    view: &crate::collection::RequestView,
-    session: Option<&EditSession>,
-) {
-    let method_field = EditableField::Method;
-    let method_val = session.map_or(view.method.as_str(), |s| field_value(s, &method_field));
-    let method_label = Span::styled(METHOD_LABEL, theme::LABEL);
-    field_lines.push(FieldLine {
-        field: method_field,
-        line: lines.len(),
-        count: 1,
-        prefix_width: method_label.width(),
-    });
-    let mut method_value = Line::from(Span::styled(
-        method_val.to_owned(),
-        theme::method_style(method_val).add_modifier(Modifier::BOLD),
-    ));
-    if is_field_cursor(session, &method_field) {
-        method_value = tint_line(method_value, FIELD_CURSOR_STYLE);
-    }
-    let mut method_line = Line::from(method_label);
-    method_line.spans.extend(method_value.spans);
-    lines.push(method_line);
-
-    if let Some(session) = session
-        && let EditState::Picker {
-            kind: kind @ PickerKind::Method,
-            selected,
-        } = session.state
-    {
-        boxed_section(
-            lines,
-            field_lines,
-            boxes,
-            "Méthode".to_owned(),
-            |lines, _| picker_lines(lines, kind, selected, "  "),
-        );
-    }
-
-    let url_field = EditableField::Url;
-    let url_val = session.map_or(view.url.as_str(), |s| field_value(s, &url_field));
-    let (url_val, _) = skip_columns(url_val, value_hscroll(session, &url_field));
-    let url_label = Span::styled(URL_LABEL, theme::LABEL);
-    field_lines.push(FieldLine {
-        field: url_field,
-        line: lines.len(),
-        count: 1,
-        prefix_width: url_label.width(),
-    });
-    let mut url_value = Line::raw(url_val.to_owned());
-    if is_field_cursor(session, &url_field) {
-        url_value = tint_line(url_value, FIELD_CURSOR_STYLE);
-    }
-    let mut url_line = Line::from(url_label);
-    url_line.spans.extend(url_value.spans);
-    lines.push(url_line);
-}
-
-/// Choix d'un sélecteur, la présélection surlignée. Les méthodes
-/// s'affichent en capitales, comme dans l'en-tête du détail.
-fn picker_lines(lines: &mut Vec<Line<'static>>, kind: PickerKind, selected: usize, indent: &str) {
-    for (index, option) in kind.options().iter().enumerate() {
-        let label = if kind == PickerKind::Method {
-            option.to_ascii_uppercase()
-        } else {
-            (*option).to_owned()
-        };
-        let mut line = Line::raw(format!("{indent}{label}"));
-        if index == selected {
-            line = tint_line(line, FIELD_CURSOR_STYLE);
-        }
-        lines.push(line);
-    }
-}
-
 fn render_auth_tab(
     lines: &mut Vec<Line<'static>>,
     field_lines: &mut Vec<FieldLine>,
@@ -893,112 +677,25 @@ fn render_auth_tab(
     mode_label: &str,
     auth_mode: Option<&AuthMode>,
     auth_params: &[KeyValue],
-    session: Option<&EditSession>,
 ) {
-    if let Some(session) = session {
-        let auth_field = EditableField::AuthMode;
-        let mode_val = field_value(session, &auth_field);
-        let label = Span::styled(format!("{mode_label} : "), theme::LABEL);
-        field_lines.push(FieldLine {
-            field: auth_field,
-            line: lines.len(),
-            count: 1,
-            prefix_width: label.width(),
-        });
-        let mut val_span = Span::raw(mode_val.to_owned());
-        if is_field_cursor(Some(session), &auth_field) {
-            val_span = val_span.patch_style(FIELD_CURSOR_STYLE);
-        }
-        lines.push(Line::from(vec![label, val_span]));
-
-        if let EditState::Picker {
-            kind: kind @ (PickerKind::AuthMode | PickerKind::CollectionAuthMode),
-            selected,
-        } = session.state
-        {
-            boxed_section(
-                lines,
-                field_lines,
-                boxes,
-                "Mode d'authentification".to_owned(),
-                |lines, _| picker_lines(lines, kind, selected, "  "),
-            );
-        }
-
-        if !auth_params.is_empty() {
-            let section_title = auth_mode
+    lines.push(field(
+        mode_label,
+        auth_mode.map_or("non déclarée", auth_label),
+    ));
+    if auth_mode.is_some_and(|m| !matches!(m, AuthMode::NoAuth | AuthMode::Inherit))
+        || !auth_params.is_empty()
+    {
+        boxed_section(
+            lines,
+            field_lines,
+            boxes,
+            auth_mode
                 .map(|m| format!("Paramètres ({})", auth_label(m)))
-                .unwrap_or_else(|| "Paramètres".to_owned());
-            boxed_section(
-                lines,
-                field_lines,
-                boxes,
-                section_title,
-                |lines, field_lines| {
-                    for (i, entry) in auth_params.iter().enumerate() {
-                        let field = EditableField::AuthParamValue(i);
-                        let is_cursor = is_field_cursor(Some(session), &field);
-                        let key_label = Span::styled(format!("  {}: ", entry.key), theme::LABEL);
-                        let prefix_width = key_label.width();
-                        let line_idx = lines.len();
-                        field_lines.push(FieldLine {
-                            field,
-                            line: line_idx,
-                            count: 1,
-                            prefix_width,
-                        });
-                        let raw_val = field_value(session, &field);
-                        let is_sensitive =
-                            crate::collection::auth::is_sensitive_auth_key(&entry.key);
-                        let display_val = if matches!(session.state, EditState::Input(_))
-                            && session.current_field() == Some(field)
-                        {
-                            if is_sensitive && !session.unmasked {
-                                "•".repeat(raw_val.chars().count())
-                            } else {
-                                raw_val.to_owned()
-                            }
-                        } else {
-                            crate::collection::auth::mask_auth_value(&entry.key, raw_val)
-                        };
-                        let mut val_span = Span::raw(display_val);
-                        if is_cursor {
-                            val_span = val_span.patch_style(FIELD_CURSOR_STYLE);
-                        }
-                        lines.push(Line::from(vec![key_label, val_span]));
-
-                        if let EditState::Picker {
-                            kind: kind @ PickerKind::ApiKeyPlacement,
-                            selected,
-                        } = session.state
-                            && session.current_field() == Some(field)
-                        {
-                            picker_lines(lines, kind, selected, "    ");
-                        }
-                    }
-                },
-            );
-        }
-    } else {
-        lines.push(field(
-            mode_label,
-            auth_mode.map_or("non déclarée", auth_label),
-        ));
-        if auth_mode.is_some_and(|m| !matches!(m, AuthMode::NoAuth | AuthMode::Inherit))
-            || !auth_params.is_empty()
-        {
-            boxed_section(
-                lines,
-                field_lines,
-                boxes,
-                auth_mode
-                    .map(|m| format!("Paramètres ({})", auth_label(m)))
-                    .unwrap_or_else(|| "Paramètres".to_owned()),
-                |lines, _| {
-                    super::auth::render_auth_entries(lines, auth_params);
-                },
-            );
-        }
+                .unwrap_or_else(|| "Paramètres".to_owned()),
+            |lines, _| {
+                super::auth::render_auth_entries(lines, auth_params);
+            },
+        );
     }
 }
 
@@ -1019,26 +716,15 @@ pub fn request_name(request: &RequestNode) -> String {
 /// (`add-boxed-detail-sections`).
 pub fn request_text_and_fields(
     request: &RequestNode,
-    session: Option<&EditSession>,
     tab: RequestTab,
 ) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     let view = &request.view;
-    // En session, URL, en-têtes et paramètres viennent de l'aperçu des
-    // modifications validées (`add-entry-management`, D8).
-    let shown = session.map_or(view, |s| &s.preview);
+    // Méthode et URL sont dans la barre d'URL ; le détail est en lecture
+    // seule, l'édition passe par les popups (`docs/edition-popups.md`).
+    let shown = view;
     let mut field_lines = Vec::new();
     let mut boxes = Vec::new();
     let mut lines = Vec::new();
-
-    // Hors édition, méthode et URL sont dans la barre d'URL ; pendant une
-    // session, elles reviennent en tête du détail, quel que soit
-    // l'onglet, pour être parcourues et modifiées comme les autres
-    // champs. Méthode sur sa propre ligne (`add-method-editing`) : un clic
-    // se résout à la ligne, jamais à la colonne.
-    if session.is_some() {
-        push_method_and_url(&mut lines, &mut field_lines, &mut boxes, view, session);
-        lines.push(Line::default());
-    }
 
     // gRPC et WebSocket : affichage seul, ni exécution ni édition ; le
     // type est déjà dans le titre du panneau.
@@ -1082,7 +768,6 @@ pub fn request_text_and_fields(
                         lines,
                         field_lines,
                         &shown.query_params,
-                        session,
                         EntrySection::QueryParams,
                     );
                 },
@@ -1097,7 +782,6 @@ pub fn request_text_and_fields(
                         lines,
                         field_lines,
                         &shown.path_params,
-                        session,
                         EntrySection::PathParams,
                     );
                 },
@@ -1111,8 +795,7 @@ pub fn request_text_and_fields(
                 } else if view.is_http() {
                     const BODY_MODE_LABEL: &str = "Mode du corps : ";
                     let body_mode_field = EditableField::BodyMode;
-                    let mode_val =
-                        session.map_or(view.body_mode(), |s| field_value(s, &body_mode_field));
+                    let mode_val = view.body_mode();
                     let body_mode_label = Span::styled(BODY_MODE_LABEL, theme::LABEL);
                     field_lines.push(FieldLine {
                         field: body_mode_field,
@@ -1120,28 +803,10 @@ pub fn request_text_and_fields(
                         count: 1,
                         prefix_width: body_mode_label.width(),
                     });
-                    let mut body_mode_value = Line::from(Span::raw(mode_val.to_owned()));
-                    if is_field_cursor(session, &body_mode_field) {
-                        body_mode_value = tint_line(body_mode_value, FIELD_CURSOR_STYLE);
-                    }
-                    let mut body_mode_line = Line::from(body_mode_label);
-                    body_mode_line.spans.extend(body_mode_value.spans);
-                    lines.push(body_mode_line);
-
-                    if let Some(session) = session
-                        && let EditState::Picker {
-                            kind: kind @ PickerKind::BodyMode,
-                            selected,
-                        } = session.state
-                    {
-                        boxed_section(
-                            &mut lines,
-                            &mut field_lines,
-                            &mut boxes,
-                            "Mode du corps".to_owned(),
-                            |lines, _| picker_lines(lines, kind, selected, "  "),
-                        );
-                    }
+                    lines.push(Line::from(vec![
+                        body_mode_label,
+                        Span::raw(mode_val.to_owned()),
+                    ]));
                 }
             }
 
@@ -1171,7 +836,6 @@ pub fn request_text_and_fields(
                                 lines,
                                 field_lines,
                                 entries,
-                                session,
                                 EntrySection::FormUrlEncoded,
                             );
                         },
@@ -1195,7 +859,6 @@ pub fn request_text_and_fields(
                                 lines,
                                 field_lines,
                                 entries,
-                                session,
                                 EntrySection::MultipartForm,
                             );
                         },
@@ -1220,7 +883,6 @@ pub fn request_text_and_fields(
                                 field_lines,
                                 EditableField::BodyText,
                                 text,
-                                session,
                                 shown,
                             );
                         },
@@ -1237,7 +899,6 @@ pub fn request_text_and_fields(
                                 field_lines,
                                 EditableField::GraphqlVars,
                                 vars,
-                                session,
                                 shown,
                             );
                         },
@@ -1280,7 +941,6 @@ pub fn request_text_and_fields(
                                         field_lines,
                                         EditableField::BodyText,
                                         text,
-                                        session,
                                         shown,
                                     );
                                 }
@@ -1303,7 +963,6 @@ pub fn request_text_and_fields(
                                 field_lines,
                                 EditableField::BodyText,
                                 "",
-                                session,
                                 shown,
                             );
                         },
@@ -1320,7 +979,6 @@ pub fn request_text_and_fields(
                                 field_lines,
                                 EditableField::GraphqlVars,
                                 vars,
-                                session,
                                 shown,
                             );
                         },
@@ -1351,13 +1009,7 @@ pub fn request_text_and_fields(
                     "En-têtes".to_owned()
                 },
                 |lines, field_lines| {
-                    editable_entries(
-                        lines,
-                        field_lines,
-                        &shown.headers,
-                        session,
-                        EntrySection::Headers,
-                    );
+                    editable_entries(lines, field_lines, &shown.headers, EntrySection::Headers);
                 },
             );
         }
@@ -1369,7 +1021,6 @@ pub fn request_text_and_fields(
                 "Auth",
                 shown.auth.as_ref(),
                 shown.auth_params(),
-                session,
             );
         }
         RequestTab::Vars => {
@@ -1383,7 +1034,6 @@ pub fn request_text_and_fields(
                         lines,
                         field_lines,
                         shown.vars_pre_request(),
-                        session,
                         EntrySection::VarsPreRequest,
                     );
                 },
@@ -1398,7 +1048,6 @@ pub fn request_text_and_fields(
                         lines,
                         field_lines,
                         shown.vars_post_response(),
-                        session,
                         EntrySection::VarsPostResponse,
                     );
                 },
@@ -1428,7 +1077,6 @@ pub fn request_text_and_fields(
                         lines,
                         field_lines,
                         shown.script_pre_request(),
-                        session,
                         EditableField::ScriptPreRequest,
                     );
                 },
@@ -1443,7 +1091,6 @@ pub fn request_text_and_fields(
                         lines,
                         field_lines,
                         shown.script_post_response(),
-                        session,
                         EditableField::ScriptPostResponse,
                     );
                 },
@@ -1456,13 +1103,7 @@ pub fn request_text_and_fields(
                 &mut boxes,
                 "Assertions".to_owned(),
                 |lines, field_lines| {
-                    editable_entries(
-                        lines,
-                        field_lines,
-                        shown.assertions(),
-                        session,
-                        EntrySection::Assert,
-                    );
+                    editable_entries(lines, field_lines, shown.assertions(), EntrySection::Assert);
                 },
             );
         }
@@ -1477,7 +1118,6 @@ pub fn request_text_and_fields(
                         lines,
                         field_lines,
                         shown.tests(),
-                        session,
                         EditableField::Tests,
                     );
                 },
@@ -1494,7 +1134,6 @@ pub fn request_text_and_fields(
                         lines,
                         field_lines,
                         shown.docs(),
-                        session,
                         EditableField::Docs,
                     );
                 },
@@ -1507,13 +1146,7 @@ pub fn request_text_and_fields(
                 &mut boxes,
                 "Settings".to_owned(),
                 |lines, field_lines| {
-                    editable_entries(
-                        lines,
-                        field_lines,
-                        shown.settings(),
-                        session,
-                        EntrySection::Settings,
-                    );
+                    editable_entries(lines, field_lines, shown.settings(), EntrySection::Settings);
                 },
             );
         }
@@ -1730,67 +1363,6 @@ pub fn field_at_line(model: &Model, line: u16) -> Option<EditableField> {
         .into_iter()
         .find(|location| (location.line..location.line + location.count).contains(&line))
         .map(|location| location.field)
-}
-
-/// Position du curseur de texte pendant une saisie dans le détail du modèle.
-pub fn cursor_position_for_model(model: &Model) -> Option<(usize, usize)> {
-    let session = model.editing.as_ref()?;
-    let EditState::Input(input) = &session.state else {
-        return None;
-    };
-    let field = session.current_field()?;
-    let (_, field_lines, _) = detail_text_fields_boxes(model);
-    let location = field_lines.iter().find(|l| l.field == field)?;
-    let (line, _) = input.cursor_line_col();
-    let before = input.text_before_cursor_on_line();
-    let (visible, _) = skip_columns(&before, usize::from(session.hscroll));
-    let is_sensitive = match field {
-        EditableField::AuthParamValue(idx) => session
-            .preview
-            .auth_params()
-            .get(idx)
-            .is_some_and(|kv| crate::collection::auth::is_sensitive_auth_key(&kv.key)),
-        _ => false,
-    };
-    let text_width = if is_sensitive && !session.unmasked {
-        visible.chars().count()
-    } else {
-        Line::raw(visible).width()
-    };
-    Some((location.line + line, location.prefix_width + text_width))
-}
-
-/// Position du curseur de texte pendant une saisie : ligne logique dans le
-/// texte du détail et colonne d'affichage dans la ligne, décalage
-/// horizontal déjà appliqué (`improve-direct-editing`, D7).
-pub fn cursor_position_in_detail(
-    request: &RequestNode,
-    session: &EditSession,
-    tab: RequestTab,
-) -> Option<(usize, usize)> {
-    let EditState::Input(input) = &session.state else {
-        return None;
-    };
-    let field = session.current_field()?;
-    let (_, field_lines, _) = request_text_and_fields(request, Some(session), tab);
-    let location = field_lines.iter().find(|l| l.field == field)?;
-    let (line, _) = input.cursor_line_col();
-    let before = input.text_before_cursor_on_line();
-    let (visible, _) = skip_columns(&before, usize::from(session.hscroll));
-    let is_sensitive = match field {
-        EditableField::AuthParamValue(idx) => session
-            .preview
-            .auth_params()
-            .get(idx)
-            .is_some_and(|kv| crate::collection::auth::is_sensitive_auth_key(&kv.key)),
-        _ => false,
-    };
-    let text_width = if is_sensitive && !session.unmasked {
-        visible.chars().count()
-    } else {
-        Line::raw(visible).width()
-    };
-    Some((location.line + line, location.prefix_width + text_width))
 }
 
 /// Représentation d'une valeur JSON pour l'affichage : sans guillemets pour
@@ -2257,7 +1829,6 @@ pub fn tab_bar(active: ResponseTab) -> Line<'static> {
 
 fn meta_tab_content(
     meta: &FileMeta,
-    session: Option<&EditSession>,
     tab: RequestTab,
     scope: &str,
 ) -> (Vec<Line<'static>>, Vec<FieldLine>, Vec<SectionBox>) {
@@ -2265,21 +1836,12 @@ fn meta_tab_content(
     let mut field_lines = Vec::new();
     let mut boxes = Vec::new();
 
-    let (script_pre, script_post, tests, docs) = if let Some(session) = session {
-        (
-            session.preview.script_pre_request(),
-            session.preview.script_post_response(),
-            session.preview.tests(),
-            session.preview.docs(),
-        )
-    } else {
-        (
-            meta.script_pre_request(),
-            meta.script_post_response(),
-            meta.tests(),
-            meta.docs(),
-        )
-    };
+    let (script_pre, script_post, tests, docs) = (
+        meta.script_pre_request(),
+        meta.script_post_response(),
+        meta.tests(),
+        meta.docs(),
+    );
 
     match tab {
         RequestTab::Headers => {
@@ -2289,50 +1851,29 @@ fn meta_tab_content(
                 &mut boxes,
                 "En-têtes".to_owned(),
                 |lines, field_lines| {
-                    let headers = session
-                        .map(|s| s.preview.headers.as_slice())
-                        .unwrap_or_else(|| meta.headers());
-                    editable_entries(lines, field_lines, headers, session, EntrySection::Headers);
+                    editable_entries(lines, field_lines, meta.headers(), EntrySection::Headers);
                 },
             );
         }
         RequestTab::Auth => {
-            if session.is_some() {
-                let auth_mode = session
-                    .and_then(|s| s.preview.auth.as_ref())
-                    .or_else(|| meta.auth());
-                let auth_params = session
-                    .map(|s| s.preview.auth_params())
-                    .unwrap_or_else(|| meta.auth_params());
-                render_auth_tab(
-                    &mut lines,
-                    &mut field_lines,
-                    &mut boxes,
-                    "Mode",
-                    auth_mode,
-                    auth_params,
-                    session,
-                );
-            } else {
-                let masked = crate::collection::auth::mask_auth_params(meta.auth_params());
-                boxed_section(
-                    &mut lines,
-                    &mut field_lines,
-                    &mut boxes,
-                    "Authentification".to_owned(),
-                    |lines, _| {
-                        lines.push(field(
-                            "Mode",
-                            meta.auth().map_or("non déclarée", auth_label),
-                        ));
-                        if !masked.is_empty() {
-                            lines.push(Line::default());
-                            lines.push(section("Paramètres"));
-                            entries(lines, &masked);
-                        }
-                    },
-                );
-            }
+            let masked = crate::collection::auth::mask_auth_params(meta.auth_params());
+            boxed_section(
+                &mut lines,
+                &mut field_lines,
+                &mut boxes,
+                "Authentification".to_owned(),
+                |lines, _| {
+                    lines.push(field(
+                        "Mode",
+                        meta.auth().map_or("non déclarée", auth_label),
+                    ));
+                    if !masked.is_empty() {
+                        lines.push(Line::default());
+                        lines.push(section("Paramètres"));
+                        entries(lines, &masked);
+                    }
+                },
+            );
         }
         RequestTab::Vars => {
             boxed_section(
@@ -2341,16 +1882,8 @@ fn meta_tab_content(
                 &mut boxes,
                 "Variables pré-requête".to_owned(),
                 |lines, field_lines| {
-                    let vars_pre = session
-                        .map(|s| s.preview.vars_pre_request())
-                        .unwrap_or_else(|| meta.vars_pre_request());
-                    editable_entries(
-                        lines,
-                        field_lines,
-                        vars_pre,
-                        session,
-                        EntrySection::VarsPreRequest,
-                    );
+                    let vars_pre = meta.vars_pre_request();
+                    editable_entries(lines, field_lines, vars_pre, EntrySection::VarsPreRequest);
                 },
             );
             boxed_section(
@@ -2359,14 +1892,11 @@ fn meta_tab_content(
                 &mut boxes,
                 "Variables post-réponse".to_owned(),
                 |lines, field_lines| {
-                    let vars_post = session
-                        .map(|s| s.preview.vars_post_response())
-                        .unwrap_or_else(|| meta.vars_post_response());
+                    let vars_post = meta.vars_post_response();
                     editable_entries(
                         lines,
                         field_lines,
                         vars_post,
-                        session,
                         EntrySection::VarsPostResponse,
                     );
                 },
@@ -2383,7 +1913,6 @@ fn meta_tab_content(
                         lines,
                         field_lines,
                         script_pre,
-                        session,
                         EditableField::ScriptPreRequest,
                     );
                 },
@@ -2398,7 +1927,6 @@ fn meta_tab_content(
                         lines,
                         field_lines,
                         script_post,
-                        session,
                         EditableField::ScriptPostResponse,
                     );
                 },
@@ -2411,16 +1939,8 @@ fn meta_tab_content(
                 &mut boxes,
                 "Assertions".to_owned(),
                 |lines, field_lines| {
-                    let assertions = session
-                        .map(|s| s.preview.assertions())
-                        .unwrap_or_else(|| meta.assertions());
-                    editable_entries(
-                        lines,
-                        field_lines,
-                        assertions,
-                        session,
-                        EntrySection::Assert,
-                    );
+                    let assertions = meta.assertions();
+                    editable_entries(lines, field_lines, assertions, EntrySection::Assert);
                 },
             );
         }
@@ -2431,16 +1951,8 @@ fn meta_tab_content(
                 &mut boxes,
                 "Settings".to_owned(),
                 |lines, field_lines| {
-                    let settings = session
-                        .map(|s| s.preview.settings())
-                        .unwrap_or_else(|| meta.settings());
-                    editable_entries(
-                        lines,
-                        field_lines,
-                        settings,
-                        session,
-                        EntrySection::Settings,
-                    );
+                    let settings = meta.settings();
+                    editable_entries(lines, field_lines, settings, EntrySection::Settings);
                 },
             );
         }
@@ -2451,13 +1963,7 @@ fn meta_tab_content(
                 &mut boxes,
                 "Tests".to_owned(),
                 |lines, field_lines| {
-                    render_editable_code_block(
-                        lines,
-                        field_lines,
-                        tests,
-                        session,
-                        EditableField::Tests,
-                    );
+                    render_editable_code_block(lines, field_lines, tests, EditableField::Tests);
                 },
             );
         }
@@ -2468,13 +1974,7 @@ fn meta_tab_content(
                 &mut boxes,
                 "Documentation".to_owned(),
                 |lines, field_lines| {
-                    render_editable_code_block(
-                        lines,
-                        field_lines,
-                        docs,
-                        session,
-                        EditableField::Docs,
-                    );
+                    render_editable_code_block(lines, field_lines, docs, EditableField::Docs);
                 },
             );
         }
@@ -2486,19 +1986,14 @@ fn meta_tab_content(
 
 fn folder_text_and_boxes(
     folder: &FolderNode,
-    session: Option<&EditSession>,
     tab: RequestTab,
 ) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     match &folder.meta {
         Some(Ok(meta)) => {
             let mut lines = vec![title(folder.name.clone()), Line::default()];
             let offset = lines.len();
-            let (tab_lines, mut field_lines, mut boxes) = meta_tab_content(
-                meta,
-                session,
-                tab,
-                "déclaré dans ce dossier (sans héritage)",
-            );
+            let (tab_lines, mut field_lines, mut boxes) =
+                meta_tab_content(meta, tab, "déclaré dans ce dossier (sans héritage)");
             for b in &mut boxes {
                 b.first_line += offset;
             }
@@ -2546,19 +2041,14 @@ fn folder_text_and_boxes(
 
 fn collection_text_and_boxes(
     collection: &Collection,
-    session: Option<&EditSession>,
     tab: RequestTab,
 ) -> (Text<'static>, Vec<FieldLine>, Vec<SectionBox>) {
     match &collection.settings {
         Some(Ok(meta)) => {
             let mut lines = vec![title(collection.name.clone()), Line::default()];
             let offset = lines.len();
-            let (tab_lines, mut field_lines, mut boxes) = meta_tab_content(
-                meta,
-                session,
-                tab,
-                "déclaré au niveau collection (sans héritage)",
-            );
+            let (tab_lines, mut field_lines, mut boxes) =
+                meta_tab_content(meta, tab, "déclaré au niveau collection (sans héritage)");
             for b in &mut boxes {
                 b.first_line += offset;
             }
@@ -2725,12 +2215,6 @@ mod tests {
             .join("\n")
     }
 
-    /// Texte du détail sur l'onglet `tab`.
-    fn detail_text_on(model: &mut crate::app::model::Model, tab: RequestTab) -> Text<'static> {
-        model.request_tab = tab;
-        detail_text(model)
-    }
-
     /// Texte du détail de `path`, tous onglets mis bout à bout dans
     /// l'ordre des onglets.
     fn detail_of(path: &str) -> String {
@@ -2820,7 +2304,6 @@ mod tests {
         update(model, Message::Enter);
     }
 
-
     /// Clé d'en-tête stylée comme un libellé, distincte de sa valeur, hors
     /// session (`improve-edit-field-legibility`).
     #[test]
@@ -2840,29 +2323,6 @@ mod tests {
             .expect("ligne d'en-tête Content-Type");
         assert_eq!(line.spans[0].style, theme::LABEL);
         assert_eq!(line.spans[1].content.as_ref(), "application/json");
-        assert_ne!(line.spans[0].style, line.spans[1].style);
-    }
-
-    /// Même distinction pour un en-tête désactivé pendant une session
-    /// d'édition, en plus de l'indication « (désactivé) »
-    /// (`improve-edit-field-legibility`).
-    #[test]
-    fn disabled_header_key_style_differs_from_value_style_in_session() {
-        let mut model = loaded_model((100, 30));
-        session_on(&mut model, "scripted.bru");
-        model.request_tab = RequestTab::Headers;
-        let text = detail_text(&model);
-        let line = text
-            .lines
-            .iter()
-            .find(|l| {
-                l.spans
-                    .first()
-                    .is_some_and(|s| s.content.as_ref() == "  X-Debug: ")
-            })
-            .expect("ligne d'en-tête désactivé X-Debug");
-        assert_eq!(line.spans[0].style, theme::LABEL);
-        assert_eq!(line.spans[1].content.as_ref(), "1 (désactivé)");
         assert_ne!(line.spans[0].style, line.spans[1].style);
     }
 
@@ -3088,7 +2548,7 @@ mod tests {
         };
 
         // Onglet Vars
-        let (vars_text, _, _) = request_text_and_fields(&request, None, RequestTab::Vars);
+        let (vars_text, _, _) = request_text_and_fields(&request, RequestTab::Vars);
         let vars_plain = plain(&vars_text);
         assert!(vars_plain.contains("Variables pré-requête"));
         assert!(vars_plain.contains("departingDate: 2020-01-01"));
@@ -3100,13 +2560,13 @@ mod tests {
         assert!(vars_plain.contains("@transactionId: $res.body.transactionId (désactivé)"));
 
         // Onglet Docs
-        let (docs_text, _, _) = request_text_and_fields(&request, None, RequestTab::Docs);
+        let (docs_text, _, _) = request_text_and_fields(&request, RequestTab::Docs);
         let docs_plain = plain(&docs_text);
         assert!(docs_plain.contains("Documentation"));
         assert!(docs_plain.contains("This request needs auth token to be set in the headers."));
 
         // Onglet Settings
-        let (settings_text, _, _) = request_text_and_fields(&request, None, RequestTab::Settings);
+        let (settings_text, _, _) = request_text_and_fields(&request, RequestTab::Settings);
         let settings_plain = plain(&settings_text);
         assert!(settings_plain.contains("Settings"));
         assert!(settings_plain.contains("encodeUrl: true"));
@@ -3226,7 +2686,6 @@ auth:basic {
                 view,
                 ast: Some(file),
             },
-            None,
             RequestTab::Auth,
         );
         let plain_custom = plain(&text);
@@ -3298,42 +2757,6 @@ auth:basic {
         let mut model = loaded_model((100, 30));
         select(&mut model, "broken.bru");
         assert!(detail_section_boxes(&model).is_empty(), "nœud en erreur");
-    }
-
-    /// La boîte du sélecteur de méthode n'existe dans la séquence de
-    /// lignes que pendant qu'il est ouvert, avec les 9 méthodes plus ses
-    /// deux lignes de bordure (`add-method-editing`).
-    #[test]
-    fn method_picker_box_exists_only_while_open() {
-        use crate::app::message::Message;
-        use crate::app::update::update;
-
-        let mut model = loaded_model((100, 30));
-        session_on(&mut model, "simple-get.bru");
-        assert!(
-            !detail_section_boxes(&model)
-                .iter()
-                .any(|b| b.title == "Méthode"),
-            "pas de sélecteur avant ouverture"
-        );
-
-        // Le curseur de champ par défaut est sur la Méthode : Entrée ouvre
-        // le sélecteur plutôt qu'une saisie.
-        update(&mut model, Message::Enter);
-        let boxes = detail_section_boxes(&model);
-        let picker = boxes
-            .iter()
-            .find(|b| b.title == "Méthode")
-            .expect("boîte du sélecteur");
-        assert_eq!(picker.line_count, 9 + 2);
-
-        update(&mut model, Message::CancelInput);
-        assert!(
-            !detail_section_boxes(&model)
-                .iter()
-                .any(|b| b.title == "Méthode"),
-            "sélecteur refermé"
-        );
     }
 
     #[test]
@@ -3679,23 +3102,40 @@ auth:basic {
             .expect("rendu 1x1");
     }
 
-    /// Hors session, une section vide affiche « aucun » dans le panneau Détail.
+    /// Une section vide affiche « aucun » et enregistre un `FieldLine`
+    /// pour `EditableField::AddRow` sur cette ligne : un clic y ouvre le
+    /// popup et commence un ajout.
     #[test]
-    fn empty_section_without_session_shows_aucun() {
+    fn empty_section_has_add_row_field_line_on_aucun() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         let Some(TreeNode::Request(request)) = model.selected_node() else {
             panic!("requête attendue");
         };
-        for tab in [
-            RequestTab::Headers,
-            RequestTab::Params,
-            RequestTab::Vars,
-            RequestTab::Assert,
+        for section in [
+            EntrySection::Headers,
+            EntrySection::QueryParams,
+            EntrySection::PathParams,
+            EntrySection::VarsPreRequest,
+            EntrySection::VarsPostResponse,
+            EntrySection::Assert,
         ] {
-            let (text, _, _) = request_text_and_fields(request, None, tab);
-            let rendered = plain(&text);
-            assert!(rendered.contains("aucun"), "l'onglet {tab:?} doit afficher 'aucun'");
+            // Chaque section est dans son onglet.
+            let tab = RequestTab::of_field(EditableField::AddRow(section)).expect("onglet");
+            let (text, fields, _) = request_text_and_fields(request, tab);
+            let field_line = fields
+                .iter()
+                .find(|fl| fl.field == EditableField::AddRow(section))
+                .unwrap_or_else(|| panic!("FieldLine pour AddRow({section:?}) manquant"));
+            assert_eq!(field_line.count, 1);
+            assert_eq!(field_line.prefix_width, 2);
+            let line_content = &text.lines[field_line.line];
+            let rendered: String = line_content
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert_eq!(rendered, "  aucun");
         }
     }
 
@@ -4153,103 +3593,13 @@ auth:basic {
     }
 
     #[test]
-    fn session_navigation_and_edits_for_assert_and_vars() {
-        use crate::app::message::{InputKey, Message};
-        use crate::app::update::update;
-
-        let mut model = loaded_model((100, 30));
-        session_on(&mut model, "scripted.bru");
-
-        // Trouver la position de AssertValue(0) dans la liste des champs
-        let assert_val0 = EditableField::AssertValue(0);
-        let assert_index = model
-            .editing
-            .as_ref()
-            .and_then(|s| s.fields.iter().position(|f| *f == assert_val0))
-            .expect("champ assert 0");
-
-        model.editing.as_mut().expect("session").cursor = assert_index;
-        assert_eq!(model.shown_request_tab(), RequestTab::Assert);
-
-        // Toggle avec Espace
-        update(&mut model, Message::ToggleField);
-        let text = plain(&detail_text(&model));
-        assert!(text.contains("res.status: eq 200 (désactivé)"), "{text}");
-
-        // Retoggle avec Espace
-        update(&mut model, Message::ToggleField);
-        let text = plain(&detail_text(&model));
-        assert!(text.contains("res.status: eq 200"), "{text}");
-        assert!(!text.contains("res.status: eq 200 (désactivé)"), "{text}");
-
-        // Aller sur AddRow(Assert)
-        let add_assert = EditableField::AddRow(EntrySection::Assert);
-        let add_index = model
-            .editing
-            .as_ref()
-            .and_then(|s| s.fields.iter().position(|f| *f == add_assert))
-            .expect("ligne add assert");
-        model.editing.as_mut().expect("session").cursor = add_index;
-        assert_eq!(model.shown_request_tab(), RequestTab::Assert);
-
-        // Saisir une nouvelle assertion avec espaces dans la clé : res.headers['content-type'] : isDefined
-        update(&mut model, Message::Enter);
-        for c in "res.headers['content-type']".chars() {
-            update(&mut model, Message::InputKey(InputKey::Char(c)));
-        }
-        update(&mut model, Message::ValidateInput);
-        for c in "isDefined".chars() {
-            update(&mut model, Message::InputKey(InputKey::Char(c)));
-        }
-        update(&mut model, Message::InputKey(InputKey::Enter));
-
-        let text = plain(&detail_text(&model));
-        assert!(
-            text.contains("res.headers['content-type']: isDefined"),
-            "{text}"
-        );
-
-        // Aller sur AddRow(VarsPreRequest)
-        let add_vars_pre = EditableField::AddRow(EntrySection::VarsPreRequest);
-        let add_vars_index = model
-            .editing
-            .as_ref()
-            .and_then(|s| s.fields.iter().position(|f| *f == add_vars_pre))
-            .expect("ligne add vars_pre");
-        model.editing.as_mut().expect("session").cursor = add_vars_index;
-        assert_eq!(model.shown_request_tab(), RequestTab::Vars);
-    }
-
-    #[test]
-    fn body_mode_rendering_and_picker_in_body_tab() {
-        use crate::app::message::Message;
-        use crate::app::update::update;
+    fn body_mode_rendering_in_body_tab() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         model.request_tab = RequestTab::Body;
         let text = plain(&detail_text(&model));
         assert!(text.contains("Mode du corps : none"), "{text}");
         assert!(text.contains("aucun"), "{text}");
-
-        // Démarrer l'édition et ouvrir le sélecteur de mode de corps
-        update(&mut model, Message::NextFocus); // Focus Detail
-        update(&mut model, Message::Enter); // Start Edit
-        let body_mode_idx = model
-            .editing
-            .as_ref()
-            .unwrap()
-            .fields
-            .iter()
-            .position(|f| *f == EditableField::BodyMode)
-            .unwrap();
-        model.editing.as_mut().unwrap().cursor = body_mode_idx;
-        update(&mut model, Message::Enter); // Open picker
-
-        let text = plain(&detail_text(&model));
-        assert!(text.contains("Mode du corps"), "{text}");
-        assert!(text.contains("json"), "{text}");
-        assert!(text.contains("formUrlEncoded"), "{text}");
-        assert!(text.contains("multipartForm"), "{text}");
     }
 
     #[test]

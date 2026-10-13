@@ -15,7 +15,7 @@ pub mod status;
 pub mod theme;
 pub mod tree;
 
-pub use edit_popup::{edit_popup_area, render_edit_popup};
+pub use edit_popup::{edit_popup_area, edit_popup_layout, render_edit_popup};
 pub use global_search::{global_search_popup_area, render_global_search_popup};
 pub use help::{help_max_scroll, help_popup_area};
 pub use panels::runner_options_popup_area;
@@ -29,11 +29,10 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 
 use super::model::{
     CampaignView, CollectionState, EditState, Focus, Model, PendingConfirm, PickerKind, RunFailure,
-    StatusMessage, section_entries,
+    StatusMessage,
 };
 use super::update::{active_tree_filter_pattern, is_tree_filtered};
 use crate::collection::TreeNode;
-use crate::writer::EntrySection;
 
 /// Largeur minimale du terminal : exactement la somme des planchers de
 /// l'arbre, du détail et de la réponse (`MIN_TREE_WIDTH +
@@ -407,16 +406,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
 
     if let Some(session) = &model.editing {
-        let popup_area = edit_popup::edit_popup_area(frame.area(), session);
-        frame.render_widget(Clear, popup_area);
-        frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
-        edit_popup::render_edit_popup(model, session, frame, popup_area);
-        if let EditState::PlaintextSecretPrompt { var_name, .. } = &session.state {
-            let prompt_area = plaintext_secret_popup_area(frame.area());
-            frame.render_widget(Clear, prompt_area);
-            frame.render_widget(Block::default().style(theme::BACKGROUND), prompt_area);
-            render_plaintext_secret_popup(var_name, frame, prompt_area);
-        }
+        render_edit_popup(session, frame);
     }
 
     frame.render_widget(
@@ -801,73 +791,40 @@ fn status_message_text(message: &StatusMessage) -> String {
     }
 }
 
-/// Barre d'aide d'une session d'édition : état, champ, indicateur de
-/// modification non enregistrée et touches utiles à l'état.
+/// Barre d'aide pendant le popup d'édition : état, champ, indicateur de
+/// modification non enregistrée, puis les mêmes touches que la dernière
+/// ligne du popup.
 fn session_help_line(session: &crate::app::model::EditSession) -> String {
-    use crate::app::model::{EditableField, InputTarget, section_label};
+    use crate::app::model::{InputTarget, section_label};
 
-    let field = session.current_field();
-    let field_name = field.map_or_else(String::new, |f| f.display_name(&session.preview));
+    let field_name = session
+        .current_field()
+        .map_or_else(String::new, |f| f.display_name(&session.preview));
     let unsaved = if session.has_unsaved() {
         " ● non enregistré"
     } else {
         ""
     };
-    match &session.state {
-        EditState::FieldSelect => {
-            let keys = match field {
-                Some(EditableField::AddRow(_)) => {
-                    "↑↓ champ  Entrée ajouter  Ctrl+S enregistrer  Échap fermer"
-                }
-                // Les clés de `settings` sont fixées par Bruno : seule la
-                // valeur se modifie.
-                Some(EditableField::SettingsValue(_)) => {
-                    "↑↓ champ  Entrée modifier  Ctrl+S enregistrer  Échap fermer"
-                }
-                // Les entrées `@file(...)` de multipart sont en lecture seule :
-                // seules la bascule d'activation et la suppression sont permises.
-                Some(EditableField::MultipartFormValue(index))
-                    if section_entries(&session.preview, EntrySection::MultipartForm)
-                        .get(index)
-                        .is_some_and(|kv| kv.value.trim_start().starts_with("@file(")) =>
-                {
-                    "↑↓ champ  Espace activer  d supprimer  Ctrl+S enregistrer  Échap fermer"
-                }
-                Some(f) if f.entry().is_some() => {
-                    "↑↓ champ  Entrée modifier  Espace activer  a ajouter  d supprimer  c renommer  Ctrl+S enregistrer  Échap fermer"
-                }
-                _ => "↑↓ champ  Entrée modifier  Ctrl+S enregistrer  Échap fermer",
-            };
-            format!("Sélection · {field_name}{unsaved} — {keys}")
-        }
-        EditState::Input(input) => {
-            let label = match &session.target {
-                InputTarget::Field => field_name,
-                InputTarget::NewKey { section, .. } => {
-                    format!("Ajout · {} · clé", section_label(*section))
-                }
-                InputTarget::NewValue { section, key, .. } => {
-                    format!("Ajout · {} · valeur de {key}", section_label(*section))
-                }
-                InputTarget::RenameKey { .. } => format!("Renommage · {field_name}"),
-            };
-            let keys = if input.is_multiline() {
-                "Entrée nouvelle ligne  Tab valider  Échap annuler  Ctrl+S enregistrer"
-            } else {
-                "Entrée valider  Tab valider  Échap annuler  Ctrl+S enregistrer"
-            };
-            format!("Saisie · {label}{unsaved} — {keys}")
-        }
-        EditState::Picker { kind, .. } => {
-            let title = picker_title(*kind);
-            format!("{title} · {field_name}{unsaved} — ↑↓ choisir  Entrée valider  Échap annuler")
-        }
-        EditState::PlaintextSecretPrompt { var_name, .. } => {
-            format!(
-                "Secret en clair — Entrée remplacer par {{{{{var_name}}}}}  g garder  Échap revenir"
-            )
-        }
-    }
+    let keys = edit_popup::help_chunks(session).join("  ");
+    let label = match &session.state {
+        EditState::FieldSelect => format!("Sélection · {field_name}"),
+        EditState::Input(_) => match &session.target {
+            InputTarget::Field => format!("Saisie · {field_name}"),
+            InputTarget::NewKey { section, .. } => {
+                format!("Saisie · Ajout · {} · clé", section_label(*section))
+            }
+            InputTarget::NewValue { section, key, .. } => {
+                format!(
+                    "Saisie · Ajout · {} · valeur de {key}",
+                    section_label(*section)
+                )
+            }
+            InputTarget::RenameKey { .. } => format!("Saisie · Renommage · {field_name}"),
+        },
+        EditState::Picker { kind, .. } => format!("{} · {field_name}", picker_title(*kind)),
+        EditState::PlaintextSecretPrompt { .. } => "Secret en clair".to_owned(),
+    };
+    format!("{label}{unsaved} — {keys}")
 }
 
 /// Titre de la barre d'aide pendant un sélecteur.
@@ -1283,48 +1240,6 @@ fn render_line_numbers(
         }
         row += height;
     }
-}
-
-/// Calcule la zone centrée du popup d'avertissement de secret en clair.
-pub fn plaintext_secret_popup_area(screen: Rect) -> Rect {
-    let width = 68.min(screen.width.saturating_sub(4)).max(40);
-    let height = 6.min(screen.height.saturating_sub(2)).max(5);
-    let x = screen.x + screen.width.saturating_sub(width) / 2;
-    let y = screen.y + screen.height.saturating_sub(height) / 2;
-    Rect {
-        x,
-        y,
-        width,
-        height,
-    }
-}
-
-/// Rendu du popup d'avertissement de secret en clair (§ 5 spec).
-pub fn render_plaintext_secret_popup(var_name: &str, frame: &mut Frame, area: Rect) {
-    let block = Block::bordered()
-        .title(" Secret en clair ")
-        .border_style(Style::new().fg(Color::Yellow));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let lines = vec![
-        Line::raw("Secret en clair dans le fichier .bru (souvent partagé via git)."),
-        Line::from(vec![
-            Span::styled("  Entrée  ", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "remplacer par {{{{{var_name}}}}}",
-                var_name = var_name
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("  g       ", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw("garder en clair"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Échap   ", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw("revenir à la saisie"),
-        ]),
-    ];
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 #[cfg(test)]
@@ -1837,7 +1752,8 @@ mod tests {
         let line = status_line(&model);
         assert!(line.contains("Saisie · Corps"), "{line}");
         assert!(line.contains("Entrée nouvelle ligne"), "{line}");
-        assert!(line.contains("Tab valider"), "{line}");
+        // `Tab` sort de la zone de texte (`docs/edition-popups.md` § 3.2).
+        assert!(line.contains("Tab sortir"), "{line}");
         // Indicateur effacé après une sauvegarde réussie.
         update(
             &mut model,

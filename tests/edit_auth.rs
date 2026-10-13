@@ -85,6 +85,15 @@ fn spawn_run(
     })
 }
 
+/// Affiche l'onglet Auth (`→` `right` fois depuis l'onglet affiché) et
+/// ouvre son popup d'édition (`Entrée`) : le curseur est sur le mode.
+async fn open_auth_popup(sender: &mpsc::Sender<AppEvent>, right: usize) {
+    for _ in 0..right {
+        sender.send(key(KeyCode::Right)).await.expect("right");
+    }
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
+}
+
 #[tokio::test]
 async fn edit_auth_mode_and_token_on_request_and_save() {
     let dir = workdir("request-bearer");
@@ -95,19 +104,10 @@ async fn edit_auth_mode_and_token_on_request_and_save() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // 1. Passer au détail (Tab) et ouvrir l'édition (Entrée)
+    // 1. Passer au détail (Tab), afficher l'onglet Auth (→ ×3 depuis
+    // Params) et ouvrir son popup (Entrée) : curseur sur le mode.
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
-
-    // 2. Naviguer vers AuthMode :
-    // Dans simple.bru : Method (0), Url (1), Headers (2..N, AddRow), Query/Path AddRow, AuthMode
-    // Utiliser Down pour atteindre AuthMode ou naviguer dans les champs
-    // Dans simple.bru :
-    // fields: [Method, Url, AddRow(Headers), AddRow(QueryParams), AddRow(PathParams), AuthMode, ...]
-    // Donc: Down 5 fois amène à AuthMode.
-    for _ in 0..5 {
-        sender.send(key(KeyCode::Down)).await.expect("down");
-    }
+    open_auth_popup(&sender, 3).await;
 
     // 3. Ouvrir le sélecteur de mode d'auth (Entrée)
     sender.send(key(KeyCode::Enter)).await.expect("enter");
@@ -177,14 +177,9 @@ async fn edit_auth_apikey_placement_via_picker_and_save() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Passer au détail et ouvrir l'édition
+    // Passer au détail et ouvrir le popup Auth, curseur sur le mode
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
-
-    // Naviguer vers AuthMode (5 crans)
-    for _ in 0..5 {
-        sender.send(key(KeyCode::Down)).await.expect("down");
-    }
+    open_auth_popup(&sender, 3).await;
 
     // Ouvrir le sélecteur de mode d'auth
     sender.send(key(KeyCode::Enter)).await.expect("enter");
@@ -252,15 +247,10 @@ async fn edit_auth_mode_on_folder_and_save() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // 1. Passer au détail (Tab) et ouvrir l'édition (Entrée)
+    // 1. Passer au détail (Tab) et ouvrir le popup Auth du dossier :
+    // l'onglet affiché est En-têtes, Auth est juste à droite.
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
-
-    // 2. Dans un dossier avec 1 header :
-    // fields: [HeaderValue(0), AddRow(Headers), AuthMode, ...]
-    // Descendre de 2 crans pour atteindre AuthMode
-    sender.send(key(KeyCode::Down)).await.expect("down");
-    sender.send(key(KeyCode::Down)).await.expect("down");
+    open_auth_popup(&sender, 1).await;
 
     // 3. Ouvrir le sélecteur de mode d'auth (Entrée)
     sender.send(key(KeyCode::Enter)).await.expect("enter");
@@ -357,14 +347,9 @@ auth:basic {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // 1. Ouvrir l'édition
+    // 1. Ouvrir le popup Auth, curseur sur le mode
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
-
-    // 2. Naviguer vers AuthMode (5 crans vers le bas)
-    for _ in 0..5 {
-        sender.send(key(KeyCode::Down)).await.expect("down");
-    }
+    open_auth_popup(&sender, 3).await;
 
     // 3. Ouvrir le sélecteur de mode d'auth (Entrée)
     sender.send(key(KeyCode::Enter)).await.expect("enter");
@@ -463,14 +448,10 @@ auth:bearer {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // 1. Ouvrir l'édition
+    // 1. Ouvrir le popup Auth, puis descendre du mode au token
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
-
-    // 2. Naviguer vers AuthMode (5 crans), puis vers token (1 cran supplémentaire = 6 crans)
-    for _ in 0..6 {
-        sender.send(key(KeyCode::Down)).await.expect("down");
-    }
+    open_auth_popup(&sender, 3).await;
+    sender.send(key(KeyCode::Down)).await.expect("down");
 
     // 3. Ouvrir la saisie du token (Entrée)
     sender.send(key(KeyCode::Enter)).await.expect("enter");

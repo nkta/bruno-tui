@@ -7,17 +7,20 @@ use super::scroll::{
     select_request_tab,
 };
 use super::{
-    Command, Validation, begin_input, cancel_input, open_environment_editing, refresh_rows,
-    scroll_tree_into_view, select_environment_picker, select_row, selected_folder, start_edit,
-    toggle_environment_picker, tree_height, validate_input,
+    Command, Validation, begin_input, cancel_input, open_environment_editing, open_popup_on,
+    refresh_rows, scroll_edit_into_view, scroll_tree_into_view, select_environment_picker,
+    select_row, selected_folder, toggle_environment_picker, tree_height, validate_input,
 };
 use crate::app::message::{Message, MouseInput, MouseKind, TextCapture};
 use crate::app::model::{
-    DetailSelection, Drag, DragPanel, EditState, EditableField, EnvironmentEditState, Focus, Model,
+    DetailSelection, Drag, DragPanel, EditState, EditableField, EnvironmentEditState, Focus,
+    InputTarget, Model,
 };
-use crate::app::view::detail::{detail_text_fields_boxes, field_at_line};
+use crate::app::view::detail::field_at_line;
 use crate::app::view::hit::{DragRow, Hit, drag_row, hit_test};
-use crate::app::view::{environment_chip_area, environment_edit_popup_area, inner, layout_for};
+use crate::app::view::{
+    edit_popup_layout, environment_chip_area, environment_edit_popup_area, inner, layout_for,
+};
 
 // --- Souris (`mouse-support`) ---------------------------------------------
 
@@ -69,19 +72,9 @@ pub(crate) fn mouse_accepted(model: &Model) -> bool {
         && layout_for(model.size, model.zoomed_panel()).is_some()
 }
 
-/// Lignes logiques du champ en cours de saisie, s'il y en a un.
-fn input_field_lines(model: &Model) -> Option<std::ops::Range<usize>> {
-    let session = model.editing.as_ref()?;
-    if !matches!(session.state, EditState::Input(_)) {
-        return None;
-    }
-    let field = session.current_field()?;
-    let (_, fields, _) = detail_text_fields_boxes(model);
-    let location = fields.into_iter().find(|l| l.field == field)?;
-    Some(location.line..location.line + location.count)
-}
-
 fn mouse_press(model: &mut Model, input: MouseInput) {
+    // Popup d'édition : modal, il capture tous les clics
+    // (`docs/edition-popups.md` § 2).
     if model.editing.is_some() {
         edit_popup_mouse_press(model, input);
         return;
@@ -118,18 +111,6 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
     let Some(hit) = hit_test(model, input.column, input.row) else {
         return;
     };
-    if let Some(range) = input_field_lines(model) {
-        if let Hit::Detail { line: Some(line) } = hit
-            && range.contains(&usize::from(line))
-        {
-            return;
-        }
-        // Comme Tab : si la saisie reste ouverte (refus, ou clé d'ajout
-        // validée et saisie de la valeur), le clic s'arrête là.
-        if !matches!(validate_input(model, false), Validation::Done) {
-            return;
-        }
-    }
     model.mouse.drag = None;
     match hit {
         Hit::TreeHeader => {
@@ -167,12 +148,10 @@ fn mouse_press(model: &mut Model, input: MouseInput) {
         Hit::UrlBar { field } => {
             begin_input_at(model, field);
         }
-        // Clic sur un onglet du détail, hors session d'édition.
+        // Clic sur un onglet du détail.
         Hit::RequestTab(tab) => {
             model.focus = Focus::Detail;
-            if model.editing.is_none() {
-                select_request_tab(model, tab);
-            }
+            select_request_tab(model, tab);
         }
     }
 }
@@ -227,36 +206,45 @@ fn environment_panel_mouse_press(model: &mut Model, index: usize) {
     }
 }
 
+/// Clic gauche pendant que le popup d'édition est ouvert : un clic sur
+/// une ligne la sélectionne, un clic hors du popup ne fait rien. Une liste
+/// ouverte se referme sans rien changer, comme `Échap`. Une saisie en
+/// cours sur une autre ligne est d'abord validée, comme avec `Tab` ; si
+/// elle reste ouverte (refus, ou clé d'ajout validée), le clic s'arrête là.
 fn edit_popup_mouse_press(model: &mut Model, input: MouseInput) {
-    let Some(session) = &mut model.editing else {
+    let screen = Rect::new(0, 0, model.size.0, model.size.1);
+    let Some(session) = &model.editing else {
         return;
     };
     if matches!(session.state, EditState::Picker { .. }) {
         cancel_input(model);
         return;
     }
-    let screen = Rect::new(0, 0, model.size.0, model.size.1);
-    let popup = crate::app::view::edit_popup_area(screen, session);
-    let inner_popup = inner(popup);
-    let pos = Position::new(input.column, input.row);
-    if !inner_popup.contains(pos) {
-        // Clic hors du popup : ne fait rien
+    let layout = edit_popup_layout(screen, session);
+    if !layout.body.contains(Position::new(input.column, input.row)) {
         return;
     }
-    let row_idx = usize::from(input.row.saturating_sub(inner_popup.y)) + session.scroll;
-
+    let line = layout.scroll + usize::from(input.row - layout.body.y);
+    let Some(field) = layout.content.field_at_line(line) else {
+        return;
+    };
     if matches!(session.state, EditState::Input(_)) {
-        if !matches!(validate_input(model, false), Validation::Done) {
+        let on_edited_value =
+            session.target == InputTarget::Field && session.current_field() == Some(field);
+        if on_edited_value || !matches!(validate_input(model, false), Validation::Done) {
             return;
         }
     }
-
-    if let Some(session) = &mut model.editing {
-        if row_idx < session.fields.len() {
-            session.cursor = row_idx;
-            begin_input(model);
-        }
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    if session.state != EditState::FieldSelect {
+        return;
     }
+    if let Some(index) = session.fields.iter().position(|f| *f == field) {
+        session.cursor = index;
+    }
+    scroll_edit_into_view(model);
 }
 
 /// Clic gauche dans le popup d'édition d'un environnement : démarre la
@@ -373,41 +361,42 @@ fn mouse_release(model: &mut Model) -> Command {
     }
 }
 
-/// Clic sur un champ éditable : ouvre la session si besoin, place le
-/// curseur de champ et commence la saisie, comme `Entrée`.
+/// Clic sur un champ du détail ou de la barre d'URL : ouvre le popup qui
+/// l'édite, curseur sur ce champ, et commence sa saisie comme `Entrée`
+/// (liste d'un choix) ; un bloc édité dans l'éditeur externe est
+/// seulement sélectionné.
 fn begin_input_at(model: &mut Model, field: EditableField) -> Command {
     model.focus = Focus::Detail;
-    if model.editing.is_none() {
-        if matches!(field, EditableField::Method | EditableField::Url) {
-            super::start_request_edit(model);
-        } else {
-            start_edit(model);
-        }
-    }
-    let Some(session) = &mut model.editing else {
-        return Command::None;
-    };
-    if session.state != EditState::FieldSelect {
+    if !open_popup_on(model, field) {
         return Command::None;
     }
-    let Some(index) = session.fields.iter().position(|f| *f == field) else {
-        return Command::None;
-    };
-    session.cursor = index;
-    begin_input(model)
+    match field {
+        EditableField::ScriptPreRequest
+        | EditableField::ScriptPostResponse
+        | EditableField::Tests
+        | EditableField::Docs => Command::None,
+        _ => begin_input(model),
+    }
 }
 
 fn mouse_wheel(model: &mut Model, input: MouseInput, up: bool) {
+    // Popup d'édition : la molette fait défiler son contenu, sans bouger
+    // le curseur de champ ; hors du popup, elle ne fait rien.
     if let Some(session) = &mut model.editing {
         let screen = Rect::new(0, 0, model.size.0, model.size.1);
-        let popup = crate::app::view::edit_popup_area(screen, session);
-        if popup.contains(Position::new(input.column, input.row)) {
+        let layout = edit_popup_layout(screen, session);
+        if layout.area.contains(Position::new(input.column, input.row)) {
             let lines = usize::from(WHEEL_LINES);
-            if up {
-                session.scroll = session.scroll.saturating_sub(lines);
+            let max = layout
+                .content
+                .lines
+                .len()
+                .saturating_sub(usize::from(layout.body.height));
+            session.scroll = if up {
+                layout.scroll.saturating_sub(lines)
             } else {
-                session.scroll = session.scroll.saturating_add(lines);
-            }
+                (layout.scroll + lines).min(max)
+            };
         }
         return;
     }
@@ -450,7 +439,7 @@ mod tests {
     use super::*;
     use crate::app::message::InputKey;
     use crate::app::model::{
-        EnvironmentEditSession, InputTarget, MouseState, PendingConfirm, RequestTab, ResponseTab,
+        EditScope, EnvironmentEditSession, MouseState, PendingConfirm, RequestTab, ResponseTab,
         field_value,
     };
     use crate::app::test_support::{loaded_model, runner_probe_model, select, selected_name};
@@ -540,25 +529,16 @@ mod tests {
             .unwrap_or_else(|| panic!("ligne {line} non visible"))
     }
 
-    /// Ligne logique d'un champ dans le détail, après avoir affiché son
-    /// onglet (hors session ; en session, l'onglet suit le curseur).
+    /// Ligne logique d'un champ dans le détail en lecture seule, après
+    /// avoir affiché son onglet.
     fn field_line(model: &mut Model, field: EditableField) -> u16 {
-        // L'onglet choisi n'est affiché que hors session, ou en session
-        // quand le curseur est sur la méthode ou l'URL.
-        let chosen_is_shown = model
-            .editing
-            .as_ref()
-            .and_then(EditSession::current_field)
-            .and_then(RequestTab::of_field)
-            .is_none();
-        if chosen_is_shown && let Some(tab) = RequestTab::of_field(field) {
+        if let Some(tab) = RequestTab::of_field(field) {
             model.request_tab = tab;
         }
         let Some(TreeNode::Request(request)) = model.selected_node() else {
             panic!("requête attendue");
         };
-        let session = model.editing.as_ref().filter(|s| s.path == request.path);
-        let (_, fields, _) = request_text_and_fields(request, session, model.shown_request_tab());
+        let (_, fields, _) = request_text_and_fields(request, model.shown_request_tab());
         let location = fields
             .into_iter()
             .find(|l| l.field == field)
@@ -566,11 +546,23 @@ mod tests {
         u16::try_from(location.line).expect("petit")
     }
 
-    /// Position écran d'un champ : hors session, Méthode et URL sont dans
-    /// la barre d'URL ; les autres champs, et tous pendant une session,
-    /// dans le détail.
+    /// Position écran d'un champ : dans le popup d'édition s'il est ouvert ;
+    /// sinon Méthode et URL dans la barre d'URL, les autres champs dans le
+    /// détail.
     fn field_point(model: &mut Model, field: EditableField) -> (u16, u16) {
-        if model.editing.is_none() && matches!(field, EditableField::Method | EditableField::Url) {
+        if let Some(session) = &model.editing {
+            let screen = Rect::new(0, 0, model.size.0, model.size.1);
+            let layout = edit_popup_layout(screen, session);
+            let rows = layout
+                .content
+                .fields
+                .iter()
+                .find(|rows| rows.field == field)
+                .expect("champ dans le popup");
+            let line = u16::try_from(rows.line - layout.scroll).expect("visible");
+            return (layout.body.x + 1, layout.body.y + line);
+        }
+        if matches!(field, EditableField::Method | EditableField::Url) {
             let areas = layout_for(model.size, model.zoomed_panel()).expect("taille");
             let bar = inner(areas.url_bar);
             let (method, _) = crate::app::view::detail::url_bar_values(model).expect("requête");
@@ -587,15 +579,6 @@ mod tests {
                 EditableField::Method => (bar.x, bar.y),
                 _ => (url_x + 1, bar.y),
             };
-        }
-        if let Some(session) = &model.editing {
-            let screen = Rect::new(0, 0, model.size.0, model.size.1);
-            let popup = crate::app::view::edit_popup_area(screen, session);
-            let inner_popup = inner(popup);
-            if let Some(idx) = session.fields.iter().position(|f| *f == field) {
-                let y = inner_popup.y + (idx as u16).saturating_sub(session.scroll as u16);
-                return (inner_popup.x + 2, y);
-            }
         }
         let line = field_line(model, field);
         line_point(model, true, line)
@@ -794,72 +777,93 @@ mod tests {
         assert_eq!(model.tree.selected, 4);
     }
 
-    // --- Session d'édition -------------------------------------------------
+    // --- Popup d'édition ---------------------------------------------------
 
+    /// Popup Requête ouvert sur post-json (`m`).
     fn session_on_post_json() -> Model {
         let mut model = model_on("post-json.bru", (140, 40));
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::OpenRequestEdit);
         assert!(model.editing.is_some());
         model
     }
 
+    /// Un clic hors du popup ne fait rien, popup propre, modifié ou en
+    /// saisie (`docs/edition-popups.md` § 2).
     #[test]
-    fn clean_session_closes_when_another_node_is_clicked() {
+    fn click_outside_the_popup_does_nothing() {
+        let response = |model: &Model| {
+            let area = inner(
+                layout_for(model.size, model.zoomed_panel())
+                    .expect("taille")
+                    .response,
+            );
+            (area.x, area.y + area.height - 1)
+        };
+        let check = |model: &mut Model| {
+            let before = model.editing.clone().map(|s| (s.state, s.cursor, s.dirty));
+            let tree = tree_point(model, "simple-get.bru");
+            click(model, tree);
+            let response = response(model);
+            click(model, response);
+            event(model, MouseKind::WheelDown, tree);
+            assert_eq!(
+                model.editing.clone().map(|s| (s.state, s.cursor, s.dirty)),
+                before
+            );
+            assert_eq!(selected_name(model), "post-json");
+            assert_eq!(model.focus, Focus::Detail);
+            assert_eq!(model.tree.offset, 0);
+            assert!(model.last_status.is_none());
+        };
+        // Propre.
         let mut model = session_on_post_json();
-        let point = tree_point(&model, "simple-get.bru");
-        click(&mut model, point);
-        assert!(model.editing.is_none());
-        assert_eq!(selected_name(&model), "ping");
-        assert_eq!(model.focus, Focus::Tree);
-    }
-
-    #[test]
-    fn modified_session_refuses_the_clicked_node() {
-        let mut model = session_on_post_json();
+        check(&mut model);
+        // Modifié.
         move_to(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('!')));
         update(&mut model, Message::ValidateInput);
-        let point = tree_point(&model, "simple-get.bru");
-        click(&mut model, point);
-        assert_eq!(selected_name(&model), "post-json");
-        assert_eq!(model.focus, Focus::Tree);
-        assert!(model.editing.as_ref().is_some_and(|s| s.dirty));
-        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
+        check(&mut model);
+        // En saisie.
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::InputKey(InputKey::Char('?')));
+        check(&mut model);
+        assert_eq!(
+            input_text(&model).as_deref(),
+            Some("https://{{host}}/items!?")
+        );
     }
 
+    /// Un clic sur une autre ligne du popup valide d'abord la saisie en
+    /// cours, comme `Tab`, puis sélectionne la ligne sans la saisir.
     #[test]
-    fn input_is_validated_before_a_click_in_the_tree() {
+    fn input_is_validated_before_a_click_on_another_line() {
         let mut model = session_on_post_json();
         move_to(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('!')));
-        let point = tree_point(&model, "simple-get.bru");
+        let point = field_point(&mut model, EditableField::Method);
         click(&mut model, point);
         let session = model.editing.as_ref().expect("session");
         assert!(session.dirty);
-        assert_eq!(session.state, EditState::FieldSelect);
-        assert_eq!(selected_name(&model), "post-json");
-        assert_eq!(model.focus, Focus::Tree);
-        assert!(matches!(model.last_status, Some(StatusMessage::EditLocked)));
-    }
-
-    #[test]
-    fn unchanged_input_ends_on_a_click_in_the_response() {
-        let mut model = session_on_post_json();
-        move_to(&mut model, EditableField::HeaderValue(0));
-        update(&mut model, Message::Enter);
-        let response = inner(
-            layout_for(model.size, model.zoomed_panel())
-                .expect("taille")
-                .response,
+        assert!(
+            session
+                .pending
+                .contains(&FieldEdit::Url("https://{{host}}/items!".into()))
         );
-        click(&mut model, (response.x, response.y));
+        assert_eq!(session.state, EditState::FieldSelect);
+        assert_eq!(current_field(&model), Some(EditableField::Method));
+
+        // Saisie inchangée : elle se termine sans rien marquer.
+        let mut model = session_on_post_json();
+        move_to(&mut model, EditableField::Url);
+        update(&mut model, Message::Enter);
+        let point = field_point(&mut model, EditableField::Method);
+        click(&mut model, point);
         let session = model.editing.as_ref().expect("session");
         assert!(!session.dirty);
         assert_eq!(session.state, EditState::FieldSelect);
-        assert_eq!(model.focus, Focus::Response);
     }
 
     #[test]
@@ -951,20 +955,31 @@ mod tests {
         assert!(model.tree.offset <= 1);
     }
 
+    /// Molette dans le popup : son contenu défile, le curseur de champ ne
+    /// bouge pas ; sur le détail dessous, rien.
     #[test]
-    fn wheel_in_a_session_keeps_the_field_cursor() {
-        let mut model = model_on("scripted.bru", (100, 12));
+    fn wheel_in_the_popup_keeps_the_field_cursor() {
+        let mut model = model_on("post-json.bru", (100, 12));
+        model.request_tab = RequestTab::Body;
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::Enter);
         let cursor = model.editing.as_ref().map(|s| s.cursor);
-        let detail = inner(
-            layout_for(model.size, model.zoomed_panel())
-                .expect("taille")
-                .detail,
+        let screen = Rect::new(0, 0, 100, 12);
+        let layout = edit_popup_layout(screen, model.editing.as_ref().expect("popup"));
+        let max = layout
+            .content
+            .lines
+            .len()
+            .saturating_sub(usize::from(layout.body.height));
+        assert!(max >= 1, "corps plus haut que le popup");
+        event(
+            &mut model,
+            MouseKind::WheelDown,
+            (layout.body.x, layout.body.y),
         );
-        event(&mut model, MouseKind::WheelDown, (detail.x, detail.y));
-        assert_eq!(model.detail_scroll, 3);
+        assert_eq!(model.editing.as_ref().map(|s| s.scroll), Some(3.min(max)));
         assert_eq!(model.editing.as_ref().map(|s| s.cursor), cursor);
+        assert_eq!(model.detail_scroll, 0);
     }
 
     // --- Glisser --------------------------------------------------------------
@@ -1102,10 +1117,12 @@ mod tests {
             "méthode inchangée par le clic de fermeture"
         );
 
-        // Second clic, sur l'URL : la souris n'est pas restée bloquée.
+        // Second clic, sur l'URL : la souris n'est pas restée bloquée ;
+        // la ligne est sélectionnée, `Entrée` la saisit.
         let url_point = field_point(&mut model, EditableField::Url);
         click(&mut model, url_point);
         assert_eq!(current_field(&model), Some(EditableField::Url));
+        update(&mut model, Message::Enter);
         assert_eq!(
             input_text(&model).as_deref(),
             Some("https://{{host}}/items")
@@ -1125,29 +1142,30 @@ mod tests {
     }
 
     #[test]
-    fn click_on_a_field_from_field_select_and_from_another_input() {
-        let mut model = session_on_post_json();
+    fn click_on_a_field_of_the_detail_opens_its_popup_in_input() {
+        let mut model = model_on("post-json.bru", (140, 40));
         let point = field_point(&mut model, EditableField::HeaderValue(0));
         click(&mut model, point);
+        let session = model.editing.as_ref().expect("popup");
+        assert_eq!(session.scope, EditScope::Tab(RequestTab::Headers));
         assert_eq!(current_field(&model), Some(EditableField::HeaderValue(0)));
         assert_eq!(input_text(&model).as_deref(), Some("application/json"));
 
-        // Saisie de l'URL modifiée, puis clic sur l'en-tête.
-        let mut model = session_on_post_json();
-        move_to(&mut model, EditableField::Url);
-        update(&mut model, Message::Enter);
-        update(&mut model, Message::InputKey(InputKey::Char('!')));
-        let point = field_point(&mut model, EditableField::HeaderValue(0));
-        click(&mut model, point);
-        let session = model.editing.as_ref().expect("session");
-        assert!(session.dirty);
-        assert!(
-            session
-                .pending
-                .contains(&FieldEdit::Url("https://{{host}}/items!".into()))
+        // Script : le popup s'ouvre sur le bloc, sans lancer l'éditeur.
+        let mut model = model_on("scripted.bru", (140, 40));
+        let point = field_point(&mut model, EditableField::ScriptPreRequest);
+        assert!(matches!(
+            {
+                event(&mut model, MouseKind::Press, point);
+                event(&mut model, MouseKind::Release, point)
+            },
+            Command::None
+        ));
+        assert_eq!(current_field(&model), Some(EditableField::ScriptPreRequest));
+        assert_eq!(
+            model.editing.as_ref().map(|s| s.state.clone()),
+            Some(EditState::FieldSelect)
         );
-        assert_eq!(current_field(&model), Some(EditableField::HeaderValue(0)));
-        assert_eq!(input_text(&model).as_deref(), Some("application/json"));
     }
 
     #[test]
@@ -1323,18 +1341,23 @@ mod tests {
         assert!(matches!(model.last_status, Some(StatusMessage::Copied)));
     }
 
+    /// Popup ouvert : glisser sur le détail dessous ne sélectionne rien et
+    /// `y` ne copie rien.
     #[test]
-    fn y_in_field_select_copies_without_starting_input() {
+    fn no_drag_selection_nor_copy_under_the_popup() {
         let mut model = session_on_post_json();
-        let start = line_point(&model, true, 0);
-        let end = line_point(&model, true, 1);
+        let detail = inner(
+            layout_for(model.size, model.zoomed_panel())
+                .expect("taille")
+                .detail,
+        );
+        let start = (detail.x, detail.y + detail.height - 2);
+        let end = (detail.x, detail.y + detail.height - 1);
         event(&mut model, MouseKind::Press, start);
         event(&mut model, MouseKind::Drag, end);
         event(&mut model, MouseKind::Release, end);
-        assert!(matches!(
-            update(&mut model, Message::Yank),
-            Command::CopyToClipboard { .. }
-        ));
+        assert!(model.detail_selection.is_none());
+        assert!(matches!(update(&mut model, Message::Yank), Command::None));
         assert_eq!(
             model.editing.as_ref().map(|s| s.state.clone()),
             Some(EditState::FieldSelect)

@@ -180,9 +180,9 @@ async fn save_does_not_block_the_interface_during_slow_write() {
     // Attente du chargement initial
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Navigation : passer au détail (Tab), ouvrir l'édition (Entrée)
+    // Navigation : passer au détail (Tab), ouvrir le popup Requête (m)
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
+    sender.send(key(KeyCode::Char('m'))).await.expect("m");
 
     // Méthode -> URL, puis saisie de l'URL (Entrée), frappe d'un caractère,
     // validation (Tab)
@@ -203,8 +203,12 @@ async fn save_does_not_block_the_interface_during_slow_write() {
     .await
     .expect("join blocking");
 
-    // Pendant que l'écriture est bloquée par la barrière : l'interface doit rester réactive !
-    // On envoie 'y' (Yank) qui produit un effet immédiat via le SpyClipboard.
+    // Pendant que l'écriture est bloquée par la barrière : l'interface doit
+    // rester réactive ! Le popup, modal, attend le résultat : on le ferme
+    // (Échap, puis y pour abandonner), puis on envoie 'y' (Yank) dans le
+    // détail, qui produit un effet immédiat via le SpyClipboard.
+    sender.send(key(KeyCode::Esc)).await.expect("esc");
+    sender.send(key(KeyCode::Char('y'))).await.expect("discard");
     sender.send(key(KeyCode::Char('y'))).await.expect("yank");
 
     let copied_text = tokio::task::spawn_blocking(move || {
@@ -255,8 +259,8 @@ async fn save_url_matches_expected_after_file_byte_for_byte() {
 
     // Aller sur le focus Détail (Tab)
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    // Ouvrir la session d'édition (Entrée)
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
+    // Ouvrir le popup Requête (m)
+    sender.send(key(KeyCode::Char('m'))).await.expect("m");
     // Méthode -> URL, puis commencer la saisie de l'URL (Entrée)
     sender.send(key(KeyCode::Down)).await.expect("down");
     sender.send(key(KeyCode::Enter)).await.expect("enter");
@@ -319,9 +323,9 @@ async fn stale_file_refusal_keeps_screen_state_and_shows_conflict_message() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Focus Détail (Tab) et ouvrir édition (Entrée)
+    // Focus Détail (Tab) et ouvrir le popup Requête (m)
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
+    sender.send(key(KeyCode::Char('m'))).await.expect("m");
 
     // Modifier l'URL en mémoire (validée par Entrée) ; Méthode -> URL
     sender.send(key(KeyCode::Down)).await.expect("down");
@@ -388,8 +392,10 @@ async fn cancelled_input_and_closed_session_never_write() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
+    // Popup Requête (m), curseur sur l'URL.
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
+    sender.send(key(KeyCode::Char('m'))).await.expect("m");
+    sender.send(key(KeyCode::Down)).await.expect("down");
 
     // Saisie annulée par Échap : `q` tapé est du texte, pas une sortie.
     sender.send(key(KeyCode::Enter)).await.expect("enter");
@@ -398,7 +404,7 @@ async fn cancelled_input_and_closed_session_never_write() {
     }
     sender.send(key(KeyCode::Esc)).await.expect("esc");
 
-    // Saisie validée puis session fermée en abandonnant (Échap, y).
+    // Saisie validée puis popup fermé en abandonnant (Échap, y).
     sender.send(key(KeyCode::Enter)).await.expect("enter");
     sender.send(key(KeyCode::Char('Z'))).await.expect("char");
     sender.send(key(KeyCode::Tab)).await.expect("tab");
@@ -406,7 +412,7 @@ async fn cancelled_input_and_closed_session_never_write() {
     sender.send(key(KeyCode::Char('y'))).await.expect("y");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Session fermée et propre : `q` quitte sans confirmation.
+    // Popup fermé, rien en attente : `q` quitte sans confirmation.
     sender.send(key(KeyCode::Char('q'))).await.expect("quit");
     let (_terminal, exit) = timeout(Duration::from_secs(3), handle)
         .await
@@ -441,19 +447,14 @@ async fn add_delete_rename_then_save_matches_expected_after_file() {
         async move { sender.send(event).await.expect("envoi") }
     };
 
-    // Détail, ouverture de la session. Positions : Méthode, Url, Accept,
-    // X-Debug, + en-tête, + paramètre de requête, id, + paramètre de
-    // chemin.
+    // Détail, popup Params (onglet affiché). Positions : ligne d'ajout
+    // des paramètres de requête (aucun), puis `id` (paramètre de chemin).
     send(key(KeyCode::Tab)).await;
     send(key(KeyCode::Enter)).await;
-    send(key(KeyCode::Down)).await; // Méthode -> URL
 
     // Ajout du paramètre de requête `page: 2` depuis sa ligne d'ajout ; un
     // `q` tapé dans la clé est du texte et ne ferme pas l'application.
-    for _ in 0..4 {
-        send(key(KeyCode::Down)).await;
-    }
-    send(key(KeyCode::Enter)).await;
+    send(key(KeyCode::Char('a'))).await;
     send(key(KeyCode::Char('q'))).await;
     send(key(KeyCode::Backspace)).await;
     for c in "page".chars() {
@@ -463,17 +464,9 @@ async fn add_delete_rename_then_save_matches_expected_after_file() {
     send(key(KeyCode::Char('2'))).await;
     send(key(KeyCode::Enter)).await;
 
-    // Curseur sur `page` : remonter sur `X-Debug` et le supprimer.
-    for _ in 0..2 {
-        send(key(KeyCode::Up)).await;
-    }
-    send(key(KeyCode::Char('d'))).await;
-
-    // Curseur sur la ligne d'ajout d'en-tête : descendre sur `id` et le
-    // renommer en `userId`.
-    for _ in 0..3 {
-        send(key(KeyCode::Down)).await;
-    }
+    // Curseur sur `page` : `Tab` passe aux paramètres de chemin, sur `id`,
+    // renommé en `userId`.
+    send(key(KeyCode::Tab)).await;
     send(key(KeyCode::Char('c'))).await;
     send(key(KeyCode::Backspace)).await;
     send(key(KeyCode::Backspace)).await;
@@ -481,6 +474,17 @@ async fn add_delete_rename_then_save_matches_expected_after_file() {
         send(key(KeyCode::Char(c))).await;
     }
     send(key(KeyCode::Enter)).await;
+
+    // Enregistrer ferme le popup.
+    send(ctrl('s')).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Popup En-têtes (→ ×2 depuis Params) : supprimer `X-Debug`.
+    send(key(KeyCode::Right)).await;
+    send(key(KeyCode::Right)).await;
+    send(key(KeyCode::Enter)).await;
+    send(key(KeyCode::Down)).await;
+    send(key(KeyCode::Char('d'))).await;
 
     send(ctrl('s')).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -699,17 +703,14 @@ async fn external_text_editor_flow_with_fake_editor() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Aller sur le focus Détail (Tab)
+    // Aller sur le focus Détail (Tab), afficher l'onglet Script (→ ×5
+    // depuis Params) et ouvrir son popup (Entrée) : curseur sur le script
+    // pré-requête.
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    // Ouvrir la session d'édition (Entrée)
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
-
-    // Naviguer jusqu'à ScriptPreRequest (10 fois bas : le mode d'auth, les lignes d'ajout
-    // vars:pre-request, vars:post-response, assert et le sélecteur de mode de corps
-    // précèdent les scripts)
-    for _ in 0..10 {
-        sender.send(key(KeyCode::Down)).await.expect("down");
+    for _ in 0..5 {
+        sender.send(key(KeyCode::Right)).await.expect("right");
     }
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
 
     // Appuyer sur Entrée pour lancer le faux éditeur externe
     sender
@@ -778,16 +779,14 @@ async fn external_text_editor_flow_on_folder_bru() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Aller sur le dossier grp dans le détail
+    // Aller sur le dossier grp dans le détail, afficher son onglet Script
+    // (→ ×3 depuis En-têtes) et ouvrir son popup : curseur sur le script
+    // pré-requête.
     sender.send(key(KeyCode::Tab)).await.expect("tab");
-    sender.send(key(KeyCode::Enter)).await.expect("enter");
-
-    // Dans grp/folder.bru : pas de méthode/url, ajout d'en-tête à 0, AuthMode à 1,
-    // AuthParamValue(token) à 2, ajouts vars:pre-request et vars:post-response à 3 et 4,
-    // ScriptPreRequest à 5
-    for _ in 0..5 {
-        sender.send(key(KeyCode::Down)).await.expect("down");
+    for _ in 0..3 {
+        sender.send(key(KeyCode::Right)).await.expect("right");
     }
+    sender.send(key(KeyCode::Enter)).await.expect("enter");
     sender
         .send(key(KeyCode::Enter))
         .await

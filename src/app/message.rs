@@ -115,8 +115,10 @@ pub enum Message {
     Left,
     /// `→` ou `l` (et `Entrée` hors du détail, via `Enter`).
     Right,
-    /// `Tab` : bascule le focus.
+    /// `Tab` : bascule le focus ; dans un popup d'édition, partie suivante.
     NextFocus,
+    /// `Maj+Tab` : partie précédente d'un popup d'édition.
+    PreviousPart,
     /// `Échap` : rend le focus à l'arbre.
     FocusTree,
     /// `q`.
@@ -454,6 +456,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::PageUp => Message::PageUp,
         KeyCode::PageDown => Message::PageDown,
         KeyCode::Tab => Message::NextFocus,
+        KeyCode::BackTab => Message::PreviousPart,
         KeyCode::Esc => Message::FocusTree,
         KeyCode::Char('q') => Message::Quit,
         KeyCode::Char('r') => Message::RunSelected,
