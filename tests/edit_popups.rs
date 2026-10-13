@@ -556,6 +556,175 @@ fn auth_popup_on_the_collection() {
     ui.assert_matches("collection.bru", "collection-auth.after.bru");
 }
 
+// --- Corps -------------------------------------------------------------------
+
+#[test]
+fn body_popup_changes_the_mode_with_arrows() {
+    let mut ui = Ui::new("body-mode", &[("body-mode-ops.bru", "body-mode-ops.bru")]);
+    ui.select("body-mode-ops.bru");
+    ui.open(RequestTab::Body);
+    assert_eq!(ui.field(), Some(EditableField::BodyMode));
+    ui.key(KeyCode::Right);
+    // Le mode json apporte sa zone de texte.
+    let fields = ui.model.editing.as_ref().map(|s| s.fields.clone());
+    assert_eq!(
+        fields,
+        Some(vec![EditableField::BodyMode, EditableField::BodyText])
+    );
+    ui.save();
+    ui.assert_matches("body-mode-ops.bru", "body-mode-ops.after.bru");
+}
+
+/// Texte du corps édité dans le popup : `Entrée` passe à la ligne, `Tab`
+/// sort de la zone.
+#[test]
+fn body_popup_edits_multiline_text() {
+    let mut ui = Ui::new("json-body", &[("json-body.bru", "json-body.bru")]);
+    ui.select("json-body.bru");
+    ui.open(RequestTab::Body);
+    ui.key(KeyCode::Tab);
+    assert_eq!(ui.field(), Some(EditableField::BodyText));
+    ui.key(KeyCode::Enter);
+    ui.key(KeyCode::Up);
+    ui.key(KeyCode::End);
+    ui.key(KeyCode::Backspace);
+    ui.chars("2,");
+    ui.key(KeyCode::Enter);
+    ui.chars("  \"b\": true");
+    assert!(matches!(
+        ui.model.editing.as_ref().map(|s| &s.state),
+        Some(EditState::Input(_))
+    ));
+    ui.key(KeyCode::Tab);
+    assert!(matches!(
+        ui.model.editing.as_ref().map(|s| &s.state),
+        Some(EditState::FieldSelect)
+    ));
+    ui.save();
+    ui.assert_matches("json-body.bru", "json-body.after.bru");
+}
+
+#[test]
+fn body_popup_edits_a_form_urlencoded_table() {
+    let mut ui = Ui::new(
+        "form-urlencoded",
+        &[(
+            "body-form-urlencoded-ops.bru",
+            "body-form-urlencoded-ops.bru",
+        )],
+    );
+    ui.select("body-form-urlencoded-ops.bru");
+    ui.open(RequestTab::Body);
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    ui.keys(KeyCode::Backspace, "alice".len());
+    ui.chars("bob");
+    ui.key(KeyCode::Enter);
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Char('c'));
+    ui.keys(KeyCode::Backspace, "token".len());
+    ui.chars("auth_token");
+    ui.key(KeyCode::Enter);
+    ui.keys(KeyCode::Down, 2);
+    ui.key(KeyCode::Char(' '));
+    ui.key(KeyCode::Up);
+    ui.key(KeyCode::Char('d'));
+    ui.key(KeyCode::Char('a'));
+    ui.chars("grant_type");
+    ui.key(KeyCode::Tab);
+    ui.chars("password");
+    ui.key(KeyCode::Enter);
+    ui.save();
+    ui.assert_matches(
+        "body-form-urlencoded-ops.bru",
+        "body-form-urlencoded-ops.after.bru",
+    );
+}
+
+/// Formulaire multipart : une entrée `@file(...)` n'accepte que `Espace`
+/// et `d` ; `Entrée` et `c` sont refusés.
+#[test]
+fn body_popup_edits_a_multipart_form_with_a_file_entry() {
+    let mut ui = Ui::new(
+        "multipart",
+        &[("body-multipart-form-ops.bru", "body-multipart-form-ops.bru")],
+    );
+    ui.select("body-multipart-form-ops.bru");
+    ui.open(RequestTab::Body);
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    ui.keys(KeyCode::Backspace, "initial note".len());
+    ui.chars("updated note");
+    ui.key(KeyCode::Enter);
+    ui.key(KeyCode::Down);
+    assert_eq!(ui.field(), Some(EditableField::MultipartFormValue(1)));
+    for refused in [KeyCode::Enter, KeyCode::Char('c')] {
+        ui.key(refused);
+        let session = ui.model.editing.as_ref().expect("popup");
+        assert_eq!(session.state, EditState::FieldSelect);
+        assert!(matches!(
+            ui.model.last_status,
+            Some(bruno_tui::app::model::StatusMessage::EditRefused(_))
+        ));
+    }
+    ui.key(KeyCode::Char(' '));
+    ui.save();
+    ui.assert_matches(
+        "body-multipart-form-ops.bru",
+        "body-multipart-form-ops.after.bru",
+    );
+}
+
+/// GraphQL : mode fixe, deux parties (Requête, Variables) ; les variables
+/// sont créées puis modifiées, en deux enregistrements.
+#[test]
+fn body_popup_edits_graphql_variables() {
+    let mut ui = Ui::new(
+        "graphql",
+        &[("body-graphql-vars-ops.bru", "body-graphql-vars-ops.bru")],
+    );
+    ui.select("body-graphql-vars-ops.bru");
+    ui.open(RequestTab::Body);
+    let fields = ui.model.editing.as_ref().map(|s| s.fields.clone());
+    assert_eq!(
+        fields,
+        Some(vec![EditableField::BodyText, EditableField::GraphqlVars])
+    );
+    ui.key(KeyCode::Tab);
+    assert_eq!(ui.field(), Some(EditableField::GraphqlVars));
+    ui.key(KeyCode::Enter);
+    ui.chars("{");
+    ui.key(KeyCode::Enter);
+    ui.chars("  \"initial\": true");
+    ui.key(KeyCode::Enter);
+    ui.chars("}");
+    ui.key(KeyCode::Tab);
+    ui.save();
+
+    ui.open(RequestTab::Body);
+    ui.key(KeyCode::Tab);
+    ui.key(KeyCode::Enter);
+    ui.keys(
+        KeyCode::Backspace,
+        "{\n  \"initial\": true\n}".chars().count(),
+    );
+    for (index, line) in ["{", "  \"limit\": 10,", "  \"offset\": 0", "}"]
+        .iter()
+        .enumerate()
+    {
+        if index > 0 {
+            ui.key(KeyCode::Enter);
+        }
+        ui.chars(line);
+    }
+    ui.key(KeyCode::Tab);
+    ui.save();
+    ui.assert_matches(
+        "body-graphql-vars-ops.bru",
+        "body-graphql-vars-ops.after.bru",
+    );
+}
+
 // --- Fermeture -------------------------------------------------------------
 
 /// `Échap` sans changement ferme aussitôt ; avec changement, il demande

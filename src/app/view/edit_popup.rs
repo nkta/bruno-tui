@@ -1199,6 +1199,58 @@ mod tests {
         );
     }
 
+    /// Remplace le corps de la requête sélectionnée.
+    fn with_body(model: &mut Model, content: &str) {
+        use crate::collection::{BruFile, TreeNode};
+        let ast = BruFile::parse(content.to_owned()).expect("AST");
+        let view = crate::collection::RequestView::from_ast(&ast).expect("vue");
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        let path = request.path.clone();
+        model.replace_request_node(&path, ast, view);
+    }
+
+    /// Corps `file` : le mode seul se modifie, le contenu est montré en
+    /// lecture seule. GraphQL : mode fixe, parties Requête et Variables.
+    #[test]
+    fn file_body_is_read_only_and_graphql_has_two_parts() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        with_body(
+            &mut model,
+            "post {\n  url: https://a\n  body: file\n}\n\nbody:file {\n  file: @file(/tmp/a.bin) @contentType(application/octet-stream)\n}\n",
+        );
+        model.request_tab = RequestTab::Body;
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        assert_eq!(session(&model).fields, vec![EditableField::BodyMode]);
+        let lines = texts(&model);
+        assert!(
+            lines.iter().any(|l| l.contains("Lecture seule")),
+            "{lines:#?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("/tmp/a.bin")), "{lines:#?}");
+
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        with_body(
+            &mut model,
+            "meta {\n  name: gql\n  type: graphql\n}\n\npost {\n  url: https://a\n  body: graphql\n}\n\nbody:graphql {\n  query { me }\n}\n\nbody:graphql:vars {\n  {}\n}\n",
+        );
+        model.request_tab = RequestTab::Body;
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::Enter);
+        let lines = texts(&model);
+        assert!(!lines.iter().any(|l| l.contains("Mode")), "{lines:#?}");
+        let query = line_of(&model, "Requête");
+        let vars = line_of(&model, "Variables");
+        assert!(query < line_of(&model, "query { me }"));
+        assert!(vars > query);
+        update(&mut model, Message::Left);
+        assert!(!session(&model).dirty, "mode fixe");
+    }
+
     /// Les touches d'aide se replient sur la largeur du popup.
     #[test]
     fn help_lines_wrap_to_the_popup_width() {
