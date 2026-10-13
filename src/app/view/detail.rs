@@ -58,23 +58,16 @@ pub fn detail_text_fields_boxes(model: &Model) -> (Text<'static>, Vec<FieldLine>
     let tab = model.shown_request_tab();
     if model.selected_collection {
         if let Some(collection) = model.loaded() {
-            let session = model
-                .editing
-                .as_ref()
-                .filter(|s| s.path == std::path::Path::new("collection.bru"));
-            return collection_text_and_boxes(collection, session, tab);
+            return collection_text_and_boxes(collection, None, tab);
         }
         return (Text::default(), Vec::new(), Vec::new());
     }
     match model.selected_node() {
         Some(TreeNode::Request(request)) => {
-            let session = model.editing.as_ref().filter(|s| s.path == request.path);
-            request_text_and_fields(request, session, tab)
+            request_text_and_fields(request, None, tab)
         }
         Some(TreeNode::Folder(folder)) => {
-            let folder_path = folder.path.join("folder.bru");
-            let session = model.editing.as_ref().filter(|s| s.path == folder_path);
-            folder_text_and_boxes(folder, session, tab)
+            folder_text_and_boxes(folder, None, tab)
         }
         Some(TreeNode::Error(error)) => (error_text(error), Vec::new(), Vec::new()),
         None => (Text::default(), Vec::new(), Vec::new()),
@@ -547,7 +540,7 @@ pub(crate) fn compose(
 
 /// Retire de `text` les premières colonnes d'affichage, sans jamais couper
 /// un caractère : renvoie le reste et la largeur réellement retirée.
-fn skip_columns(text: &str, columns: usize) -> (&str, usize) {
+pub(crate) fn skip_columns(text: &str, columns: usize) -> (&str, usize) {
     let mut skipped = 0;
     for (index, c) in text.char_indices() {
         let width = Line::raw(c.to_string()).width();
@@ -631,14 +624,6 @@ fn editable_entries(
     section: EntrySection,
 ) {
     if values.is_empty() && session.is_none() {
-        if section != EntrySection::Settings {
-            field_lines.push(FieldLine {
-                field: EditableField::AddRow(section),
-                line: lines.len(),
-                count: 1,
-                prefix_width: 2,
-            });
-        }
         lines.push(Line::raw("  aucun"));
         return;
     }
@@ -2835,99 +2820,6 @@ mod tests {
         update(model, Message::Enter);
     }
 
-    fn cursor_for(
-        model: &mut crate::app::model::Model,
-        field: EditableField,
-        keys: &[crate::app::message::InputKey],
-    ) -> (usize, usize) {
-        use crate::app::message::Message;
-        use crate::app::update::update;
-        let index = model
-            .editing
-            .as_ref()
-            .and_then(|s| s.fields.iter().position(|f| *f == field))
-            .expect("champ");
-        model.editing.as_mut().expect("session").cursor = index;
-        update(model, Message::Enter);
-        for key in keys {
-            update(model, Message::InputKey(*key));
-        }
-        let Some(TreeNode::Request(request)) = model.selected_node() else {
-            panic!("requête attendue");
-        };
-        let position = cursor_position_in_detail(
-            request,
-            model.editing.as_ref().expect("session"),
-            model.shown_request_tab(),
-        )
-        .expect("position");
-        update(model, Message::CancelInput);
-        position
-    }
-
-    /// La position du curseur de texte se lit dans la table des champs,
-    /// jamais dans des indices de ligne supposés.
-    #[test]
-    fn cursor_position_comes_from_the_field_table() {
-        use crate::app::message::InputKey;
-        let text_line = |text: &Text<'_>, needle: &str| {
-            text.lines
-                .iter()
-                .position(|l| {
-                    let concatenated: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                    concatenated.contains(needle)
-                })
-                .unwrap_or_else(|| panic!("ligne introuvable pour {needle:?}"))
-        };
-
-        let mut model = loaded_model((300, 40));
-        session_on(&mut model, "post-json.bru");
-        model.request_tab = RequestTab::Headers;
-        let text = detail_text(&model);
-        // URL : sur sa propre ligne (`add-method-editing`), curseur juste
-        // après le libellé.
-        let (line, col) = cursor_for(&mut model, EditableField::Url, &[InputKey::Home]);
-        assert_eq!(line, text_line(&text, "https://{{host}}/items"));
-        assert_eq!(col, URL_LABEL.len());
-        // En-tête : après « Content-Type: », curseur en fin de valeur.
-        let (line, col) = cursor_for(&mut model, EditableField::HeaderValue(0), &[]);
-        assert_eq!(line, text_line(&text, "Content-Type: "));
-        assert_eq!(col, "  Content-Type: application/json".len());
-        // Deuxième ligne du corps, colonne 1 après l'indentation.
-        let (line, col) = cursor_for(
-            &mut model,
-            EditableField::BodyText,
-            &[
-                InputKey::Up,
-                InputKey::Up,
-                InputKey::Up,
-                InputKey::Up,
-                InputKey::Up,
-                InputKey::Up,
-                InputKey::Up,
-                InputKey::Up,
-                InputKey::Down,
-                InputKey::Home,
-                InputKey::Right,
-            ],
-        );
-        // Le corps est dans l'onglet Corps, que la session affiche.
-        let text = detail_text_on(&mut model, RequestTab::Body);
-        assert_eq!(line, text_line(&text, "\"a\": {"));
-        assert_eq!(col, 3);
-
-        // Paramètre de requête : multiline.bru.
-        let mut model = loaded_model((300, 40));
-        session_on(&mut model, "multiline.bru");
-        let text = detail_text(&model);
-        let (line, col) = cursor_for(
-            &mut model,
-            EditableField::QueryParamValue(1),
-            &[InputKey::Home],
-        );
-        assert_eq!(line, text_line(&text, "page: 1"));
-        assert_eq!(col, "  page: ".len());
-    }
 
     /// Clé d'en-tête stylée comme un libellé, distincte de sa valeur, hors
     /// session (`improve-edit-field-legibility`).
@@ -2983,15 +2875,11 @@ mod tests {
         use crate::app::update::update;
 
         let mut model = loaded_model((100, 30));
-        session_on(&mut model, "post-json.bru");
-        let add_row = EditableField::AddRow(EntrySection::Headers);
-        let index = model
-            .editing
-            .as_ref()
-            .and_then(|s| s.fields.iter().position(|f| *f == add_row))
-            .expect("ligne d'ajout d'en-tête");
-        model.editing.as_mut().expect("session").cursor = index;
+        select(&mut model, "post-json.bru");
+        model.request_tab = RequestTab::Headers;
+        update(&mut model, Message::NextFocus);
         update(&mut model, Message::Enter);
+        update(&mut model, Message::Add);
         for c in "X-Trace".chars() {
             update(&mut model, Message::InputKey(InputKey::Char(c)));
         }
@@ -3000,21 +2888,10 @@ mod tests {
             update(&mut model, Message::InputKey(InputKey::Char(c)));
         }
 
-        let text = detail_text(&model);
-        let line = text
-            .lines
-            .iter()
-            .find(|l| {
-                l.spans
-                    .first()
-                    .is_some_and(|s| s.content.as_ref() == "  X-Trace: ")
-            })
-            .expect("ligne provisoire X-Trace");
-        assert_eq!(line.spans[1].content.as_ref(), "abc");
-        assert_ne!(
-            line.spans[0].style, line.spans[1].style,
-            "clé vs valeur en cours de saisie"
-        );
+        let lines = crate::app::test_support::render(&model, 100, 30);
+        let screen = lines.join("\n");
+        assert!(screen.contains("X-Trace"), "{screen}");
+        assert!(screen.contains("abc"), "{screen}");
     }
 
     fn concatenated(line: &Line<'_>) -> String {
@@ -3160,11 +3037,7 @@ mod tests {
         assert!(!plain(&detail_text(&model)).contains("https://{{host}}/items"));
 
         session_on(&mut model, "post-json.bru");
-        let text = plain(&detail_text(&model));
-        assert!(
-            text.contains("Méthode : POST\nURL : https://{{host}}/items"),
-            "{text}"
-        );
+        assert!(!plain(&detail_text(&model)).contains("https://{{host}}/items"));
     }
 
     #[test]
@@ -3806,39 +3679,23 @@ auth:basic {
             .expect("rendu 1x1");
     }
 
-    /// Hors session, une section vide affiche « aucun » et enregistre un
-    /// `FieldLine` pour `EditableField::AddRow` sur cette ligne.
+    /// Hors session, une section vide affiche « aucun » dans le panneau Détail.
     #[test]
-    fn empty_section_without_session_has_add_row_field_line_on_aucun() {
+    fn empty_section_without_session_shows_aucun() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         let Some(TreeNode::Request(request)) = model.selected_node() else {
             panic!("requête attendue");
         };
-        for section in [
-            EntrySection::Headers,
-            EntrySection::QueryParams,
-            EntrySection::PathParams,
-            EntrySection::VarsPreRequest,
-            EntrySection::VarsPostResponse,
-            EntrySection::Assert,
+        for tab in [
+            RequestTab::Headers,
+            RequestTab::Params,
+            RequestTab::Vars,
+            RequestTab::Assert,
         ] {
-            // Chaque section est dans son onglet.
-            let tab = RequestTab::of_field(EditableField::AddRow(section)).expect("onglet");
-            let (text, fields, _) = request_text_and_fields(request, None, tab);
-            let field_line = fields
-                .iter()
-                .find(|fl| fl.field == EditableField::AddRow(section))
-                .unwrap_or_else(|| panic!("FieldLine pour AddRow({section:?}) manquant"));
-            assert_eq!(field_line.count, 1);
-            assert_eq!(field_line.prefix_width, 2);
-            let line_content = &text.lines[field_line.line];
-            let rendered: String = line_content
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
-            assert_eq!(rendered, "  aucun");
+            let (text, _, _) = request_text_and_fields(request, None, tab);
+            let rendered = plain(&text);
+            assert!(rendered.contains("aucun"), "l'onglet {tab:?} doit afficher 'aucun'");
         }
     }
 

@@ -4,21 +4,20 @@ use ratatui::text::Line;
 
 use crate::app::message::InputKey;
 use crate::app::model::{
-    EditSession, EditState, EditableField, Focus, InputTarget, Model, PendingConfirm, PickerKind,
-    RequestTab, SavedEdit, StatusMessage, field_enabled, field_value, field_value_committed,
+    EditScope, EditSession, EditState, EditableField, Focus, InputTarget, Model, PendingConfirm,
+    PickerKind, SavedEdit, StatusMessage, field_enabled, field_value, field_value_committed,
     section_entries,
 };
 use crate::app::text_input::TextInput;
 use crate::app::update::Command;
 use crate::app::update::output::resolve_editor;
 use crate::app::update::tree::read_only_collection;
-use crate::app::view::detail::detail_text_fields_boxes;
-use crate::app::view::{inner, layout_for};
+use crate::app::view::inner;
 use crate::collection::TreeNode;
 use crate::writer::{EntrySection, FieldEdit, FileStamp};
 
 /// Ouvre une session d'édition sur la requête, le dossier ou la collection sélectionné,
-/// dans l'état Sélection de champ.
+/// pour l'onglet actuellement affiché.
 pub(crate) fn start_edit(model: &mut Model) {
     if model.focus != Focus::Detail || model.editing.is_some() {
         return;
@@ -60,23 +59,45 @@ pub(crate) fn start_edit(model: &mut Model) {
     let Ok(stamp) = FileStamp::capture(&full_path) else {
         return;
     };
-    // Le curseur part du premier champ de l'onglet affiché, pour qu'`Entrée`
-    // sur l'onglet Auth (par exemple) mène à l'auth et non à la méthode.
-    // Sur Params, l'onglet par défaut, il reste sur la méthode, affichée
-    // juste au-dessus.
     let shown = model.shown_request_tab();
-    let mut session = EditSession::new(path, stamp, view);
-    if shown != RequestTab::Params
-        && let Some(index) = session
-            .fields
-            .iter()
-            .position(|field| RequestTab::of_field(*field) == Some(shown))
-    {
-        session.cursor = index;
-    }
+    let session = EditSession::new(path, stamp, view, EditScope::Tab(shown));
     model.editing = Some(session);
     model.last_status = None;
-    scroll_edit_into_view(model);
+}
+
+/// Ouvre le popup d'édition Requête (méthode et URL) via `m`.
+pub(crate) fn start_request_edit(model: &mut Model) {
+    if model.focus != Focus::Detail || model.editing.is_some() {
+        return;
+    }
+    if read_only_collection(model) {
+        model.last_status = Some(StatusMessage::ReadOnlyCollection);
+        return;
+    }
+    if model.selected_collection {
+        return;
+    }
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    let root = &collection.root;
+    let (path, view) = match model.selected_node() {
+        Some(TreeNode::Request(request)) => {
+            if let Some(kind) = request.view.non_http_label() {
+                model.last_status = Some(StatusMessage::ReadOnlyRequestType(kind));
+                return;
+            }
+            (request.path.clone(), request.view.clone())
+        }
+        _ => return,
+    };
+    let full_path = root.join(&path);
+    let Ok(stamp) = FileStamp::capture(&full_path) else {
+        return;
+    };
+    let session = EditSession::new(path, stamp, view, EditScope::Request);
+    model.editing = Some(session);
+    model.last_status = None;
 }
 
 /// `Entrée` dans le détail : ouvre la session, ou commence la saisie du
@@ -397,8 +418,7 @@ pub(crate) fn add_entry(model: &mut Model) {
         .editing
         .as_ref()
         .filter(|s| s.state == EditState::FieldSelect)
-        .and_then(EditSession::current_field)
-        .and_then(|field| field.section())
+        .and_then(crate::app::model::active_section)
     else {
         return;
     };
@@ -847,52 +867,41 @@ pub(crate) fn try_commit(model: &mut Model, edit: FieldEdit) -> bool {
 /// décalage horizontal de la valeur en saisie (`improve-direct-editing`,
 /// D7).
 pub(crate) fn scroll_edit_into_view(model: &mut Model) {
-    let Some(areas) = layout_for(model.size, model.zoomed_panel()) else {
+    let screen = ratatui::layout::Rect::new(0, 0, model.size.0, model.size.1);
+    let Some(session) = &mut model.editing else {
         return;
     };
-    let area = inner(areas.detail);
-    let (height, width) = (area.height.max(1), area.width);
-    let Some(session) = &model.editing else {
-        return;
-    };
-    let Some(field) = session.current_field() else {
-        return;
-    };
-    let (_, field_lines, _) = detail_text_fields_boxes(model);
-    let Some(location) = field_lines.iter().find(|l| l.field == field) else {
-        return;
-    };
+    let popup_rect = crate::app::view::edit_popup_area(screen, session);
+    let area = inner(popup_rect);
+    let height = usize::from(area.height.max(1));
+    let width = area.width;
+
     let (target_line, hscroll) = match &session.state {
         EditState::FieldSelect
         | EditState::Picker { .. }
-        | EditState::PlaintextSecretPrompt { .. } => (location.line, 0),
+        | EditState::PlaintextSecretPrompt { .. } => (session.cursor, 0),
         EditState::Input(input) => {
             let (line, _) = input.cursor_line_col();
             let column = u16::try_from(Line::raw(input.text_before_cursor_on_line()).width())
                 .unwrap_or(u16::MAX);
-            let available = width
-                .saturating_sub(u16::try_from(location.prefix_width).unwrap_or(u16::MAX))
-                .max(1);
+            let available = width.saturating_sub(15).max(1);
             let mut hscroll = session.hscroll;
             if column < hscroll {
                 hscroll = column;
             } else if column >= hscroll.saturating_add(available) {
                 hscroll = column - available + 1;
             }
-            (location.line + line, hscroll)
+            (session.cursor + line, hscroll)
         }
     };
-    let target = u16::try_from(target_line).unwrap_or(u16::MAX);
-    let mut scroll = model.detail_scroll;
-    if target < scroll {
-        scroll = target;
-    } else if target >= scroll.saturating_add(height) {
-        scroll = target - height + 1;
+    let mut scroll = session.scroll;
+    if target_line < scroll {
+        scroll = target_line;
+    } else if target_line >= scroll.saturating_add(height) {
+        scroll = target_line - height + 1;
     }
-    model.detail_scroll = scroll;
-    if let Some(session) = &mut model.editing {
-        session.hscroll = hscroll;
-    }
+    session.scroll = scroll;
+    session.hscroll = hscroll;
 }
 
 /// Une session porte des modifications non enregistrées : tout changement
@@ -1022,6 +1031,7 @@ pub(crate) fn save_edit(model: &mut Model) -> Command {
         return Command::None;
     };
     if !session.dirty {
+        model.editing = None;
         return Command::None;
     }
     let Some(ast) = current_editing_ast(model, &session.path) else {
@@ -1040,6 +1050,7 @@ pub(crate) fn force_save_edit(model: &mut Model) -> Command {
         return Command::None;
     };
     if !session.dirty {
+        model.editing = None;
         return Command::None;
     }
     let Some(ast) = current_editing_ast(model, &session.path) else {
@@ -1068,12 +1079,9 @@ pub(crate) fn edit_saved(
     }
     match result {
         Ok(saved) => {
-            session.stamp = saved.stamp;
-            session.pending.clear();
-            session.dirty = false;
-            session.set_preview(saved.view.clone());
             model.last_saved_stamps.insert(path.clone(), saved.stamp);
             model.replace_file_meta_or_request_node(&path, saved.ast, saved.view);
+            model.editing = None;
         }
         Err(error) => {
             model.last_status = Some(StatusMessage::SaveError(error.to_string()));
@@ -1088,11 +1096,10 @@ mod tests {
     use super::super::*;
     use super::*;
     use crate::app::model::{
-        EditState, EditableField, Exit, Focus, InputTarget, PendingConfirm, SavedEdit,
+        EditState, EditableField, Exit, Focus, InputTarget, PendingConfirm, RequestTab, SavedEdit,
         StatusMessage,
     };
     use crate::app::test_support::{loaded_model, select};
-    use crate::app::view::detail::request_text_and_fields;
     use crate::collection::{RequestView, TreeNode};
     use crate::writer::EntrySection;
 
@@ -1130,9 +1137,8 @@ mod tests {
         assert!(model.editing.is_none());
 
         // 4. Sur une requête valide avec Focus::Detail : ouverture
-        // (onglet Params, sinon le curseur part de l'onglet affiché)
         select(&mut model, "simple-get.bru");
-        model.request_tab = RequestTab::Params;
+        model.request_tab = RequestTab::Auth;
         assert_eq!(model.focus, Focus::Detail);
         update(&mut model, Message::StartEdit);
         assert!(model.editing.is_some());
@@ -1163,32 +1169,41 @@ mod tests {
     #[test]
     fn start_edit_puts_cursor_on_the_shown_tab() {
         let mut model = loaded_model((100, 30));
-        select(&mut model, "simple-get.bru");
+        select(&mut model, "scripted.bru");
         update(&mut model, Message::NextFocus);
 
-        // Onglet Auth affiché : le curseur part du mode d'auth
+        // Onglet Auth affiché : le popup d'auth s'ouvre, curseur sur le mode d'auth
         model.request_tab = RequestTab::Auth;
         update(&mut model, Message::StartEdit);
         let session = model.editing.as_ref().unwrap();
         assert_eq!(session.current_field(), Some(EditableField::AuthMode));
-        assert_eq!(model.shown_request_tab(), RequestTab::Auth);
+        assert_eq!(session.scope, EditScope::Tab(RequestTab::Auth));
         model.editing = None;
 
-        // Onglet Params (par défaut) : le curseur reste sur la méthode
-        model.request_tab = RequestTab::Params;
+        // Onglet Headers affiché : le popup d'en-têtes s'ouvre
+        model.request_tab = RequestTab::Headers;
         update(&mut model, Message::StartEdit);
         let session = model.editing.as_ref().unwrap();
+        assert_eq!(session.current_field(), Some(EditableField::HeaderValue(0)));
+        assert_eq!(session.scope, EditScope::Tab(RequestTab::Headers));
+        model.editing = None;
+
+        // Requête ('m') : le popup Requête s'ouvre avec la méthode
+        update(&mut model, Message::OpenRequestEdit);
+        let session = model.editing.as_ref().unwrap();
         assert_eq!(session.current_field(), Some(EditableField::Method));
+        assert_eq!(session.scope, EditScope::Request);
     }
 
     #[test]
     fn move_field_cursor_navigation_and_bounds() {
         let mut model = loaded_model((100, 30));
-        select(&mut model, "post-json.bru");
+        select(&mut model, "scripted.bru");
         update(&mut model, Message::NextFocus);
+        model.request_tab = RequestTab::Headers;
         update(&mut model, Message::StartEdit);
         let count = model.editing.as_ref().unwrap().fields.len();
-        assert!(count >= 3, "au moins 3 champs attendus");
+        assert!(count >= 2, "au moins 2 champs attendus");
 
         // Curseur initial à 0
         assert_eq!(model.editing.as_ref().unwrap().cursor, 0);
@@ -1224,9 +1239,9 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "scripted.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
 
-        // Champ 0 : Méthode -> ToggleField sans effet
+        // Requête ('m') : Champ 0 est Méthode -> ToggleField sans effet
+        update(&mut model, Message::OpenRequestEdit);
         assert_eq!(model.editing.as_ref().unwrap().cursor, 0);
         assert!(matches!(
             model.editing.as_ref().unwrap().fields[0],
@@ -1235,14 +1250,14 @@ mod tests {
         update(&mut model, Message::ToggleField);
         assert!(model.editing.as_ref().unwrap().pending.is_empty());
         assert!(!model.editing.as_ref().unwrap().dirty);
+        model.editing = None;
 
-        // Champ 2 : En-tête Accept (initialement activé dans scripted.bru) ;
-        // Méthode puis URL précèdent les en-têtes.
-        update(&mut model, Message::Down);
-        update(&mut model, Message::Down);
-        assert_eq!(model.editing.as_ref().unwrap().cursor, 2);
+        // Onglet Headers : Champ 0 est En-tête Accept (initialement activé dans scripted.bru)
+        model.request_tab = RequestTab::Headers;
+        update(&mut model, Message::StartEdit);
+        assert_eq!(model.editing.as_ref().unwrap().cursor, 0);
         assert!(matches!(
-            model.editing.as_ref().unwrap().fields[2],
+            model.editing.as_ref().unwrap().fields[0],
             EditableField::HeaderValue(0)
         ));
 
@@ -1271,6 +1286,7 @@ mod tests {
         let mut model2 = loaded_model((100, 30));
         select(&mut model2, "multiline.bru");
         update(&mut model2, Message::NextFocus);
+        model2.request_tab = RequestTab::Params;
         update(&mut model2, Message::StartEdit);
         // Trouver le premier QueryParamValue
         let param_cursor = model2
@@ -1296,6 +1312,7 @@ mod tests {
         let mut model3 = loaded_model((100, 30));
         select(&mut model3, "post-json.bru");
         update(&mut model3, Message::NextFocus);
+        model3.request_tab = RequestTab::Body;
         update(&mut model3, Message::StartEdit);
         let body_cursor = model3
             .editing
@@ -1316,7 +1333,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
 
         // Curseur sur Méthode par défaut ; on se place sur URL.
         assert_eq!(model.editing.as_ref().unwrap().cursor, 0);
@@ -1367,7 +1384,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
 
         // 1. Aller-retour sans modification de valeur mais avec déplacement curseur : dirty inchangé
@@ -1410,6 +1427,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
         update(&mut model, Message::NextFocus);
+        model.request_tab = RequestTab::Body;
         update(&mut model, Message::StartEdit);
 
         let body_cursor = model
@@ -1453,14 +1471,17 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
 
-        // 1. Session propre -> Command::None
+        // 1. Session propre -> Command::None (et ferme le popup)
         let cmd = update(&mut model, Message::SaveEdit);
         assert!(matches!(cmd, Command::None));
+        assert!(model.editing.is_none());
 
-        // 2. Modification -> session dirty
+        // 2. Réouverture et modification -> session dirty
+        update(&mut model, Message::OpenRequestEdit);
+        update(&mut model, Message::Down);
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('x')));
         update(&mut model, Message::ValidateInput);
@@ -1499,7 +1520,8 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
+        update(&mut model, Message::Down); // Méthode -> URL
 
         // Modification
         update(&mut model, Message::Enter);
@@ -1528,16 +1550,14 @@ mod tests {
         update(
             &mut model,
             Message::EditSaved {
-                path,
+                path: path.clone(),
                 result: Ok(saved),
             },
         );
 
-        let session = model.editing.as_ref().unwrap();
-        assert!(!session.dirty);
-        assert!(session.pending.is_empty());
-        assert_eq!(session.stamp, new_stamp);
-        assert_ne!(session.stamp, initial_stamp);
+        assert!(model.editing.is_none(), "le popup est fermé après enregistrement réussi");
+        assert_eq!(model.last_saved_stamps.get(&path), Some(&new_stamp));
+        assert_ne!(new_stamp, initial_stamp);
 
         // Le nœud dans le modèle est bien mis à jour
         let req_node = match model.selected_node().unwrap() {
@@ -1553,7 +1573,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
 
         // Modification
@@ -1592,7 +1612,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
 
         // Modification
@@ -1645,7 +1665,7 @@ mod tests {
         assert!(model.confirm.is_none());
 
         // 2. Session modifiée (dirty) -> Échap (FocusTree) demande confirmation DiscardEdit
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('a')));
@@ -1685,7 +1705,7 @@ mod tests {
         // 2. Session ouverte propre (!dirty) : Quit ferme directement
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
         assert!(!model.editing.as_ref().unwrap().dirty);
 
         update(&mut model, Message::Quit);
@@ -1695,6 +1715,7 @@ mod tests {
         model.exit = None;
 
         // 3. Session modifiée (dirty) : Quit demande confirmation QuitWithUnsavedEdit
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
         update(&mut model, Message::Enter);
         update(&mut model, Message::InputKey(InputKey::Char('a')));
@@ -1733,7 +1754,45 @@ mod tests {
         model
     }
 
+    fn request_edit_session(path: &str, size: (u16, u16)) -> Model {
+        let mut model = loaded_model(size);
+        select(&mut model, path);
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::OpenRequestEdit);
+        assert!(model.editing.is_some(), "session requête ouverte sur {path}");
+        model
+    }
+
+    fn ensure_scope_for_field(model: &mut Model, field: EditableField) {
+        let desired_scope = match field {
+            EditableField::Method | EditableField::Url => EditScope::Request,
+            other => match RequestTab::of_field(other) {
+                Some(tab) => EditScope::Tab(tab),
+                None => return,
+            },
+        };
+        let current_scope = model.editing.as_ref().map(|s| s.scope);
+        if current_scope != Some(desired_scope) {
+            if let Some(session) = &mut model.editing {
+                session.scope = desired_scope;
+                session.fields = EditableField::list_for_scope(&session.preview, desired_scope);
+                session.cursor = 0;
+            } else {
+                match desired_scope {
+                    EditScope::Request => {
+                        update(model, Message::OpenRequestEdit);
+                    }
+                    EditScope::Tab(tab) => {
+                        model.request_tab = tab;
+                        update(model, Message::StartEdit);
+                    }
+                }
+            }
+        }
+    }
+
     fn move_to_field(model: &mut Model, field: EditableField) {
+        ensure_scope_for_field(model, field);
         let index = model
             .editing
             .as_ref()
@@ -1863,7 +1922,7 @@ mod tests {
     /// (`add-method-editing`).
     #[test]
     fn method_picker_opens_navigates_confirms_and_cancels() {
-        let mut model = edit_session("simple-get.bru", (100, 30));
+        let mut model = request_edit_session("simple-get.bru", (100, 30));
         assert_eq!(session(&model).cursor, 0);
         assert!(matches!(session(&model).fields[0], EditableField::Method));
 
@@ -2196,42 +2255,28 @@ mod tests {
 
     #[test]
     fn field_cursor_and_text_cursor_stay_visible() {
-        // Terminal bas : le corps de post-json est hors écran au départ.
-        let mut model = edit_session("post-json.bru", (100, 12));
-        let height = layout_for(model.size, model.zoomed_panel())
-            .map(|a| inner(a.detail).height)
-            .expect("layout");
-        assert_eq!(model.detail_scroll, 0);
+        // Terminal bas : corps de post-json dans le popup Body.
+        let mut model = edit_session("post-json.bru", (100, 10));
+        let screen = ratatui::layout::Rect::new(0, 0, model.size.0, model.size.1);
         move_to_field(&mut model, EditableField::BodyText);
-        let Some(TreeNode::Request(request)) = model.selected_node() else {
-            panic!("requête attendue");
-        };
-        let (_, lines, _) =
-            request_text_and_fields(request, model.editing.as_ref(), model.shown_request_tab());
-        let body = lines
-            .iter()
-            .find(|l| l.field == EditableField::BodyText)
-            .expect("corps")
-            .line as u16;
-        assert!(model.detail_scroll <= body && body < model.detail_scroll + height);
+        let height = usize::from(inner(crate::app::view::edit_popup_area(screen, session(&model))).height);
+        assert_eq!(session(&model).scroll, 0);
 
-        // Nouvelle ligne en bas du corps : le détail suit le curseur.
+        // Nouvelle ligne en bas du corps : le défilement du popup suit le curseur.
         update(&mut model, Message::Enter);
-        press(&mut model, InputKey::Enter, 3);
+        press(&mut model, InputKey::Enter, 10);
         let (line, _) = input_of(&model).cursor_line_col();
-        let target = body + line as u16;
         assert!(
-            model.detail_scroll <= target && target < model.detail_scroll + height,
-            "ligne {target} visible (défilement {})",
-            model.detail_scroll
+            session(&model).scroll <= line && line < session(&model).scroll + height,
+            "ligne {line} visible (défilement {})",
+            session(&model).scroll
         );
 
-        // URL plus large que le panneau : décalage horizontal.
-        let mut model = edit_session("simple-get.bru", (60, 20));
-        let width = layout_for(model.size, model.zoomed_panel())
-            .map(|a| inner(a.detail).width)
-            .expect("layout");
-        move_to_field(&mut model, EditableField::Url);
+        // URL plus large que le popup : décalage horizontal.
+        let mut model = request_edit_session("simple-get.bru", (60, 20));
+        let screen = ratatui::layout::Rect::new(0, 0, model.size.0, model.size.1);
+        let width = inner(crate::app::view::edit_popup_area(screen, session(&model))).width;
+        go_to(&mut model, EditableField::Url);
         update(&mut model, Message::Enter);
         type_input(&mut model, &"a".repeat(usize::from(width) * 2));
         let hscroll = session(&model).hscroll;
@@ -2246,6 +2291,7 @@ mod tests {
 
     /// Déplace le curseur de champ sur `field`, vers le haut ou le bas.
     fn go_to(model: &mut Model, field: EditableField) {
+        ensure_scope_for_field(model, field);
         let index = session(model)
             .fields
             .iter()
@@ -2263,10 +2309,25 @@ mod tests {
         &session(model).target
     }
 
-    /// Ajoute `key: value` à `section` depuis sa ligne d'ajout.
+    /// Ajoute `key: value` à `section` dans le popup approprié.
     fn add_via_row(model: &mut Model, section: EntrySection, key: &str, value: &str) {
-        go_to(model, EditableField::AddRow(section));
-        update(model, Message::Enter);
+        let tab = match section {
+            EntrySection::Headers => RequestTab::Headers,
+            EntrySection::QueryParams | EntrySection::PathParams => RequestTab::Params,
+            EntrySection::VarsPreRequest | EntrySection::VarsPostResponse => RequestTab::Vars,
+            EntrySection::Assert => RequestTab::Assert,
+            EntrySection::Settings => RequestTab::Settings,
+            EntrySection::FormUrlEncoded | EntrySection::MultipartForm => RequestTab::Body,
+        };
+        if let Some(session) = &mut model.editing {
+            session.scope = EditScope::Tab(tab);
+            session.active_part = match section {
+                EntrySection::PathParams | EntrySection::VarsPostResponse => 1,
+                _ => 0,
+            };
+            session.fields = EditableField::list_for_scope(&session.preview, session.scope);
+        }
+        update(model, Message::Add);
         type_input(model, key);
         update(model, Message::ValidateInput);
         type_input(model, value);
@@ -2353,29 +2414,23 @@ mod tests {
 
     #[test]
     fn a_d_c_and_space_have_no_effect_where_not_applicable() {
-        let mut model = edit_session("post-json.bru", (100, 30));
-        // URL
+        let mut model = request_edit_session("post-json.bru", (100, 30));
+        // URL dans le popup Requête : Add, Rename, Delete sont sans effet
+        go_to(&mut model, EditableField::Url);
         update(&mut model, Message::Add);
         update(&mut model, Message::Rename);
         update(&mut model, Message::Delete);
         assert_eq!(session(&model).state, EditState::FieldSelect);
         assert!(session(&model).pending.is_empty());
-        // Corps
+
+        // Corps : Add, Delete, Rename sont sans effet
+        let mut model = edit_session("post-json.bru", (100, 30));
         go_to(&mut model, EditableField::BodyText);
         update(&mut model, Message::Add);
         update(&mut model, Message::Delete);
         update(&mut model, Message::Rename);
         assert_eq!(session(&model).state, EditState::FieldSelect);
         assert!(session(&model).pending.is_empty());
-        // Ligne d'ajout : `a` ajoute, mais `d`, `c` et Espace sont sans effet.
-        go_to(&mut model, EditableField::AddRow(EntrySection::Headers));
-        update(&mut model, Message::Delete);
-        update(&mut model, Message::Rename);
-        update(&mut model, Message::ToggleField);
-        assert_eq!(session(&model).state, EditState::FieldSelect);
-        assert!(session(&model).pending.is_empty());
-        update(&mut model, Message::Add);
-        assert!(matches!(target_of(&model), InputTarget::NewKey { .. }));
     }
 
     #[test]
@@ -2527,9 +2582,12 @@ mod tests {
 
     #[test]
     fn ctrl_s_during_the_key_step_adds_an_empty_value_and_saves() {
-        let mut model = edit_session("simple-get.bru", (100, 30));
-        go_to(&mut model, EditableField::AddRow(EntrySection::Headers));
-        update(&mut model, Message::Enter);
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        model.request_tab = RequestTab::Headers;
+        update(&mut model, Message::NextFocus);
+        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::Add);
         type_input(&mut model, "X-Trace");
         let command = update(&mut model, Message::SaveEdit);
         let Command::SaveEdit { edits, .. } = command else {
@@ -2550,8 +2608,7 @@ mod tests {
     #[test]
     fn ctrl_s_on_an_invalid_key_refuses_without_saving() {
         let mut model = edit_session("simple-get.bru", (100, 30));
-        go_to(&mut model, EditableField::AddRow(EntrySection::Headers));
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::Add);
         type_input(&mut model, "X:Trace");
         let command = update(&mut model, Message::SaveEdit);
         assert!(matches!(command, Command::None));
@@ -2652,11 +2709,11 @@ mod tests {
                 }),
             },
         );
-        let session = session(&model);
-        assert!(session.pending.is_empty());
-        assert!(!session.dirty);
-        assert_eq!(session.preview, saved_view);
-        assert!(session.fields.contains(&EditableField::HeaderValue(0)));
+        assert!(model.editing.is_none());
+        let Some(TreeNode::Request(request)) = model.selected_node() else {
+            panic!("requête attendue");
+        };
+        assert_eq!(request.view, saved_view);
     }
 
     #[test]

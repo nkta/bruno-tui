@@ -753,6 +753,34 @@ pub struct MouseState {
     pub last_environment_click: Option<(std::time::Instant, usize)>,
 }
 
+/// Portée d'une session d'édition par popup (`docs/edition-popups.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditScope {
+    /// Popup Requête (méthode et URL), ouvert par `m` depuis n'importe quel onglet.
+    Request,
+    /// Popup de l'onglet affiché, ouvert par `Entrée` ou `e` dans le détail.
+    Tab(RequestTab),
+}
+
+impl EditScope {
+    /// Libellé du popup pour le titre de la fenêtre modale.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Request => "Requête",
+            Self::Tab(RequestTab::Params) => "Params",
+            Self::Tab(RequestTab::Body) => "Corps",
+            Self::Tab(RequestTab::Headers) => "En-têtes",
+            Self::Tab(RequestTab::Auth) => "Authentification",
+            Self::Tab(RequestTab::Vars) => "Vars",
+            Self::Tab(RequestTab::Script) => "Script",
+            Self::Tab(RequestTab::Assert) => "Assert",
+            Self::Tab(RequestTab::Tests) => "Tests",
+            Self::Tab(RequestTab::Docs) => "Documentation",
+            Self::Tab(RequestTab::Settings) => "Settings",
+        }
+    }
+}
+
 /// Session d'édition d'une requête, superposée au focus Détail.
 #[derive(Debug, Clone)]
 pub struct EditSession {
@@ -761,11 +789,18 @@ pub struct EditSession {
     /// qu'elle ne porte aucune modification non enregistrée.
     pub path: PathBuf,
     pub stamp: FileStamp,
+    /// Portée de la session (l'onglet affiché, ou « Requête » pour méthode + URL).
+    pub scope: EditScope,
+    /// Partie active dans les popups multi-sections (ex. Requête/Chemin pour Params,
+    /// Pré/Post pour Vars ou Script).
+    pub active_part: usize,
     /// Positions du curseur de champ, dans l'ordre d'affichage, calculées
-    /// depuis `preview`.
+    /// depuis `preview` pour la portée active.
     pub fields: Vec<EditableField>,
     /// Indice du champ sous le curseur, dans `fields`.
     pub cursor: usize,
+    /// Ligne de défilement dans le popup.
+    pub scroll: usize,
     pub state: EditState,
     /// Cible de la saisie en cours ; significative seulement en `Input`
     /// (`add-entry-management`, D7).
@@ -787,13 +822,17 @@ pub struct EditSession {
 }
 
 impl EditSession {
-    /// Ouvre une session propre sur une requête chargée.
-    pub fn new(path: PathBuf, stamp: FileStamp, view: RequestView) -> Self {
+    /// Ouvre une session propre sur une requête chargée avec la portée donnée.
+    pub fn new(path: PathBuf, stamp: FileStamp, view: RequestView, scope: EditScope) -> Self {
+        let fields = EditableField::list_for_scope(&view, scope);
         Self {
             path,
             stamp,
-            fields: EditableField::list_for(&view),
+            scope,
+            active_part: 0,
+            fields,
             cursor: 0,
+            scroll: 0,
             state: EditState::FieldSelect,
             target: InputTarget::Field,
             pending: Vec::new(),
@@ -827,7 +866,7 @@ impl EditSession {
     /// Remplace l'aperçu et recalcule les positions du curseur, bornant le
     /// curseur à la dernière.
     pub fn set_preview(&mut self, view: RequestView) {
-        self.fields = EditableField::list_for(&view);
+        self.fields = EditableField::list_for_scope(&view, self.scope);
         self.preview = view;
         self.cursor = self.cursor.min(self.fields.len().saturating_sub(1));
     }
@@ -1137,6 +1176,105 @@ pub enum EditableField {
 }
 
 impl EditableField {
+    /// Positions du curseur pour la portée d'un popup (`docs/edition-popups.md`).
+    pub fn list_for_scope(view: &RequestView, scope: EditScope) -> Vec<Self> {
+        match scope {
+            EditScope::Request => {
+                if view.is_file_meta() {
+                    Vec::new()
+                } else {
+                    vec![Self::Method, Self::Url]
+                }
+            }
+            EditScope::Tab(RequestTab::Headers) => {
+                (0..view.headers.len()).map(Self::HeaderValue).collect()
+            }
+            EditScope::Tab(RequestTab::Params) => {
+                if view.is_file_meta() {
+                    Vec::new()
+                } else {
+                    let mut fields = Vec::new();
+                    for index in 0..view.query_params.len() {
+                        fields.push(Self::QueryParamValue(index));
+                    }
+                    for index in 0..view.path_params.len() {
+                        fields.push(Self::PathParamValue(index));
+                    }
+                    fields
+                }
+            }
+            EditScope::Tab(RequestTab::Auth) => {
+                let mut fields = vec![Self::AuthMode];
+                for index in 0..view.auth_params().len() {
+                    fields.push(Self::AuthParamValue(index));
+                }
+                fields
+            }
+            EditScope::Tab(RequestTab::Vars) => {
+                let mut fields = Vec::new();
+                for index in 0..view.extra.vars_pre_request.len() {
+                    fields.push(Self::VarsPreRequestValue(index));
+                }
+                for index in 0..view.extra.vars_post_response.len() {
+                    fields.push(Self::VarsPostResponseValue(index));
+                }
+                fields
+            }
+            EditScope::Tab(RequestTab::Assert) => {
+                (0..view.extra.assertions.len()).map(Self::AssertValue).collect()
+            }
+            EditScope::Tab(RequestTab::Settings) => {
+                (0..view.extra.settings.len()).map(Self::SettingsValue).collect()
+            }
+            EditScope::Tab(RequestTab::Body) => {
+                if view.is_file_meta() {
+                    Vec::new()
+                } else {
+                    let mut fields = Vec::new();
+                    let is_graphql = view.kind.as_deref() == Some("graphql");
+                    if !is_graphql {
+                        fields.push(Self::BodyMode);
+                    }
+                    if let Some(body) = &view.body {
+                        match body.kind {
+                            BodyKind::Json | BodyKind::Text | BodyKind::Xml | BodyKind::Sparql => {
+                                fields.push(Self::BodyText);
+                            }
+                            BodyKind::Graphql => {
+                                fields.push(Self::BodyText);
+                                fields.push(Self::GraphqlVars);
+                            }
+                            BodyKind::FormUrlEncoded => {
+                                if let BodyContent::Entries(entries) = &body.content {
+                                    for index in 0..entries.len() {
+                                        fields.push(Self::FormUrlEncodedValue(index));
+                                    }
+                                }
+                            }
+                            BodyKind::MultipartForm => {
+                                if let BodyContent::Entries(entries) = &body.content {
+                                    for index in 0..entries.len() {
+                                        fields.push(Self::MultipartFormValue(index));
+                                    }
+                                }
+                            }
+                            BodyKind::File | BodyKind::Other(_) => {}
+                        }
+                    } else if is_graphql {
+                        fields.push(Self::BodyText);
+                        fields.push(Self::GraphqlVars);
+                    }
+                    fields
+                }
+            }
+            EditScope::Tab(RequestTab::Script) => {
+                vec![Self::ScriptPreRequest, Self::ScriptPostResponse]
+            }
+            EditScope::Tab(RequestTab::Tests) => vec![Self::Tests],
+            EditScope::Tab(RequestTab::Docs) => vec![Self::Docs],
+        }
+    }
+
     /// Positions du curseur pour une vue de requête : la méthode, l'URL,
     /// chaque section suivie de sa ligne d'ajout, puis le corps s'il est
     /// éditable, et les blocs de texte (scripts, tests, docs). Pour un dossier
@@ -1387,6 +1525,40 @@ pub fn section_entries(
             },
             None => &[],
         },
+    }
+}
+
+/// Section d'entrée active pour l'ajout dans une session d'édition par popup.
+pub fn active_section(session: &EditSession) -> Option<EntrySection> {
+    if let Some(field) = session.current_field()
+        && let Some(section) = field.section()
+    {
+        return Some(section);
+    }
+    match session.scope {
+        EditScope::Tab(RequestTab::Headers) => Some(EntrySection::Headers),
+        EditScope::Tab(RequestTab::Params) => {
+            if session.active_part == 0 {
+                Some(EntrySection::QueryParams)
+            } else {
+                Some(EntrySection::PathParams)
+            }
+        }
+        EditScope::Tab(RequestTab::Vars) => {
+            if session.active_part == 0 {
+                Some(EntrySection::VarsPreRequest)
+            } else {
+                Some(EntrySection::VarsPostResponse)
+            }
+        }
+        EditScope::Tab(RequestTab::Assert) => Some(EntrySection::Assert),
+        EditScope::Tab(RequestTab::Settings) => Some(EntrySection::Settings),
+        EditScope::Tab(RequestTab::Body) => match session.preview.body.as_ref().map(|b| &b.kind) {
+            Some(crate::collection::BodyKind::FormUrlEncoded) => Some(EntrySection::FormUrlEncoded),
+            Some(crate::collection::BodyKind::MultipartForm) => Some(EntrySection::MultipartForm),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -2901,7 +3073,12 @@ mod tests {
                 .join("tests/fixtures/collections/writer-cases/simple.bru"),
         )
         .expect("stamp");
-        let mut session = EditSession::new(PathBuf::from("req.bru"), stamp, view.clone());
+        let mut session = EditSession::new(
+            PathBuf::from("req.bru"),
+            stamp,
+            view.clone(),
+            EditScope::Tab(RequestTab::Headers),
+        );
 
         assert_eq!(
             field_value(&session, &EditableField::Url),
@@ -2921,7 +3098,7 @@ mod tests {
             enabled: true,
         });
         session.cursor = 99;
-        session.set_preview(preview);
+        session.set_preview(preview.clone());
         assert_eq!(session.cursor, session.fields.len() - 1);
         assert!(session.fields.contains(&EditableField::HeaderValue(1)));
         assert!(!session.fields.contains(&EditableField::HeaderValue(2)));
@@ -2933,28 +3110,34 @@ mod tests {
             session
                 .current_field()
                 .map(|f| f.display_name(&session.preview)),
-            Some("Documentation".to_owned())
+            Some("En-tête X-Added".to_owned())
         );
 
         // En saisie sur un champ : le tampon est affiché pour ce champ seul.
-        session.cursor = session
+        let mut req_session = EditSession::new(
+            PathBuf::from("req.bru"),
+            stamp,
+            preview,
+            EditScope::Request,
+        );
+        req_session.cursor = req_session
             .fields
             .iter()
             .position(|f| *f == EditableField::Url)
             .expect("URL présente");
-        session.state = EditState::Input(TextInput::new("https://typed", false));
-        assert_eq!(field_value(&session, &EditableField::Url), "https://typed");
+        req_session.state = EditState::Input(TextInput::new("https://typed", false));
+        assert_eq!(field_value(&req_session, &EditableField::Url), "https://typed");
         assert_eq!(
-            field_value_committed(&session, &EditableField::Url),
+            field_value_committed(&req_session, &EditableField::Url),
             "https://example.com"
         );
         // Saisie d'une clé : aucun champ existant n'affiche le tampon.
-        session.target = InputTarget::NewKey {
+        req_session.target = InputTarget::NewKey {
             section: crate::writer::EntrySection::Headers,
             return_cursor: 0,
         };
         assert_eq!(
-            field_value(&session, &EditableField::Url),
+            field_value(&req_session, &EditableField::Url),
             "https://example.com"
         );
         assert!(!session.has_unsaved());

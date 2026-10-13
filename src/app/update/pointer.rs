@@ -82,14 +82,8 @@ fn input_field_lines(model: &Model) -> Option<std::ops::Range<usize>> {
 }
 
 fn mouse_press(model: &mut Model, input: MouseInput) {
-    // Les sélecteurs se pilotent au clavier seulement : un clic ailleurs
-    // les referme sans rien changer, comme `Échap`.
-    if model
-        .editing
-        .as_ref()
-        .is_some_and(|s| matches!(s.state, EditState::Picker { .. }))
-    {
-        cancel_input(model);
+    if model.editing.is_some() {
+        edit_popup_mouse_press(model, input);
         return;
     }
     // Panneau Environnement (permanent) et popup d'édition : résolution
@@ -233,6 +227,38 @@ fn environment_panel_mouse_press(model: &mut Model, index: usize) {
     }
 }
 
+fn edit_popup_mouse_press(model: &mut Model, input: MouseInput) {
+    let Some(session) = &mut model.editing else {
+        return;
+    };
+    if matches!(session.state, EditState::Picker { .. }) {
+        cancel_input(model);
+        return;
+    }
+    let screen = Rect::new(0, 0, model.size.0, model.size.1);
+    let popup = crate::app::view::edit_popup_area(screen, session);
+    let inner_popup = inner(popup);
+    let pos = Position::new(input.column, input.row);
+    if !inner_popup.contains(pos) {
+        // Clic hors du popup : ne fait rien
+        return;
+    }
+    let row_idx = usize::from(input.row.saturating_sub(inner_popup.y)) + session.scroll;
+
+    if matches!(session.state, EditState::Input(_)) {
+        if !matches!(validate_input(model, false), Validation::Done) {
+            return;
+        }
+    }
+
+    if let Some(session) = &mut model.editing {
+        if row_idx < session.fields.len() {
+            session.cursor = row_idx;
+            begin_input(model);
+        }
+    }
+}
+
 /// Clic gauche dans le popup d'édition d'un environnement : démarre la
 /// saisie de la valeur cliquée si elle est activée, comme le clic sur un
 /// en-tête de requête (`mouse-support`). Une saisie déjà en cours sur une
@@ -352,7 +378,11 @@ fn mouse_release(model: &mut Model) -> Command {
 fn begin_input_at(model: &mut Model, field: EditableField) -> Command {
     model.focus = Focus::Detail;
     if model.editing.is_none() {
-        start_edit(model);
+        if matches!(field, EditableField::Method | EditableField::Url) {
+            super::start_request_edit(model);
+        } else {
+            start_edit(model);
+        }
     }
     let Some(session) = &mut model.editing else {
         return Command::None;
@@ -368,6 +398,19 @@ fn begin_input_at(model: &mut Model, field: EditableField) -> Command {
 }
 
 fn mouse_wheel(model: &mut Model, input: MouseInput, up: bool) {
+    if let Some(session) = &mut model.editing {
+        let screen = Rect::new(0, 0, model.size.0, model.size.1);
+        let popup = crate::app::view::edit_popup_area(screen, session);
+        if popup.contains(Position::new(input.column, input.row)) {
+            let lines = usize::from(WHEEL_LINES);
+            if up {
+                session.scroll = session.scroll.saturating_sub(lines);
+            } else {
+                session.scroll = session.scroll.saturating_add(lines);
+            }
+        }
+        return;
+    }
     let Some(hit) = hit_test(model, input.column, input.row) else {
         return;
     };
@@ -544,6 +587,15 @@ mod tests {
                 EditableField::Method => (bar.x, bar.y),
                 _ => (url_x + 1, bar.y),
             };
+        }
+        if let Some(session) = &model.editing {
+            let screen = Rect::new(0, 0, model.size.0, model.size.1);
+            let popup = crate::app::view::edit_popup_area(screen, session);
+            let inner_popup = inner(popup);
+            if let Some(idx) = session.fields.iter().position(|f| *f == field) {
+                let y = inner_popup.y + (idx as u16).saturating_sub(session.scroll as u16);
+                return (inner_popup.x + 2, y);
+            }
         }
         let line = field_line(model, field);
         line_point(model, true, line)

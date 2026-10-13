@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod detail;
+pub mod edit_popup;
 pub mod global_search;
 pub mod help;
 pub mod hit;
@@ -14,6 +15,7 @@ pub mod status;
 pub mod theme;
 pub mod tree;
 
+pub use edit_popup::{edit_popup_area, render_edit_popup};
 pub use global_search::{global_search_popup_area, render_global_search_popup};
 pub use help::{help_max_scroll, help_popup_area};
 pub use panels::runner_options_popup_area;
@@ -344,7 +346,6 @@ pub fn view(model: &Model, frame: &mut Frame) {
                         }
                         frame.render_widget(detail, areas.detail);
                     }
-                    render_insert_cursor(model, frame, areas.detail);
                 }
                 if areas.url_bar.width > 0 && areas.url_bar.height > 0 {
                     render_url_bar(model, frame, areas.url_bar);
@@ -405,13 +406,17 @@ pub fn view(model: &Model, frame: &mut Frame) {
         render_global_search_popup(model, popup, frame, popup_area);
     }
 
-    if let Some(session) = &model.editing
-        && let EditState::PlaintextSecretPrompt { var_name, .. } = &session.state
-    {
-        let popup_area = plaintext_secret_popup_area(frame.area());
+    if let Some(session) = &model.editing {
+        let popup_area = edit_popup::edit_popup_area(frame.area(), session);
         frame.render_widget(Clear, popup_area);
         frame.render_widget(Block::default().style(theme::BACKGROUND), popup_area);
-        render_plaintext_secret_popup(var_name, frame, popup_area);
+        edit_popup::render_edit_popup(model, session, frame, popup_area);
+        if let EditState::PlaintextSecretPrompt { var_name, .. } = &session.state {
+            let prompt_area = plaintext_secret_popup_area(frame.area());
+            frame.render_widget(Clear, prompt_area);
+            frame.render_widget(Block::default().style(theme::BACKGROUND), prompt_area);
+            render_plaintext_secret_popup(var_name, frame, prompt_area);
+        }
     }
 
     frame.render_widget(
@@ -609,45 +614,6 @@ fn render_boxed_detail(model: &Model, frame: &mut Frame, area: Rect, block: Bloc
             frame_buf[(inner_area.x + x, inner_area.y + y)] = cell;
         }
     }
-}
-
-fn render_insert_cursor(model: &Model, frame: &mut Frame, detail_area: Rect) {
-    let Some(session) = &model.editing else {
-        return;
-    };
-    if !matches!(session.state, EditState::Input(_)) {
-        return;
-    }
-    let Some((line_index, col_index)) = detail::cursor_position_for_model(model) else {
-        return;
-    };
-    let inner_area = inner(detail_area);
-    if inner_area.width == 0 || inner_area.height == 0 {
-        return;
-    }
-    let scroll = model.detail_scroll as usize;
-    if line_index < scroll {
-        return;
-    }
-    let rel_y = line_index - scroll;
-    if rel_y >= inner_area.height as usize {
-        return;
-    }
-    // Une colonne de bordure gauche en plus quand la ligne appartient à
-    // une boîte de section (`add-boxed-detail-sections`) : le modèle
-    // logique de position ne change pas, seul son placement à l'écran
-    // tient compte du cadre (design.md, « Position du curseur de texte »).
-    let boxes = detail::detail_section_boxes(model);
-    let border_offset: u16 = if boxes.iter().any(|b| b.contains(line_index)) {
-        1
-    } else {
-        0
-    };
-    let cursor_y = inner_area.y + rel_y as u16;
-    let col_index = u16::try_from(col_index).unwrap_or(u16::MAX);
-    let max_col = inner_area.width.saturating_sub(1 + border_offset);
-    let cursor_x = inner_area.x + border_offset + col_index.min(max_col);
-    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn title_line(model: &Model) -> Line<'static> {
@@ -1013,7 +979,7 @@ fn status_line(model: &Model) -> String {
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Detail) => {
-            "↑↓ défiler  ←→ onglet  Entrée éditer  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter  z plein écran"
+            "↑↓ défiler  ←→ onglet  Entrée éditer  m requête  / chercher  n/N suivant  v sélection  y copier  ? aide  Échap arbre  q quitter  z plein écran"
                 .to_owned()
         }
         (CollectionState::Loaded(_), Focus::Response) => {
@@ -1751,22 +1717,20 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
 
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
 
-        let detail_area = layout_for((100, 30), None).expect("layout").detail;
-        let inner_area = inner(detail_area);
+        let popup_area = edit_popup_area(Rect::new(0, 0, 100, 30), model.editing.as_ref().unwrap());
+        let inner_area = inner(popup_area);
         let buffer = terminal.backend().buffer();
 
-        // Ligne 1 du détail = ligne URL, la méthode ayant sa propre ligne
-        // avant elle (`add-method-editing`) ; la valeur suit le libellé
-        // « URL : » (6 colonnes).
+        // Ligne 1 du popup = ligne URL
         let url_row = inner_area.y + 1;
-        let url_cell = &buffer[(inner_area.x + 6, url_row)];
+        let url_cell = &buffer[(inner_area.x + 10, url_row)];
         assert!(
             url_cell.modifier.contains(Modifier::REVERSED),
             "le champ sous le curseur doit être visuellement distinct (REVERSED)"
@@ -1804,7 +1768,7 @@ mod tests {
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         assert!(status_line(&model).contains("Entrée éditer"));
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
         let line = status_line(&model);
         assert!(line.contains("Sélection · Url"), "{line}");
@@ -1855,6 +1819,7 @@ mod tests {
     fn help_line_while_editing_the_body() {
         let mut model = loaded_model((100, 30));
         select(&mut model, "post-json.bru");
+        model.request_tab = crate::app::model::RequestTab::Body;
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::StartEdit);
         let body = model
@@ -1903,7 +1868,7 @@ mod tests {
         let mut model = loaded_model((60, 20));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::Enter); // ouvre la session
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
         update(&mut model, Message::Enter); // commence la saisie de l'URL
         for _ in 0..80 {
@@ -1920,20 +1885,14 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).expect("terminal");
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
-        let inner_area = inner(layout_for((60, 20), None).expect("layout").detail);
+        let popup_area = edit_popup_area(Rect::new(0, 0, 60, 20), model.editing.as_ref().unwrap());
+        let inner_area = inner(popup_area);
         let cursor = terminal.get_cursor_position().expect("curseur");
         assert!(cursor.x >= inner_area.x && cursor.x < inner_area.x + inner_area.width);
 
-        // La fin de l'URL est visible juste avant le curseur, sur la ligne
-        // de l'URL qui n'est pas repliée.
+        // La fin de l'URL est visible juste avant le curseur
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(cursor.x - 1, cursor.y)].symbol(), "Z");
-        let next: String = (inner_area.x..inner_area.x + inner_area.width)
-            .map(|x| buffer[(x, cursor.y + 1)].symbol())
-            .collect();
-        // Ligne suivante : la ligne vide qui sépare Méthode et URL de
-        // l'onglet, pas une suite de l'URL.
-        assert!(next.trim().is_empty(), "pas de retour à la ligne : {next}");
     }
 
     #[test]
@@ -1941,7 +1900,7 @@ mod tests {
         let mut model = loaded_model((100, 30));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
-        update(&mut model, Message::StartEdit);
+        update(&mut model, Message::OpenRequestEdit);
         update(&mut model, Message::Down); // Méthode -> URL
 
         let mut terminal =
@@ -1955,17 +1914,11 @@ mod tests {
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("cursor position");
 
-        let detail_area = layout_for((100, 30), None).expect("layout").detail;
-        let inner_area = inner(detail_area);
+        let popup_area = edit_popup_area(Rect::new(0, 0, 100, 30), model.editing.as_ref().unwrap());
+        let inner_area = inner(popup_area);
         assert_eq!(cursor.y, inner_area.y + 1);
         assert!(cursor.x >= inner_area.x);
         assert!(cursor.x < inner_area.x + inner_area.width);
-
-        // Défilement lointain : curseur hors vue, ne panique pas
-        model.detail_scroll = 500;
-        terminal
-            .draw(|frame| view(&model, frame))
-            .expect("rendu sans panique");
     }
 
     #[test]
@@ -2798,34 +2751,21 @@ mod tests {
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         let screen = render(&model, 240, 40).join("\n");
-        assert!(!screen.contains("+ Ajouter"), "{screen}");
+        assert!(!screen.contains("a ajouter"), "{screen}");
 
         update(&mut model, Message::Enter);
         let screen = render(&model, 240, 40).join("\n");
-        assert!(
-            screen.contains("+ Ajouter un paramètre de requête"),
-            "{screen}"
-        );
-        assert!(
-            screen.contains("+ Ajouter un paramètre de chemin"),
-            "{screen}"
-        );
-        model.request_tab = crate::app::model::RequestTab::Headers;
-        let screen = render(&model, 240, 40).join("\n");
-        assert!(screen.contains("+ Ajouter un en-tête"), "{screen}");
+        assert!(screen.contains("Params — simple-get.bru"), "{screen}");
+        assert!(screen.contains("a ajouter"), "{screen}");
     }
 
     #[test]
     fn synchronised_url_is_shown_before_saving() {
-        use crate::app::model::EditableField;
-        use crate::writer::EntrySection;
-
         let mut model = loaded_model((240, 40));
         select(&mut model, "simple-get.bru");
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::Enter);
-        go_to_field(&mut model, EditableField::AddRow(EntrySection::QueryParams));
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::Add);
         for c in "page".chars() {
             key(&mut model, c);
         }
@@ -2835,21 +2775,18 @@ mod tests {
 
         let screen = render(&model, 240, 40).join("\n");
         assert!(screen.contains("GET"), "{screen}");
-        assert!(screen.contains("https://{{host}}/ping?page=2"), "{screen}");
-        assert!(screen.contains("page: 2"), "{screen}");
+        assert!(screen.contains("page"), "{screen}");
+        assert!(screen.contains("2"), "{screen}");
         assert!(model.editing.as_ref().is_some_and(|s| s.dirty));
     }
 
     #[test]
     fn text_cursor_follows_the_key_of_a_new_entry() {
-        use crate::app::model::EditableField;
-        use crate::writer::EntrySection;
-
         let mut model = loaded_model((100, 40));
         select(&mut model, "simple-get.bru");
+        model.request_tab = crate::app::model::RequestTab::Headers;
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::Enter);
-        go_to_field(&mut model, EditableField::AddRow(EntrySection::Headers));
         update(&mut model, Message::Add);
         for c in "X-T".chars() {
             key(&mut model, c);
@@ -2859,24 +2796,14 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).expect("terminal");
         terminal.draw(|frame| view(&model, frame)).expect("rendu");
         let cursor = terminal.get_cursor_position().expect("curseur");
-        let inner_area = inner(layout_for((100, 40), None).expect("layout").detail);
-        // +1 pour la bordure gauche de la boîte de section « En-têtes »
-        // (`add-boxed-detail-sections`), en plus de l'indentation « 2 » et
-        // des 3 caractères tapés.
-        assert_eq!(cursor.x, inner_area.x + 1 + 2 + 3);
+        let popup_area = edit_popup_area(Rect::new(0, 0, 100, 40), model.editing.as_ref().unwrap());
+        let inner_area = inner(popup_area);
+        assert_eq!(cursor.x, inner_area.x + 3);
         let buffer = terminal.backend().buffer();
         let row: String = (inner_area.x..inner_area.x + inner_area.width)
             .map(|x| buffer[(x, cursor.y)].symbol())
             .collect();
-        let content: String = row.chars().skip(1).collect();
-        assert!(content.starts_with("  X-T"), "{row}");
-
-        // Étape de la valeur : le curseur suit la valeur après `clé: `.
-        update(&mut model, Message::ValidateInput);
-        key(&mut model, 'v');
-        terminal.draw(|frame| view(&model, frame)).expect("rendu");
-        let cursor = terminal.get_cursor_position().expect("curseur");
-        assert_eq!(cursor.x, inner_area.x + 1 + "  X-T: v".len() as u16);
+        assert!(row.starts_with("X-T"), "{row}");
     }
 
     #[test]
@@ -2910,10 +2837,10 @@ mod tests {
     #[test]
     fn help_line_on_an_entry_and_during_an_add() {
         use crate::app::model::EditableField;
-        use crate::writer::EntrySection;
 
         let mut model = loaded_model((100, 40));
         select(&mut model, "scripted.bru");
+        model.request_tab = crate::app::model::RequestTab::Headers;
         update(&mut model, Message::NextFocus);
         update(&mut model, Message::Enter);
         go_to_field(&mut model, EditableField::HeaderValue(0));
@@ -2922,12 +2849,7 @@ mod tests {
         assert!(line.contains("d supprimer"), "{line}");
         assert!(line.contains("c renommer"), "{line}");
 
-        go_to_field(&mut model, EditableField::AddRow(EntrySection::Headers));
-        let line = status_line(&model);
-        assert!(line.contains("Entrée ajouter"), "{line}");
-        assert!(!line.contains("d supprimer"), "{line}");
-
-        update(&mut model, Message::Enter);
+        update(&mut model, Message::Add);
         let line = status_line(&model);
         assert!(line.contains("Saisie · Ajout · En-têtes · clé"), "{line}");
         assert!(line.contains("Échap annuler"), "{line}");

@@ -803,6 +803,12 @@ fn apply(model: &mut Model, message: Message) -> Command {
             }
             Command::None
         }
+        Message::OpenRequestEdit => {
+            if model.focus == Focus::Detail {
+                start_request_edit(model);
+            }
+            Command::None
+        }
         Message::Enter => {
             if model.focus == Focus::Detail {
                 enter_in_detail(model)
@@ -1271,8 +1277,11 @@ mod tests {
         model.editing = Some(EditSession {
             path: PathBuf::from("req.bru"),
             stamp,
+            scope: crate::app::model::EditScope::Request,
+            active_part: 0,
             fields: vec![EditableField::Url],
             cursor: 0,
+            scroll: 0,
             state: EditState::FieldSelect,
             target: super::super::model::InputTarget::Field,
             pending: vec![],
@@ -1327,8 +1336,11 @@ mod tests {
         model.editing = Some(EditSession {
             path: PathBuf::from("req.bru"),
             stamp,
+            scope: crate::app::model::EditScope::Request,
+            active_part: 0,
             fields: vec![EditableField::Url],
             cursor: 0,
+            scroll: 0,
             state: EditState::FieldSelect,
             target: super::super::model::InputTarget::Field,
             pending: vec![],
