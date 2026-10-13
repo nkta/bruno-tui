@@ -992,7 +992,7 @@ pub(crate) fn panel(title: &'static str, focused: bool) -> Block<'static> {
 
 /// Panneau bordé : bordure et titre en couleur de focus quand il a le
 /// focus ; sinon bordure discrète et titre gris lisible.
-fn titled_panel(title: String, focused: bool) -> Block<'static> {
+pub(crate) fn titled_panel(title: String, focused: bool) -> Block<'static> {
     let (border, title_style) = if focused {
         (theme::FOCUS, theme::FOCUS)
     } else {

@@ -534,7 +534,15 @@ const DISABLED_ENTRY_VALUE: Style =
 /// (`render_environment_edit_popup`,
 /// `add-environment-panel-and-edit-popup`).
 pub fn render_environment_picker(model: &Model, frame: &mut Frame, area: Rect) {
-    let block = panel(" Environnement ", model.focus == Focus::EnvironmentPicker);
+    // En mode workspace, le titre rappelle la collection active.
+    let title = match crate::app::workspace::active_member(model) {
+        Some(member) => format!(
+            " Environnement — {} ",
+            crate::app::workspace::member_name(model, member)
+        ),
+        None => " Environnement ".to_owned(),
+    };
+    let block = super::titled_panel(title, model.focus == Focus::EnvironmentPicker);
     let Some(collection) = model.loaded() else {
         frame.render_widget(Paragraph::new("aucune collection").block(block), area);
         return;

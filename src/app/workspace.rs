@@ -576,6 +576,9 @@ mod tree_tests {
         }
         let screen = render(&model, 100, 30).join("\n");
         assert!(screen.contains("Workspace : Demo"), "{screen}");
+        model.focus = crate::app::model::Focus::EnvironmentPicker;
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("Environnement — runner-probe"), "{screen}");
     }
 
     #[test]

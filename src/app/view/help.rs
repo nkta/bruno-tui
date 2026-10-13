@@ -95,6 +95,14 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "sélectionner la collection racine (affiche collection.bru dans le Détail)",
             },
             HelpEntry {
+                key: "→/l, ←/h (en-tête)",
+                effect: "workspace : déplier/replier une collection",
+            },
+            HelpEntry {
+                key: "↑/↓ (autre collection)",
+                effect: "workspace : la rend active (environnement, secrets, historique, campagne) ; refusé pendant une exécution",
+            },
+            HelpEntry {
                 key: "O",
                 effect: "options de campagne (tags, TLS, données, sandbox, rapports)",
             },
