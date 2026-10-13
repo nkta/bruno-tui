@@ -1686,6 +1686,9 @@ pub struct Model {
     pub history_enabled: bool,
     /// Commande de l'éditeur externe configurée au lancement (`--editor`).
     pub editor: Option<String>,
+    /// Plusieurs collections ouvertes ensemble ; `None` pour une seule
+    /// collection. Les champs ci-dessus décrivent alors la collection active.
+    pub workspace: Option<super::workspace::WorkspaceState>,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -2328,6 +2331,7 @@ impl Model {
             export_input: None,
             history_enabled: false,
             editor: None,
+            workspace: None,
         }
     }
 
