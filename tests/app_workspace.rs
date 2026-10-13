@@ -197,5 +197,5 @@ async fn each_collection_runs_from_its_own_root() {
     assert!(matches!(exit, Exit::Normal));
     let text = screen(&terminal);
     assert!(text.contains("Workspace : Demo"), "{text}");
-    assert!(text.contains("✗ Absente"), "{text}");
+    assert!(text.contains("✗ Absente — pas une collection"), "{text}");
 }

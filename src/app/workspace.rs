@@ -594,6 +594,13 @@ mod tree_tests {
         assert!(screen.contains("✗ multi-env-probe"), "{screen}");
         update(&mut model, Message::Down);
         assert_eq!(active_member(&model), Some(1));
+        // L'arbre reste affiché, le détail porte l'erreur ; on peut revenir.
+        let screen = render(&model, 100, 30).join("\n");
+        assert!(screen.contains("runner-probe"), "{screen}");
+        assert!(screen.contains("Impossible de charger"), "{screen}");
+        update(&mut model, Message::Up);
+        assert_eq!(active_member(&model), Some(0));
+        update(&mut model, Message::Down);
         update(&mut model, Message::Right);
         assert_eq!(model.tree.rows.len(), 2, "rien à déplier");
     }

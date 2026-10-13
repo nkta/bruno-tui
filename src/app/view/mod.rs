@@ -32,7 +32,7 @@ use super::model::{
     StatusMessage,
 };
 use super::update::{active_tree_filter_pattern, is_tree_filtered};
-use crate::collection::TreeNode;
+use crate::collection::{LoadError, TreeNode};
 
 /// Largeur minimale du terminal : exactement la somme des planchers de
 /// l'arbre, du détail et de la réponse (`MIN_TREE_WIDTH +
@@ -239,6 +239,31 @@ pub fn view(model: &Model, frame: &mut Frame) {
     render_header(model, frame, areas.title);
 
     match &model.collection {
+        // Workspace : l'arbre des autres collections reste affiché, le
+        // détail explique l'état de la collection active.
+        CollectionState::Loading | CollectionState::Failed(_) if model.workspace.is_some() => {
+            if areas.tree.width > 0 && areas.tree.height > 0 {
+                render_tree(model, frame, areas.tree);
+            }
+            let lines = match &model.collection {
+                CollectionState::Failed(error) => vec![
+                    Line::styled(
+                        "Impossible de charger la collection",
+                        Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::default(),
+                    Line::raw(error.to_string()),
+                ],
+                _ => vec![Line::raw("Chargement…")],
+            };
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(panel(TITLE_DETAIL, false)),
+                areas.detail,
+            );
+            frame.render_widget(panel(" Réponse ", false), areas.response);
+        }
         CollectionState::Loading => {
             frame.render_widget(
                 Paragraph::new("Chargement…").block(panel(" Collection ", true)),
@@ -1094,13 +1119,19 @@ fn workspace_header_line(model: &Model, member: usize) -> ratatui::text::Line<'s
         return ratatui::text::Line::default();
     };
     let open = state.open.get(member).copied().unwrap_or(false);
-    let error;
+    // Raison courte : le message complet, chemin compris, est dans le
+    // détail quand la collection est sélectionnée.
     let header_state = match member_collection(model, member) {
         Some(CollectionState::Loaded(_)) => tree::HeaderState::Loaded,
-        Some(CollectionState::Failed(failure)) => {
-            error = failure.to_string();
-            tree::HeaderState::Failed(&error)
-        }
+        Some(CollectionState::Failed(failure)) => tree::HeaderState::Failed(match failure {
+            LoadError::NotACollection { .. } | LoadError::NotACollectionRoot { .. } => {
+                "pas une collection"
+            }
+            LoadError::Io { .. } => "illisible",
+            LoadError::InvalidConfig { .. } | LoadError::InvalidOpenCollection { .. } => {
+                "configuration invalide"
+            }
+        }),
         _ => tree::HeaderState::Loading,
     };
     tree::header_line(
