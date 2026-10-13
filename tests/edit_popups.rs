@@ -812,6 +812,111 @@ fn script_tests_and_docs_popups_use_the_external_editor() {
     );
 }
 
+// --- Dossier et collection ---------------------------------------------------
+
+/// Dossier : seuls les popups de ses onglets existent (pas de Requête).
+#[test]
+fn folder_popups_edit_headers_then_vars() {
+    let mut ui = Ui::new("folder-ops", &[("folder-ops.bru", "grp/folder.bru")]);
+    ui.select("grp");
+    ui.key(KeyCode::Char('m'));
+    assert!(ui.model.editing.is_none(), "pas de popup Requête");
+    // Corps n'existe pas pour un dossier : l'onglet affiché est En-têtes.
+    ui.model.request_tab = RequestTab::Body;
+    ui.key(KeyCode::Enter);
+    let session = ui.model.editing.as_ref().expect("popup");
+    assert_eq!(session.scope, EditScope::Tab(RequestTab::Headers));
+    assert_eq!(session.path, Path::new("grp/folder.bru"));
+    ui.key(KeyCode::Enter);
+    ui.keys(KeyCode::Backspace, 2);
+    ui.chars("v2");
+    ui.key(KeyCode::Enter);
+    ui.save();
+    ui.open(RequestTab::Vars);
+    ui.key(KeyCode::Char('a'));
+    ui.chars("folder_var");
+    ui.key(KeyCode::Tab);
+    ui.chars("hello");
+    ui.key(KeyCode::Enter);
+    ui.save();
+    ui.assert_matches("grp/folder.bru", "folder-ops.after.bru");
+}
+
+#[test]
+fn collection_popups_edit_headers_then_vars() {
+    let mut ui = Ui::new(
+        "collection-ops",
+        &[("collection-ops.bru", "collection.bru")],
+    );
+    ui.select_collection();
+    ui.key(KeyCode::Char('m'));
+    assert!(ui.model.editing.is_none(), "pas de popup Requête");
+    ui.open(RequestTab::Headers);
+    assert_eq!(
+        ui.model.editing.as_ref().map(|s| s.path.clone()),
+        Some(PathBuf::from("collection.bru"))
+    );
+    ui.key(KeyCode::Enter);
+    ui.keys(KeyCode::Backspace, "init".len());
+    ui.chars("changed");
+    ui.key(KeyCode::Enter);
+    ui.save();
+    ui.open(RequestTab::Vars);
+    ui.key(KeyCode::Char('a'));
+    ui.chars("coll_var");
+    ui.key(KeyCode::Tab);
+    ui.chars("world");
+    ui.key(KeyCode::Enter);
+    ui.save();
+    ui.assert_matches("collection.bru", "collection-ops.after.bru");
+}
+
+/// gRPC, WebSocket et collections YAML : `Entrée` et `m` n'ouvrent aucun
+/// popup, le statut indique la lecture seule.
+#[test]
+fn read_only_requests_and_collections_open_no_popup() {
+    use bruno_tui::app::model::StatusMessage;
+    use bruno_tui::collection::OpenCollectionLoader;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/collections");
+    let mut ui = Ui::new("read-only", &[]);
+    let probe = root.join("grpc-ws-probe");
+    ui.model = Model::new(probe.clone(), (120, 40));
+    update(
+        &mut ui.model,
+        Message::CollectionLoaded(BruLoader.load(&probe)),
+    );
+    for request in ["say-hello.bru", "echo.bru"] {
+        ui.select(request);
+        for key in [KeyCode::Enter, KeyCode::Char('m')] {
+            ui.model.last_status = None;
+            ui.key(key);
+            assert!(ui.model.editing.is_none(), "{request} {key:?}");
+            assert!(
+                matches!(
+                    ui.model.last_status,
+                    Some(StatusMessage::ReadOnlyRequestType(_))
+                ),
+                "{request} {key:?}"
+            );
+        }
+    }
+
+    let probe = root.join("oc-probe");
+    ui.model = Model::new(probe.clone(), (120, 40));
+    update(
+        &mut ui.model,
+        Message::CollectionLoaded(OpenCollectionLoader.load(&probe)),
+    );
+    ui.select_collection();
+    ui.key(KeyCode::Enter);
+    assert!(ui.model.editing.is_none());
+    assert!(matches!(
+        ui.model.last_status,
+        Some(StatusMessage::ReadOnlyCollection)
+    ));
+}
+
 // --- Fermeture -------------------------------------------------------------
 
 /// `Échap` sans changement ferme aussitôt ; avec changement, il demande

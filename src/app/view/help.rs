@@ -133,7 +133,11 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "Entrée / e",
-                effect: "ouvrir une session d'édition (refusée en YAML et pour gRPC/WebSocket)",
+                effect: "ouvrir le popup d'édition de l'onglet affiché (refusé en YAML et pour gRPC/WebSocket)",
+            },
+            HelpEntry {
+                key: "m",
+                effect: "ouvrir le popup Requête (méthode et URL), depuis n'importe quel onglet",
             },
             HelpEntry {
                 key: "/",
@@ -162,51 +166,67 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
-        title: "Édition d'une requête",
+        title: "Popups d'édition",
         entries: &[
             HelpEntry {
                 key: "↑/k, ↓/j",
-                effect: "champ précédent, suivant",
+                effect: "ligne précédente, suivante",
+            },
+            HelpEntry {
+                key: "Tab, Maj+Tab",
+                effect: "partie suivante, précédente (ex. pré-requête / post-réponse)",
             },
             HelpEntry {
                 key: "Entrée",
-                effect: "modifier la valeur (ou sélecteur de méthode/mode de corps/mode auth/placement apikey, éditeur externe pour scripts, tests, docs)",
+                effect: "modifier la valeur ; liste d'un choix ; éditeur externe pour scripts, tests, docs",
             },
             HelpEntry {
-                key: "Espace",
-                effect: "activer ou désactiver l'en-tête, la variable, le paramètre ou le champ de formulaire",
+                key: "←/h, →/l",
+                effect: "sur un choix (méthode, mode, placement) : valeur précédente, suivante",
             },
             HelpEntry {
                 key: "a",
-                effect: "ajouter une entrée dans la section du champ (clé, puis valeur)",
-            },
-            HelpEntry {
-                key: "d",
-                effect: "supprimer l'en-tête, la variable, le paramètre ou le champ de formulaire, sans confirmation",
+                effect: "ajouter une ligne au tableau (clé, puis valeur)",
             },
             HelpEntry {
                 key: "c",
-                effect: "renommer la clé de l'en-tête, de la variable, du paramètre ou du champ de formulaire (hors @file)",
+                effect: "renommer la clé (hors @file)",
+            },
+            HelpEntry {
+                key: "d",
+                effect: "supprimer la ligne, sans confirmation",
+            },
+            HelpEntry {
+                key: "Espace",
+                effect: "activer ou désactiver la ligne",
             },
             HelpEntry {
                 key: "Ctrl+R",
-                effect: "masquer / révéler les valeurs sensibles d'authentification",
+                effect: "afficher / masquer un secret d'authentification en saisie",
             },
             HelpEntry {
                 key: "Ctrl+S",
-                effect: "enregistrer les modifications (confirmation si suppression d'un bloc auth non vide)",
+                effect: "enregistrer puis fermer (confirmation si un bloc auth non vide est supprimé)",
             },
             HelpEntry {
                 key: "Échap",
-                effect: "fermer la session d'édition (confirmation si modifiée)",
+                effect: "fermer le popup (confirmation y/n s'il est modifié)",
             },
             HelpEntry {
-                key: "Entrée / Tab",
-                effect: "en saisie : valider la valeur (Entrée = saut de ligne dans le corps et variables GraphQL)",
+                key: "Entrée (saisie)",
+                effect: "valider ; saut de ligne dans une zone de texte",
+            },
+            HelpEntry {
+                key: "Tab (saisie)",
+                effect: "valider ; sortir d'une zone de texte",
             },
             HelpEntry {
                 key: "Échap (saisie)",
-                effect: "en saisie : annuler la saisie en cours",
+                effect: "annuler la saisie en cours",
+            },
+            HelpEntry {
+                key: "Clic",
+                effect: "sélectionner une ligne ; un clic hors du popup ne fait rien",
             },
         ],
     },
@@ -546,7 +566,7 @@ mod tests {
                 "Global",
                 "Collection",
                 "Détail",
-                "Édition d'une requête",
+                "Popups d'édition",
                 "Réponse",
                 "Environnement (panneau et popup)",
                 "Diagnostics / Historique / Secrets",

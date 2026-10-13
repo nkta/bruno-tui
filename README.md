@@ -45,7 +45,7 @@ Pour une collection YAML :
   seule » ;
 - l'exécution reste déléguée à `bru run` (chemins `.yml` relatifs à la
   racine) et les résultats du rapport sont rattachés aux requêtes ;
-- l'édition est désactivée : `Entrée`/`e` dans le détail, `e` dans le
+- l'édition est désactivée : `Entrée`/`e`/`m` dans le détail, `e` dans le
   panneau Environnement et `Ctrl+S` affichent « Collection OpenCollection
   (YAML) en lecture seule » ;
 - les requêtes `http`, `graphql`, `grpc` et `websocket` sont affichées
@@ -63,8 +63,8 @@ L'écran est divisé en panneaux : **Collection** (arbre), **Détail** (requête
 sélectionnée), **Environnement** (toujours visible), **Statut** et
 **Réponse**. `Tab` fait tourner le focus entre Collection, Détail et
 Réponse ; `Échap` y ramène directement depuis n'importe où. `q` quitte
-(Collection/Détail), `Ctrl+C` quitte en toutes circonstances — une session
-d'édition non enregistrée demande confirmation.
+(Collection/Détail), `Ctrl+C` quitte en toutes circonstances — un popup
+d'édition non enregistré demande confirmation.
 
 | Touche | Effet |
 |---|---|
@@ -92,7 +92,7 @@ La racine de la collection est surveillée en continu : dès qu'un fichier
 `environments/` est créé, modifié, supprimé ou renommé, la collection est
 automatiquement rechargée en préservant la sélection (par chemin), les dossiers
 dépliés, le focus et l'environnement actif (l'option `--no-watch` permet de
-désactiver cette surveillance). Si une session d'édition comporte des
+désactiver cette surveillance). Si un popup d'édition comporte des
 modifications non enregistrées, le rechargement est différé après sa fermeture
 et un avertissement signale la modification sur disque.
 
@@ -112,8 +112,8 @@ Les requêtes gRPC (`type: grpc`) et WebSocket (`type: ws` en `.bru`,
     (`before-call-start`, `before-message-send`, `after-message-receive`,
     `after-call-end`) ;
   - **Auth**, **Tests**, **Docs**, **Vars**, **Settings** : comme en HTTP ;
-- l'édition est refusée (`Entrée`, `e`, clic) : « Requête gRPC en lecture
-  seule : l'édition ne gère que les requêtes HTTP » ;
+- l'édition est refusée (`Entrée`, `e`, `m`, clic) : « Requête gRPC en
+  lecture seule : l'édition ne gère que les requêtes HTTP » ;
 - `r` sur une telle requête n'appelle pas `bru` et affiche « Requête gRPC :
   type non exécutable par bru run ».
 
@@ -137,15 +137,15 @@ atténués ; une barre d'onglets adaptative fait défiler les onglets sur les
 | `↑`/`k`, `↓`/`j` | défiler dans le détail |
 | `Début`/`g`, `Fin`/`G` | début, fin du détail |
 | `←`/`h`, `→`/`l` | onglet précédent/suivant (requête, dossier ou collection) |
-| `Entrée` / `e` | ouvrir une session d'édition (requêtes HTTP uniquement ; refusée pour gRPC/WebSocket) |
+| `Entrée` / `e` | ouvrir le popup d'édition de l'onglet affiché (requêtes HTTP, dossiers, collection ; refusé pour gRPC/WebSocket) |
+| `m` | ouvrir le popup Requête (méthode et URL), depuis n'importe quel onglet |
 | `/` | chercher dans l'onglet affiché ; `n`/`N` : occurrence suivante/précédente |
 | `v` | sélection visuelle de lignes ; `y` copie dans le presse-papiers |
-| `Clic` | cliquer sur un onglet pour l'afficher |
+| `Clic` | cliquer sur un onglet pour l'afficher ; sur un champ, ouvrir son popup d'édition |
 
-Les onglets Script (scripts pré-requête et post-réponse), Tests et Docs restent
-édités dans un éditeur externe ; les onglets Vars, Assert et Settings
-sont éditables directement dans le TUI pour les fichiers `.bru`. Les onglets Script
-et Tests affichent le code brut avec numérotation de lignes, aussi bien pour les
+Le détail est en lecture seule : l'édition passe par les popups (voir
+[Édition par popups](#édition-par-popups)). Les onglets Script et Tests
+affichent le code brut avec numérotation de lignes, aussi bien pour les
 fichiers `.bru` que pour les collections OpenCollection YAML.
 
 ### Contenu des dossiers et de la collection racine
@@ -163,40 +163,85 @@ fichiers `.bru` que pour les collections OpenCollection YAML.
 - **Masquage d'authentification** : les valeurs littérales sensibles (mots de passe, tokens,
   secrets, clés d'API) sont masquées (`********`) dans l'onglet Auth, tandis que les références
   de variables (`{{variable}}`) restent visibles en clair.
-- **Édition** : pour les collections Bruno (`.bru`), les requêtes, les dossiers (`folder.bru`)
-  et la racine (`collection.bru`) sont éditables (`Entrée` / `e`) : en-têtes, variables
-  (`vars:pre-request`, `vars:post-response`), assertions, réglages (`settings`, valeurs seules)
-  et blocs de texte (scripts, tests, documentation). Les collections OpenCollection (YAML),
-  gRPC et WebSocket restent strictement en lecture seule.
+- **Édition** : pour les collections Bruno (`.bru`), les dossiers (`folder.bru`) et la
+  racine (`collection.bru`) s'éditent par les popups de leurs onglets (`Entrée` / `e`) :
+  en-têtes, authentification, variables, scripts, tests, documentation. Ils n'ont ni popup
+  Requête, ni Params, ni Corps. Les collections OpenCollection (YAML), gRPC et WebSocket
+  restent strictement en lecture seule.
 
 
-## Édition (requêtes, dossiers, collection)
+## Édition par popups
 
-Dans le panneau Détail, `Entrée` (ou `e`) ouvre une session d'édition de la requête,
-du dossier (`folder.bru`) ou de la collection (`collection.bru`) sélectionné. Rien n'est
-écrit sur disque avant `Ctrl+S`.
+Le panneau Détail est en lecture seule. Chaque onglet s'édite dans un
+popup centré, par-dessus l'écran, comme le popup d'environnement :
 
-Sélection de champ (URL, méthode, mode du corps, en-têtes, formulaires, paramètres de requête et de
-chemin, corps, variables, assertions, réglages, scripts pré/post, tests,
-documentation) :
+- `Entrée` (ou `e`) dans le détail ouvre le popup de l'**onglet affiché** ;
+- `m` ouvre le popup **Requête** (méthode et URL), depuis n'importe quel onglet ;
+- un clic sur un champ du détail ou de la barre d'URL ouvre son popup.
+
+Un popup édite un seul fichier : la requête, le `folder.bru` ou le
+`collection.bru` sélectionné. Ses modifications restent dans le popup :
+rien n'est écrit sur disque avant `Ctrl+S`.
+
+| Popup | Contenu |
+|---|---|
+| Requête (`m`) | Méthode ‹ GET › ; URL |
+| Params | Paramètres de requête ; Paramètres de chemin |
+| En-têtes | tableau Clé / Valeur |
+| Auth | Mode ‹ bearer › ; paramètres du mode |
+| Corps | Mode ‹ json › ; contenu du mode |
+| Vars | Pré-requête ; Post-réponse |
+| Assert | tableau (clé = expression, valeur = `eq 200`) |
+| Settings | valeurs seulement |
+| Script | Pré-requête ; Post-réponse |
+| Tests, Docs | aperçu du bloc |
+
+Touches communes :
 
 | Touche | Effet |
 |---|---|
-| `↑`/`k`, `↓`/`j` | champ précédent, suivant |
-| `Entrée` | modifier la valeur ; sur la méthode, le mode du corps, le mode d'authentification ou le placement d'API Key, ouvre un sélecteur (`↑↓` choisir, `Entrée` valider, `Échap` annuler) ; sur un bloc de texte (script, test, doc), ouvre l'éditeur externe ; sur une ligne « + Ajouter », ajoute une entrée |
-| `Espace` | activer ou désactiver l'en-tête, le paramètre, la variable, l'assertion ou le champ de formulaire |
-| `a` | ajouter une entrée dans la section du champ (clé, puis valeur) |
-| `d` | supprimer l'en-tête, le paramètre, la variable, l'assertion ou le champ de formulaire, sans confirmation |
-| `c` | renommer la clé de l'en-tête, du paramètre, de la variable, de l'assertion ou du champ de formulaire (hors `@file(...)`) |
-| `Ctrl+R` | masquer / révéler les valeurs sensibles d'authentification |
-| `Ctrl+S` | enregistrer sur le disque (demande confirmation si un ancien bloc d'authentification non vide est supprimé) |
-| `Échap` | fermer la session (confirmation si modifiée) |
+| `↑`/`k`, `↓`/`j` | ligne précédente, suivante |
+| `Tab`, `Maj+Tab` | partie suivante, précédente (ex. pré-requête / post-réponse) |
+| `Entrée` | modifier la valeur ; sur un choix, ouvrir sa liste (`↑↓`, `Entrée`, `Échap`) ; sur un script, des tests ou la doc, ouvrir l'éditeur externe |
+| `←`/`h`, `→`/`l` | sur un choix (méthode, mode, placement) : valeur précédente, suivante |
+| `Ctrl+S` | enregistrer, puis fermer le popup |
+| `Échap` | annuler la saisie en cours ; sinon fermer le popup |
+
+Tableaux clé / valeur (en-têtes, paramètres, vars, assert, formulaires
+du corps) :
+
+| Touche | Effet |
+|---|---|
+| `Entrée` | modifier la valeur |
+| `c` | renommer la clé (hors `@file(...)`) |
+| `a` | ajouter une ligne (clé, puis valeur) ; une partie vide affiche « aucune ligne · a ajouter » |
+| `d` | supprimer la ligne, sans confirmation |
+| `Espace` | activer / désactiver la ligne |
+
+- Une ligne désactivée s'affiche grisée, avec « (désactivé) ».
+- Fermer avec des changements non enregistrés demande « Abandonner les
+  modifications ? (y/n) » ; le titre du popup affiche alors
+  « ● non enregistré ».
+- La dernière ligne du popup rappelle les touches utiles à l'endroit du
+  curseur ; la barre de statut les répète.
+- Un clic sur une ligne la sélectionne (une saisie en cours est d'abord
+  validée) ; un clic hors du popup ne fait rien. La molette fait défiler
+  le popup.
+- Tant que le popup est ouvert, il garde le clavier : ni l'arbre, ni les
+  autres panneaux ne réagissent.
+
+Saisie : `Entrée` ou `Tab` valide, `Échap` annule, `Ctrl+S` valide puis
+enregistre ; pendant la saisie de la clé d'une nouvelle entrée, `Ctrl+S`
+l'ajoute avec une valeur vide. Dans une zone de texte (corps, variables
+GraphQL), `Entrée` passe à la ligne et `Tab` sort de la zone. Toute
+lettre tapée en saisie est du texte.
 
 ### Édition de l'authentification et protection des secrets
 
-- **Modes supportés** : `none`, `inherit`, `basic`, `bearer`, `digest`, `ntlm`, `awsv4`, `wsse`, `oauth2`, `apikey`. Pour `apikey`, le placement (`header` ou `queryparams`) est sélectionnable via un sélecteur dédié.
+- **Popup Auth** : ligne Mode ‹ bearer ›, puis les paramètres du mode. `←→` sur le mode le change et remplace aussitôt les lignes par celles du nouveau mode (clés vides) ; revenir au mode d'origine avant `Ctrl+S` retrouve les anciennes valeurs.
+- **Modes proposés** : `none`, `inherit` (pas pour la collection), `basic`, `bearer`, `digest`, `ntlm`, `apikey`, `awsv4`, `wsse`. Pour `apikey`, le placement est un choix ‹ header › / ‹ queryparams ›. OAuth 1, OAuth 2 et Akamai : seules les valeurs des clés existantes se modifient.
 - **Masquage et `Ctrl+R`** : les clés sensibles (tokens, mots de passe, clés secrètes) sont masquées par des puces `•` lors de la saisie (les références `{{variable}}` restent visibles). `Ctrl+R` bascule l'affichage en clair ou masqué.
-- **Détection des secrets en clair** : valider une valeur littérale sur une clé sensible sans variable `{{...}}` ouvre un popup modal d'avertissement :
+- **Détection des secrets en clair** : valider une valeur littérale sur une clé sensible sans variable `{{...}}` ouvre la question dans le bas du popup Auth :
   - `[Entrée]` **Remplacer** par la variable suggérée en camelCase (ex. `{{bearerToken}}`, `{{basicPassword}}`) : le secret en clair est immédiatement oublié (jamais écrit sur disque, jamais loggué), et la barre de statut rappelle la configuration `.env` ou `--secret`.
   - `[g]` **Garder** la valeur en clair.
   - `[Échap]` **Revenir** au mode de saisie.
@@ -204,26 +249,23 @@ documentation) :
 
 ### Édition externe des blocs de texte
 
-Sur un bloc de texte (**Script pré-requête**, **Script post-réponse**, **Tests**, **Documentation**),
-l'appui sur `Entrée` suspend le TUI et ouvre le fichier dans un éditeur externe :
+Dans les popups Script, Tests et Docs, `Entrée` sur un bloc suspend le TUI et ouvre le
+texte dans un éditeur externe. À sa fermeture, on revient au popup, qui montre un aperçu
+des premières lignes ; `Ctrl+S` enregistre.
 
 - **Choix de l'éditeur** : `--editor COMMANDE` prioritaire, puis variable `VISUAL`, puis `EDITOR`, avec repli sur `nano`.
 - **Fichier temporaire sécurisé** : créé dans `$XDG_RUNTIME_DIR` (ou le dossier temporaire système) avec des droits stricts `0600` et une extension adaptée (`.js` pour les scripts/tests, `.md` pour la documentation). Le fichier est systématiquement supprimé dès la fermeture de l'éditeur.
-- **Prise en compte des modifications** : le texte relu devient une modification en attente dans la session. Si le texte est vidé, le bloc correspondant est retiré à l'enregistrement.
+- **Prise en compte des modifications** : le texte relu devient une modification en attente dans le popup. Si le texte est vidé, le bloc correspondant est retiré à l'enregistrement.
 - **Formatage Bruno** : lors de la sauvegarde (`Ctrl+S`), le contenu est réindenté à 2 espaces conformément au format Bruno.
 
 ### Mode et contenu du corps
 
-- **Mode du corps** : champ en tête de l'onglet Corps (`BODY_MODES` : `none`, `json`, `text`, `xml`, `sparql`, `formUrlEncoded`, `multipartForm`, `file`) avec sélecteur clavier (`↑↓`, `Entrée`, `Échap`). Pour les requêtes GraphQL (`type: graphql`), le mode est fixe sans sélecteur. Seule la clé `body:` du bloc méthode change au `Ctrl+S` ; les blocs de corps existants sont préservés à l'octet près.
+- **Mode du corps** : ligne Mode ‹ json › en tête du popup Corps (`none`, `json`, `text`, `xml`, `sparql`, `formUrlEncoded`, `multipartForm`, `file`), changée par `←→` ou par sa liste (`Entrée`). Pour les requêtes GraphQL (`type: graphql`), le mode est fixe. Seule la clé `body:` du bloc méthode change au `Ctrl+S` ; les blocs de corps existants sont préservés à l'octet près.
 - **Formulaires** : `body:form-urlencoded` et `body:multipart-form` s'éditent clé/valeur (`a`, `d`, `c`, `Espace`, `Entrée`). Les champs `@file(...)` de multipart sont en lecture seule (seuls `Espace` et `d` suppression sont autorisés). Les annotations `@contentType(...)` et préfixes `@...` sont préservés à l'octet près.
-- **Variables GraphQL** : `body:graphql:vars` s'édite en texte multiligne directement dans l'onglet Corps.
+- **Texte** (`json`, `text`, `xml`, `sparql`, `graphql`) : zone multiligne dans le popup. `Entrée` passe à la ligne ; `Tab` sort de la zone.
+- **GraphQL** : deux parties, Requête et Variables (`body:graphql:vars`), éditées dans le popup.
 - **Création et suppression** : un bloc absent est créé à sa position canonique définie par Bruno (`jsonToBru.js`), et un bloc vidé est automatiquement retiré à la sauvegarde.
 - **Corps fichier** : `body:file` est en lecture seule.
-
-Saisie : `Entrée` ou `Tab` valide (`Entrée` insère un saut de ligne dans le
-corps et les variables GraphQL), `Échap` annule, `Ctrl+S` valide puis enregistre ; pendant la saisie
-de la clé d'une nouvelle entrée, `Ctrl+S` l'ajoute avec une valeur vide.
-Toute lettre tapée en saisie est du texte.
 
 Comme dans Bruno, les paramètres de requête et l'URL restent cohérents :
 modifier un paramètre reconstruit la chaîne de requête de l'URL à partir
@@ -236,10 +278,10 @@ paramètre de requête, `&`, `#` et le saut de ligne sont refusés (ainsi que
 `=` dans la clé).
 
 À la souris (sauf `--no-mouse`) : cliquer sur l'URL, un en-tête ou un
-paramètre démarre directement sa saisie (ouvre une session si besoin) ;
-cliquer ailleurs valide d'abord la saisie en cours. Glisser dans le
-détail ou la réponse sélectionne des lignes (`v` bascule aussi une
-sélection au clavier), `y` copie la sélection dans le presse-papiers.
+paramètre du détail ouvre son popup et démarre sa saisie (un script, des
+tests ou la doc sont seulement sélectionnés). Glisser dans le détail ou
+la réponse sélectionne des lignes (`v` bascule aussi une sélection au
+clavier), `y` copie la sélection dans le presse-papiers.
 
 ## Panneau Environnement
 
@@ -404,7 +446,7 @@ clavier y navigue.
 
 À tout moment hors saisie de texte, la touche `?` ouvre un popup centré
 rappelant l'ensemble des raccourcis clavier de l'application, organisés par
-section : Global, Collection, Détail, Édition d'une requête, Réponse,
+section : Global, Collection, Détail, Popups d'édition, Réponse,
 Environnement (panneau et popup), Diagnostics / Historique / Secrets, et
 Campagne (TNR).
 
