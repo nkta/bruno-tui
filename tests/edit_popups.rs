@@ -79,6 +79,12 @@ impl Ui {
         self.model.focus = bruno_tui::app::model::Focus::Detail;
     }
 
+    /// Sélectionne la collection (`collection.bru`).
+    fn select_collection(&mut self) {
+        self.model.selected_collection = true;
+        self.model.focus = bruno_tui::app::model::Focus::Detail;
+    }
+
     fn event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Command {
         let event = AppEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)));
         match to_message(event, self.model.text_capture()) {
@@ -364,6 +370,190 @@ fn settings_popup_edits_values_only() {
     ui.key(KeyCode::Enter);
     ui.save();
     ui.assert_matches("settings-ops.bru", "settings-ops.after.bru");
+}
+
+// --- Auth --------------------------------------------------------------------
+
+/// Paramètres d'auth affichés par le popup : `(clé, valeur)`.
+fn auth_rows(ui: &Ui) -> Vec<(String, String)> {
+    ui.model
+        .editing
+        .as_ref()
+        .expect("popup")
+        .preview
+        .auth_params()
+        .iter()
+        .map(|kv| (kv.key.clone(), kv.value.clone()))
+        .collect()
+}
+
+fn rows(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect()
+}
+
+/// Changer de mode remplace aussitôt les lignes ; revenir au mode
+/// d'origine retrouve les valeurs ; `Ctrl+S` demande confirmation avant de
+/// supprimer l'ancien bloc non vide (`n` n'écrit rien, `y` écrit).
+#[test]
+fn auth_popup_switches_mode_restores_values_and_confirms() {
+    let mut ui = Ui::new(
+        "auth-switch",
+        &[("auth-mode-switch.bru", "auth-mode-switch.bru")],
+    );
+    let before = fs::read(ui.root.join("auth-mode-switch.bru")).expect("lecture");
+    ui.select("auth-mode-switch.bru");
+    ui.open(RequestTab::Auth);
+    assert_eq!(ui.field(), Some(EditableField::AuthMode));
+    let original = rows(&[("username", "alice"), ("password", "secretpassword")]);
+    assert_eq!(auth_rows(&ui), original);
+
+    ui.key(KeyCode::Right);
+    assert_eq!(auth_rows(&ui), rows(&[("token", "")]));
+    let fields = ui.model.editing.as_ref().map(|s| s.fields.clone());
+    assert_eq!(
+        fields,
+        Some(vec![
+            EditableField::AuthMode,
+            EditableField::AuthParamValue(0)
+        ])
+    );
+    ui.key(KeyCode::Left);
+    assert_eq!(auth_rows(&ui), original);
+    ui.key(KeyCode::Right);
+
+    let command = ui.event(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    assert!(matches!(command, Command::None));
+    assert_eq!(
+        ui.model.confirm,
+        Some(PendingConfirm::DeleteAuthBlock {
+            former_mode: "basic".into()
+        })
+    );
+    ui.key(KeyCode::Char('n'));
+    assert!(ui.model.editing.is_some());
+    assert_eq!(
+        fs::read(ui.root.join("auth-mode-switch.bru")).expect("lecture"),
+        before
+    );
+
+    ui.event(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let command = ui.key(KeyCode::Char('y'));
+    ui.write(command);
+    ui.assert_matches("auth-mode-switch.bru", "auth-mode-switch.after.bru");
+}
+
+#[test]
+fn auth_popup_keeps_a_plaintext_token_on_g() {
+    let mut ui = Ui::new("auth-param", &[("auth-param.bru", "auth-param.bru")]);
+    ui.select("auth-param.bru");
+    ui.open(RequestTab::Auth);
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    ui.keys(KeyCode::Backspace, "initial_token".len());
+    ui.chars("updated_token");
+    ui.key(KeyCode::Enter);
+    assert!(matches!(
+        ui.model.editing.as_ref().map(|s| &s.state),
+        Some(EditState::PlaintextSecretPrompt { .. })
+    ));
+    ui.key(KeyCode::Char('g'));
+    ui.save();
+    ui.assert_matches("auth-param.bru", "auth-param.after.bru");
+}
+
+/// Secret en clair : `Échap` revient à la saisie avec le texte tapé,
+/// `Entrée` le remplace par la variable suggérée.
+#[test]
+fn auth_popup_replaces_a_plaintext_token_by_a_variable() {
+    let mut ui = Ui::new("auth-replace", &[("auth-param.bru", "auth-param.bru")]);
+    ui.select("auth-param.bru");
+    ui.open(RequestTab::Auth);
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    ui.chars("X");
+    ui.key(KeyCode::Enter);
+    ui.key(KeyCode::Esc);
+    match ui.model.editing.as_ref().map(|s| &s.state) {
+        Some(EditState::Input(input)) => assert_eq!(input.text(), "initial_tokenX"),
+        other => panic!("saisie attendue : {other:?}"),
+    }
+    ui.key(KeyCode::Enter);
+    ui.key(KeyCode::Enter);
+    assert_eq!(auth_rows(&ui), rows(&[("token", "{{bearerToken}}")]));
+    ui.save();
+    let written = fs::read_to_string(ui.root.join("auth-param.bru")).expect("relecture");
+    assert!(
+        written.contains("auth:bearer {\n  token: {{bearerToken}}\n}"),
+        "{written}"
+    );
+}
+
+/// Mode apikey : clé, valeur (variable, sans question), puis placement
+/// choisi avec `→`.
+#[test]
+fn auth_popup_sets_apikey_with_its_placement() {
+    let mut ui = Ui::new("auth-apikey", &[("auth-apikey.bru", "auth-apikey.bru")]);
+    ui.select("auth-apikey.bru");
+    ui.open(RequestTab::Auth);
+    // none, inherit, basic, bearer, digest, ntlm, apikey
+    ui.keys(KeyCode::Right, 6);
+    assert_eq!(
+        auth_rows(&ui),
+        rows(&[("key", ""), ("value", ""), ("placement", "")])
+    );
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    ui.chars("X-API-KEY");
+    ui.key(KeyCode::Enter);
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    ui.chars("{{secretKey}}");
+    ui.key(KeyCode::Enter);
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Right);
+    ui.save();
+    ui.assert_matches("auth-apikey.bru", "auth-apikey.after.bru");
+}
+
+#[test]
+fn auth_popup_on_a_folder() {
+    let mut ui = Ui::new("folder-auth", &[("folder-auth.bru", "grp/folder.bru")]);
+    ui.select("grp");
+    ui.open(RequestTab::Auth);
+    ui.keys(KeyCode::Right, 2);
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    ui.chars("admin");
+    ui.key(KeyCode::Enter);
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    ui.chars("{{secretPassword}}");
+    ui.key(KeyCode::Enter);
+    ui.save();
+    ui.assert_matches("grp/folder.bru", "folder-auth.after.bru");
+}
+
+/// Collection : pas de mode `inherit` dans la liste.
+#[test]
+fn auth_popup_on_the_collection() {
+    let mut ui = Ui::new(
+        "collection-auth",
+        &[("collection-auth.bru", "collection.bru")],
+    );
+    ui.select_collection();
+    ui.open(RequestTab::Auth);
+    // none, basic, bearer
+    ui.keys(KeyCode::Right, 2);
+    assert_eq!(auth_rows(&ui), rows(&[("token", "")]));
+    ui.key(KeyCode::Down);
+    ui.key(KeyCode::Enter);
+    ui.chars("{{collToken}}");
+    ui.key(KeyCode::Enter);
+    ui.save();
+    ui.assert_matches("collection.bru", "collection-auth.after.bru");
 }
 
 // --- Fermeture -------------------------------------------------------------
