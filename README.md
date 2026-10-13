@@ -8,11 +8,13 @@ scripts, ni les tests — seulement l'affichage et l'édition des fichiers.
 ## Lancer l'application
 
 ```
-bruno-tui [OPTIONS] [CHEMIN]
+bruno-tui [OPTIONS] [CHEMIN...]
 ```
 
 `CHEMIN` : une collection, ou un fichier/dossier qu'elle contient (par
-défaut, le répertoire courant).
+défaut, le répertoire courant). Un dossier contenant `workspace.yml`, ou
+plusieurs chemins, ouvrent plusieurs collections ensemble : voir
+[Workspace](#workspace-plusieurs-collections).
 
 Options :
 
@@ -56,6 +58,54 @@ Pour une collection YAML :
   avis dans le panneau Diagnostics (`D`), sans jamais citer de valeur ;
 - le nom d'un environnement est son nom de fichier sans extension, celui
   qu'attend `bru run --env`.
+
+## Workspace (plusieurs collections)
+
+| Commande | Résultat |
+|---|---|
+| `bruno-tui <dossier avec workspace.yml>` | toutes les collections du workspace |
+| `bruno-tui A B C` | workspace sans nom ; chaque chemin est la racine d'une collection |
+| `bruno-tui <collection>` ou `bruno-tui` | une seule collection, comme avant |
+
+`workspace.yml` (format de Bruno 4.2.1) est lu, jamais écrit. Seuls
+`info.name` et `collections[].name` / `path` sont lus ; `path` est
+relatif au dossier du workspace ou absolu. Un `workspace.yml` illisible
+ou invalide arrête le lancement avec un message clair.
+
+**Arbre**
+
+- Une ligne d'en-tête par collection : `▸ Clients`.
+- `→` / `←` (ou un clic sur l'en-tête sélectionné) la déplient ou la
+  replient. Repliées au démarrage, sauf s'il n'y en a qu'une.
+- Un chemin absent ou qui n'est pas une collection donne une ligne
+  d'erreur `✗ Nom — raison` ; les autres collections se chargent.
+- Titre du panneau : `Workspace : <nom>`, ou `Collections` sans nom.
+
+**Collection active**
+
+- C'est celle de la ligne sélectionnée (en-tête compris) ; son nom est
+  souligné.
+- Elle détermine : Environnement (son nom dans le titre du panneau),
+  Secrets, Historique, Campagne, Diagnostics, `Ctrl+K`, `f`, `/`, `c`
+  et `r`.
+- Chaque collection garde son état : environnement choisi, secrets
+  saisis, résultats, historique, dossiers dépliés.
+- `r` sur un en-tête lance la collection entière.
+
+**Exécution**
+
+- `bru run` part de la racine de la collection active.
+- Avec un `workspace.yml`, l'option de campagne `--workspace-path` vaut
+  par défaut le dossier du workspace (modifiable avec `O`).
+- Pendant une exécution, la sélection ne peut pas quitter la
+  collection : un message le rappelle dans la barre d'état.
+
+**Surveillance** : un watcher par collection ; un rechargement ne touche
+que la sienne.
+
+**Hors périmètre** : modifier `workspace.yml`, `.env` et mocks du
+workspace, recherche, filtre et campagne sur plusieurs collections à la
+fois.
 
 ## Vue d'ensemble
 

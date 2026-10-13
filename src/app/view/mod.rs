@@ -32,7 +32,7 @@ use super::model::{
     StatusMessage,
 };
 use super::update::{active_tree_filter_pattern, is_tree_filtered};
-use crate::collection::TreeNode;
+use crate::collection::{LoadError, TreeNode};
 
 /// Largeur minimale du terminal : exactement la somme des planchers de
 /// l'arbre, du détail et de la réponse (`MIN_TREE_WIDTH +
@@ -239,6 +239,31 @@ pub fn view(model: &Model, frame: &mut Frame) {
     render_header(model, frame, areas.title);
 
     match &model.collection {
+        // Workspace : l'arbre des autres collections reste affiché, le
+        // détail explique l'état de la collection active.
+        CollectionState::Loading | CollectionState::Failed(_) if model.workspace.is_some() => {
+            if areas.tree.width > 0 && areas.tree.height > 0 {
+                render_tree(model, frame, areas.tree);
+            }
+            let lines = match &model.collection {
+                CollectionState::Failed(error) => vec![
+                    Line::styled(
+                        "Impossible de charger la collection",
+                        Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::default(),
+                    Line::raw(error.to_string()),
+                ],
+                _ => vec![Line::raw("Chargement…")],
+            };
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(panel(TITLE_DETAIL, false)),
+                areas.detail,
+            );
+            frame.render_widget(panel(" Réponse ", false), areas.response);
+        }
         CollectionState::Loading => {
             frame.render_widget(
                 Paragraph::new("Chargement…").block(panel(" Collection ", true)),
@@ -740,6 +765,10 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::NoMatch => "Aucune correspondance".to_owned(),
         StatusMessage::SaveError(reason) => format!("Échec de sauvegarde : {reason}"),
         StatusMessage::EditRefused(reason) => format!("Modification refusée : {reason}"),
+        StatusMessage::RunLocked => {
+            "Exécution en cours : la sélection reste dans cette collection (Ctrl+X pour annuler)"
+                .to_owned()
+        }
         StatusMessage::EditLocked => {
             "Modifications non enregistrées : Ctrl+S pour enregistrer, Échap pour abandonner"
                 .to_owned()
@@ -988,7 +1017,7 @@ pub(crate) fn panel(title: &'static str, focused: bool) -> Block<'static> {
 
 /// Panneau bordé : bordure et titre en couleur de focus quand il a le
 /// focus ; sinon bordure discrète et titre gris lisible.
-fn titled_panel(title: String, focused: bool) -> Block<'static> {
+pub(crate) fn titled_panel(title: String, focused: bool) -> Block<'static> {
     let (border, title_style) = if focused {
         (theme::FOCUS, theme::FOCUS)
     } else {
@@ -1000,20 +1029,30 @@ fn titled_panel(title: String, focused: bool) -> Block<'static> {
 }
 
 fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
-    let base = if model.zoomed_panel() == Some(Focus::Tree) {
-        if model.selected_collection {
-            " Collection [sélectionnée — c] [plein écran — z] "
+    let base = if let Some(state) = &model.workspace {
+        let label = match &state.name {
+            Some(name) => format!(" Workspace : {name} "),
+            None => " Collections ".to_owned(),
+        };
+        if model.zoomed_panel() == Some(Focus::Tree) {
+            format!("{}[plein écran — z] ", label)
         } else {
-            TITLE_TREE_ZOOMED
+            label
+        }
+    } else if model.zoomed_panel() == Some(Focus::Tree) {
+        if model.selected_collection {
+            " Collection [sélectionnée — c] [plein écran — z] ".to_owned()
+        } else {
+            TITLE_TREE_ZOOMED.to_owned()
         }
     } else if model.selected_collection {
-        " Collection [sélectionnée — c] "
+        " Collection [sélectionnée — c] ".to_owned()
     } else {
-        TITLE_TREE
+        TITLE_TREE.to_owned()
     };
     let title = match active_tree_filter_pattern(model) {
         Some(pattern) => format!("{} — filtre : {pattern} ", base.trim_end()),
-        None => base.to_owned(),
+        None => base,
     };
     let block = titled_panel(title, model.focus == Focus::Tree);
     let state = &model.tree;
@@ -1032,16 +1071,30 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = state.rows[start..end]
         .iter()
         .filter_map(|row| {
-            let node = model.node_at(&row.address)?;
+            if row.is_header() {
+                return Some(ListItem::new(workspace_header_line(model, row.member)));
+            }
+            let node = model.row_node(row)?;
+            let active = model.is_active_row(row);
+            let expanded = match node {
+                TreeNode::Folder(folder) => {
+                    crate::app::workspace::member_expanded(model, row.member)
+                        .map_or_else(|| model.is_expanded(node), |set| set.contains(&folder.path))
+                }
+                _ => false,
+            };
+            let status = if active {
+                run_status(model, node)
+            } else {
+                member_run_status(model, row.member, node)
+            };
             Some(ListItem::new(tree::row_line(
-                node,
-                row.depth,
-                model.is_expanded(node),
-                run_status(model, node),
+                node, row.depth, expanded, status,
             )))
         })
         .collect();
-    let selected = if model.selected_collection {
+    let on_header = model.selected_row().is_some_and(|row| row.is_header());
+    let selected = if model.selected_collection && !on_header {
         None
     } else {
         state
@@ -1057,6 +1110,50 @@ fn render_tree(model: &Model, frame: &mut Frame, area: Rect) {
         area,
         &mut list_state,
     );
+}
+
+/// En-tête d'une collection du workspace.
+fn workspace_header_line(model: &Model, member: usize) -> ratatui::text::Line<'static> {
+    use crate::app::workspace::{member_collection, member_name};
+    let Some(state) = &model.workspace else {
+        return ratatui::text::Line::default();
+    };
+    let open = state.open.get(member).copied().unwrap_or(false);
+    // Raison courte : le message complet, chemin compris, est dans le
+    // détail quand la collection est sélectionnée.
+    let header_state = match member_collection(model, member) {
+        Some(CollectionState::Loaded(_)) => tree::HeaderState::Loaded,
+        Some(CollectionState::Failed(failure)) => tree::HeaderState::Failed(match failure {
+            LoadError::NotACollection { .. } | LoadError::NotACollectionRoot { .. } => {
+                "pas une collection"
+            }
+            LoadError::Io { .. } => "illisible",
+            LoadError::InvalidConfig { .. } | LoadError::InvalidOpenCollection { .. } => {
+                "configuration invalide"
+            }
+        }),
+        _ => tree::HeaderState::Loading,
+    };
+    tree::header_line(
+        &member_name(model, member),
+        open,
+        header_state,
+        member == state.active,
+    )
+}
+
+/// Statut d'une requête d'une collection inactive : son dernier résultat.
+fn member_run_status(model: &Model, member: usize, node: &TreeNode) -> tree::RunStatus {
+    let TreeNode::Request(request) = node else {
+        return tree::RunStatus::None;
+    };
+    match crate::app::workspace::member_outcomes(model, member)
+        .and_then(|outcomes| outcomes.get(&request.path))
+    {
+        Some(outcome) if outcome.result.is_failure() => tree::RunStatus::Failure,
+        Some(_) => tree::RunStatus::Success,
+        None => tree::RunStatus::None,
+    }
 }
 
 /// Barre d'URL : requête ouverte en titre (l'onglet de Bruno bureau),
@@ -1769,9 +1866,11 @@ mod tests {
             ast: request.ast.clone().expect("ast"),
             view: request.view.clone(),
         };
+        let saved_root = model.loaded().expect("chargée").root.clone();
         update(
             &mut model,
             Message::EditSaved {
+                root: saved_root,
                 path: "post-json.bru".into(),
                 result: Ok(saved),
             },

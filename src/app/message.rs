@@ -130,6 +130,11 @@ pub enum Message {
         height: u16,
     },
     CollectionLoaded(Result<Collection, LoadError>),
+    /// Fin du chargement de la collection d'un membre du workspace.
+    MemberLoaded {
+        member: usize,
+        result: Result<Collection, LoadError>,
+    },
     TerminalClosed(io::Error),
     /// `r`, hors navigation : agit sur `model.tree.selected`.
     RunSelected,
@@ -214,13 +219,17 @@ pub enum Message {
         field: super::model::EditableField,
         result: Result<String, String>,
     },
-    /// Renvoyé par la boucle après `Command::SaveEdit`.
+    /// Renvoyé par la boucle après `Command::SaveEdit` ; `root` est la
+    /// racine de la collection écrite.
     EditSaved {
+        root: PathBuf,
         path: PathBuf,
         result: Result<super::model::SavedEdit, crate::writer::WriteError>,
     },
-    /// Renvoyé par la boucle après `Command::SaveEnvironment`.
+    /// Renvoyé par la boucle après `Command::SaveEnvironment` ; `root` est
+    /// la racine de la collection écrite.
     EnvironmentSaved {
+        root: PathBuf,
         path: PathBuf,
         result: Result<super::model::SavedEnvironment, crate::writer::WriteError>,
     },
@@ -322,6 +331,11 @@ pub enum Message {
     ToggleCampaignView,
     /// Modification de fichiers sur disque signalée par le watcher après débounce.
     WatchReload(Vec<PathBuf>),
+    /// Modification de fichiers de la collection d'un membre du workspace.
+    MemberWatchReload {
+        member: usize,
+        paths: Vec<PathBuf>,
+    },
     /// `x` en focus Réponse : démarre la saisie du chemin pour exporter le corps brut.
     ExportResponseBody,
     /// Caractère tapé pendant la saisie du chemin d'export.
@@ -374,6 +388,7 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
         AppEvent::Terminal(_) => None,
         AppEvent::TerminalClosed(error) => Some(Message::TerminalClosed(error)),
         AppEvent::CollectionLoaded(result) => Some(Message::CollectionLoaded(result)),
+        AppEvent::MemberLoaded { member, result } => Some(Message::MemberLoaded { member, result }),
         AppEvent::Run(event) => Some(Message::RunFinished(event)),
         AppEvent::ClipboardResult { token, result } => {
             Some(Message::ClipboardResult { token, result })
@@ -381,14 +396,19 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
         AppEvent::TextEditorClosed { field, result } => {
             Some(Message::TextEditorClosed { field, result })
         }
-        AppEvent::EditSaved { path, result } => Some(Message::EditSaved { path, result }),
-        AppEvent::EnvironmentSaved { path, result } => {
-            Some(Message::EnvironmentSaved { path, result })
+        AppEvent::EditSaved { root, path, result } => {
+            Some(Message::EditSaved { root, path, result })
+        }
+        AppEvent::EnvironmentSaved { root, path, result } => {
+            Some(Message::EnvironmentSaved { root, path, result })
         }
         AppEvent::SecretsResolved { root, resolved } => {
             Some(Message::SecretsResolved { root, resolved })
         }
         AppEvent::WatchReload(paths) => Some(Message::WatchReload(paths)),
+        AppEvent::MemberWatchReload { member, paths } => {
+            Some(Message::MemberWatchReload { member, paths })
+        }
         AppEvent::ResponseBodyExported { path, result } => {
             Some(Message::ResponseBodyExported { path, result })
         }

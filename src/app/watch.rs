@@ -115,9 +115,20 @@ pub fn should_reload(paths: &[PathBuf]) -> bool {
 /// relatifs à la racine de la collection,
 /// une fois le délai écoulé sans nouvel événement.
 pub async fn debounce_events(
+    input_rx: mpsc::Receiver<PathBuf>,
+    output_tx: mpsc::Sender<AppEvent>,
+    duration: Duration,
+) {
+    debounce_into(input_rx, output_tx, duration, AppEvent::WatchReload).await;
+}
+
+/// Comme [`debounce_events`], l'événement émis étant construit par `wrap`
+/// (un membre de workspace a son propre événement).
+async fn debounce_into(
     mut input_rx: mpsc::Receiver<PathBuf>,
     output_tx: mpsc::Sender<AppEvent>,
     duration: Duration,
+    wrap: impl Fn(Vec<PathBuf>) -> AppEvent,
 ) {
     let mut pending: Vec<PathBuf> = Vec::new();
     loop {
@@ -134,7 +145,7 @@ pub async fn debounce_events(
             }
             _ = tokio::time::sleep(duration), if !pending.is_empty() => {
                 let paths = std::mem::take(&mut pending);
-                if output_tx.send(AppEvent::WatchReload(paths)).await.is_err() {
+                if output_tx.send(wrap(paths)).await.is_err() {
                     break;
                 }
             }
@@ -152,11 +163,32 @@ pub fn start_watcher(
     root: PathBuf,
     output_tx: mpsc::Sender<AppEvent>,
 ) -> notify::Result<CollectionWatcher> {
+    start_watcher_into(root, output_tx, AppEvent::WatchReload)
+}
+
+/// Surveillance de la collection d'un membre du workspace : ses
+/// rechargements ne visent qu'elle (`AppEvent::MemberWatchReload`).
+pub fn start_member_watcher(
+    member: usize,
+    root: PathBuf,
+    output_tx: mpsc::Sender<AppEvent>,
+) -> notify::Result<CollectionWatcher> {
+    start_watcher_into(root, output_tx, move |paths| AppEvent::MemberWatchReload {
+        member,
+        paths,
+    })
+}
+
+fn start_watcher_into(
+    root: PathBuf,
+    output_tx: mpsc::Sender<AppEvent>,
+    wrap: impl Fn(Vec<PathBuf>) -> AppEvent + Send + 'static,
+) -> notify::Result<CollectionWatcher> {
     use notify::Watcher;
 
     let (raw_tx, raw_rx) = mpsc::channel(EVENT_BUFFER);
 
-    tokio::spawn(debounce_events(raw_rx, output_tx, DEBOUNCE_DURATION));
+    tokio::spawn(debounce_into(raw_rx, output_tx, DEBOUNCE_DURATION, wrap));
 
     let watched_root = root.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {

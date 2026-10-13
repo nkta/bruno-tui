@@ -79,9 +79,11 @@ pub(crate) fn cross_navigate_to_tree(model: &mut Model, address: &[usize]) {
             model.tree.expanded.insert(folder.path.clone());
         }
     }
+    crate::app::workspace::open_active(model);
     refresh_rows(model);
-    if let Some(index) = model.tree.rows.iter().position(|r| r.address == address) {
+    if let Some(index) = model.active_row_index(address) {
         model.tree.selected = index;
+        model.selected_collection = false;
     }
     clear_detail_view_state(model);
     scroll_tree_into_view(model);
@@ -231,14 +233,14 @@ pub(crate) fn select_request_in_tree(model: &mut Model, target_path: &Path) -> b
             model.tree.expanded.insert(ancestor.to_path_buf());
         }
     }
+    crate::app::workspace::open_active(model);
     refresh_rows(model);
     let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
-    if let Some(index) = model.tree.rows.iter().position(|row| {
-        model
-            .node_at(&row.address)
-            .is_some_and(|node| node.path() == target_path)
-    }) {
+    if let Some(index) = model.active_row_position(|node| node.path() == target_path) {
         model.tree.selected = index;
+        if model.workspace.is_some() {
+            model.selected_collection = false;
+        }
     }
     clear_detail_view_state(model);
     reset_filter_if_selection_changed(model, previous_path.as_deref());
@@ -274,7 +276,12 @@ pub(crate) fn navigate_failed_request(model: &mut Model, forward: bool) {
         return;
     }
 
-    let current_addr = model.tree.rows.get(model.tree.selected).map(|r| &r.address);
+    let current_addr = model
+        .tree
+        .rows
+        .get(model.tree.selected)
+        .filter(|r| model.is_active_row(r))
+        .map(|r| &r.address);
     let current_all_idx = current_addr
         .and_then(|addr| all.iter().position(|r| &r.address == addr))
         .unwrap_or(0);

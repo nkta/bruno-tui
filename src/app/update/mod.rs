@@ -27,6 +27,7 @@ pub mod scroll;
 #[cfg(test)]
 pub(super) mod test_support;
 pub mod tree;
+pub mod workspace;
 
 pub(crate) use self::edit::*;
 pub(crate) use self::pointer::*;
@@ -125,6 +126,9 @@ pub enum Command {
         path: std::path::PathBuf,
         bytes: Vec<u8>,
     },
+    /// Recharger la collection d'un membre du workspace ; la boucle renvoie
+    /// le résultat via `Message::MemberLoaded`.
+    ReloadMember(usize),
     /// Regroupe plusieurs commandes à exécuter séquentiellement par la boucle.
     Batch(Vec<Command>),
     /// Charger l'historique persistant depuis le disque.
@@ -141,7 +145,10 @@ pub enum Command {
 /// Applique un message au modèle.
 pub fn update(model: &mut Model, message: Message) -> Command {
     let had_session = model.editing.is_some() || model.environment_editing.is_some();
-    let mut command = apply(model, message);
+    let mut command = match workspace::route(model, message) {
+        Ok(command) => command,
+        Err(message) => apply(model, *message),
+    };
     // Pendant une session d'édition, l'onglet affiché du détail suit le
     // champ sous le curseur : il devient l'onglet choisi, pour que le
     // détail ne saute pas d'onglet à la fin de la session.
@@ -159,10 +166,64 @@ pub fn update(model: &mut Model, message: Message) -> Command {
             command = Command::ReloadCollection;
         }
     }
+    sync_active_member(model);
     command
 }
 
-fn apply(model: &mut Model, message: Message) -> Command {
+/// Effets qui suivent le chargement d'une collection : résolution des
+/// secrets et lecture de l'historique persistant.
+pub(crate) fn load_commands(model: &Model, collection: &crate::collection::Collection) -> Command {
+    let mut commands = Vec::new();
+    let lookups = secret_lookups(&model.secrets.mappings, collection);
+    if !lookups.is_empty() {
+        commands.push(Command::ResolveSecrets {
+            root: collection.root.clone(),
+            lookups,
+        });
+    }
+    if model.history_enabled {
+        commands.push(Command::LoadHistory {
+            root: collection.root.clone(),
+        });
+    }
+    match commands.len() {
+        0 => Command::None,
+        1 => commands.pop().unwrap_or(Command::None),
+        _ => Command::Batch(commands),
+    }
+}
+
+/// Filet de sécurité du mode workspace : la ligne sélectionnée appartient
+/// toujours à la collection active. Si elle a changé de collection hors
+/// des déplacements ordinaires, la collection devient active, sauf pendant
+/// une exécution, où la sélection revient sur l'en-tête de la collection.
+fn sync_active_member(model: &mut Model) {
+    let Some(active) = crate::app::workspace::active_member(model) else {
+        return;
+    };
+    let Some(row) = model.selected_row().cloned() else {
+        return;
+    };
+    if row.member == active {
+        return;
+    }
+    if crate::app::workspace::run_in_progress(model) || tree::member_switch_locked(model) {
+        if let Some(index) = model
+            .tree
+            .rows
+            .iter()
+            .position(|candidate| candidate.member == active)
+        {
+            model.tree.selected = index;
+            model.selected_collection = true;
+        }
+        scroll_tree_into_view(model);
+        return;
+    }
+    tree::switch_member(model, row);
+}
+
+pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
     // Un statut (copie, campagne terminée…) masque le rappel des touches :
     // il ne dure que jusqu'à l'action suivante de l'utilisateur. Le
     // traitement du message peut ensuite en poser un nouveau.
@@ -324,25 +385,9 @@ fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::CollectionLoaded(result) => {
-            let mut commands = Vec::new();
-            if let Ok(collection) = &result {
-                let lookups = secret_lookups(&model.secrets.mappings, collection);
-                if !lookups.is_empty() {
-                    commands.push(Command::ResolveSecrets {
-                        root: collection.root.clone(),
-                        lookups,
-                    });
-                }
-                if model.history_enabled {
-                    commands.push(Command::LoadHistory {
-                        root: collection.root.clone(),
-                    });
-                }
-            }
-            let command = match commands.len() {
-                0 => Command::None,
-                1 => commands.pop().unwrap(),
-                _ => Command::Batch(commands),
+            let command = match &result {
+                Ok(collection) => load_commands(model, collection),
+                Err(_) => Command::None,
             };
             let is_reloading = matches!(model.collection, CollectionState::Loaded(_));
             // Échec d'un rechargement automatique (fichier momentanément
@@ -379,11 +424,7 @@ fn apply(model: &mut Model, message: Message) -> Command {
 
                     // Conserver la sélection par chemin
                     if let Some(prev_path) = prev_selected_path {
-                        if let Some(index) = model.tree.rows.iter().position(|row| {
-                            model
-                                .node_at(&row.address)
-                                .is_some_and(|n| n.path() == prev_path)
-                        }) {
+                        if let Some(index) = model.active_row_position(|n| n.path() == prev_path) {
                             model.tree.selected = index;
                         } else {
                             model.tree.selected = model
@@ -915,12 +956,18 @@ fn apply(model: &mut Model, message: Message) -> Command {
                 }
             }
         }
-        Message::EditSaved { path, result } => {
-            edit_saved(model, path, result);
+        Message::EditSaved { root, path, result } => {
+            // Écriture d'une autre collection que celle chargée : ignorée
+            // (en workspace, elle est routée vers son emplacement avant).
+            if model.loaded().is_some_and(|c| c.root == root) {
+                edit_saved(model, path, result);
+            }
             Command::None
         }
-        Message::EnvironmentSaved { path, result } => {
-            environment_saved(model, path, result);
+        Message::EnvironmentSaved { root, path, result } => {
+            if model.loaded().is_some_and(|c| c.root == root) {
+                environment_saved(model, path, result);
+            }
             Command::None
         }
         Message::OpenResponseInEditor => match selected_response_body(model) {

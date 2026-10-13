@@ -592,10 +592,38 @@ pub enum Exit {
 /// Ligne visible de l'arbre.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    /// Indices successifs depuis `Collection::tree` jusqu'au nœud.
+    /// Indices successifs depuis `Collection::tree` jusqu'au nœud ; vide
+    /// pour l'en-tête d'une collection (mode workspace).
     pub address: Vec<usize>,
-    /// Profondeur, 0 au premier niveau.
+    /// Profondeur d'affichage, 0 au premier niveau.
     pub depth: usize,
+    /// Membre du workspace auquel appartient la ligne ; 0 hors workspace.
+    pub member: usize,
+}
+
+impl Row {
+    /// Ligne d'un nœud de la première (ou unique) collection.
+    pub fn node(address: Vec<usize>, depth: usize) -> Self {
+        Self {
+            address,
+            depth,
+            member: 0,
+        }
+    }
+
+    /// En-tête d'une collection du workspace.
+    pub fn header(member: usize) -> Self {
+        Self {
+            address: Vec::new(),
+            depth: 0,
+            member,
+        }
+    }
+
+    /// Vrai pour l'en-tête d'une collection.
+    pub fn is_header(&self) -> bool {
+        self.address.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1686,6 +1714,9 @@ pub struct Model {
     pub history_enabled: bool,
     /// Commande de l'éditeur externe configurée au lancement (`--editor`).
     pub editor: Option<String>,
+    /// Plusieurs collections ouvertes ensemble ; `None` pour une seule
+    /// collection. Les champs ci-dessus décrivent alors la collection active.
+    pub workspace: Option<super::workspace::WorkspaceState>,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -1779,6 +1810,8 @@ pub enum StatusMessage {
     /// Changement de requête refusé : la session d'édition porte des
     /// modifications non enregistrées.
     EditLocked,
+    /// Changement de collection refusé : une exécution est en cours.
+    RunLocked,
     /// Capture souris activée (`true`) ou désactivée (`false`).
     MouseCapture(bool),
     /// Échec d'activation ou de désactivation de la capture souris.
@@ -2328,6 +2361,7 @@ impl Model {
             export_input: None,
             history_enabled: false,
             editor: None,
+            workspace: None,
         }
     }
 
@@ -2514,10 +2548,59 @@ impl Model {
         tree_node_at(&self.loaded()?.tree, address)
     }
 
+    /// Nœud d'une ligne, quelle que soit sa collection ; `None` pour un
+    /// en-tête de collection.
+    pub fn row_node(&self, row: &Row) -> Option<&TreeNode> {
+        if row.is_header() {
+            return None;
+        }
+        match &self.workspace {
+            Some(state) if row.member != state.active => {
+                match &state.slots.get(row.member)?.collection {
+                    CollectionState::Loaded(collection) => {
+                        tree_node_at(&collection.tree, &row.address)
+                    }
+                    _ => None,
+                }
+            }
+            _ => self.node_at(&row.address),
+        }
+    }
+
+    /// Vrai si la ligne appartient à la collection active (toujours vrai
+    /// hors workspace).
+    pub fn is_active_row(&self, row: &Row) -> bool {
+        self.workspace
+            .as_ref()
+            .is_none_or(|state| state.active == row.member)
+    }
+
+    /// Indice de la ligne de la collection active portant cette adresse.
+    pub fn active_row_index(&self, address: &[usize]) -> Option<usize> {
+        self.tree
+            .rows
+            .iter()
+            .position(|row| self.is_active_row(row) && row.address == address)
+    }
+
+    /// Indice de la première ligne de la collection active dont le nœud
+    /// vérifie `predicate`.
+    pub fn active_row_position(&self, predicate: impl Fn(&TreeNode) -> bool) -> Option<usize> {
+        self.tree
+            .rows
+            .iter()
+            .position(|row| self.is_active_row(row) && self.row_node(row).is_some_and(&predicate))
+    }
+
+    /// Ligne sélectionnée.
+    pub fn selected_row(&self) -> Option<&Row> {
+        self.tree.rows.get(self.tree.selected)
+    }
+
     /// Nœud de la ligne sélectionnée.
     pub fn selected_node(&self) -> Option<&TreeNode> {
         let row = self.tree.rows.get(self.tree.selected)?;
-        self.node_at(&row.address)
+        self.row_node(row)
     }
 
     /// Vrai si le nœud est un dossier déplié.
@@ -2764,10 +2847,7 @@ pub fn visible_rows(tree: &[TreeNode], expanded: &HashSet<PathBuf>) -> Vec<Row> 
     ) {
         for (index, node) in nodes.iter().enumerate() {
             prefix.push(index);
-            rows.push(Row {
-                address: prefix.clone(),
-                depth: prefix.len() - 1,
-            });
+            rows.push(Row::node(prefix.clone(), prefix.len() - 1));
             if let TreeNode::Folder(folder) = node
                 && expanded.contains(&folder.path)
             {
@@ -2787,10 +2867,7 @@ pub fn all_rows(tree: &[TreeNode]) -> Vec<Row> {
     fn walk(nodes: &[TreeNode], prefix: &mut Vec<usize>, rows: &mut Vec<Row>) {
         for (index, node) in nodes.iter().enumerate() {
             prefix.push(index);
-            rows.push(Row {
-                address: prefix.clone(),
-                depth: prefix.len() - 1,
-            });
+            rows.push(Row::node(prefix.clone(), prefix.len() - 1));
             if let TreeNode::Folder(folder) = node {
                 walk(&folder.children, prefix, rows);
             }

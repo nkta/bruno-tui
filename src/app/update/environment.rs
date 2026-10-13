@@ -689,9 +689,11 @@ mod tests {
             ast: new_ast.clone(),
         };
 
+        let saved_root = model.loaded().expect("chargée").root.clone();
         update(
             &mut model,
             Message::EnvironmentSaved {
+                root: saved_root,
                 path: env_path.clone(),
                 result: Ok(saved),
             },
@@ -736,9 +738,11 @@ mod tests {
             path: env_path.clone(),
         };
 
+        let saved_root = model.loaded().expect("chargée").root.clone();
         update(
             &mut model,
             Message::EnvironmentSaved {
+                root: saved_root,
                 path: env_path.clone(),
                 result: Err(error),
             },
@@ -777,9 +781,11 @@ mod tests {
         let new_source = "vars {\n  host: other\n}\n";
         let new_ast = crate::collection::BruFile::parse(new_source.to_string()).expect("parse");
 
+        let saved_root = model.loaded().expect("chargée").root.clone();
         update(
             &mut model,
             Message::EnvironmentSaved {
+                root: saved_root,
                 path: other_path,
                 result: Ok(crate::app::model::SavedEnvironment {
                     stamp: new_stamp,

@@ -4,19 +4,26 @@
 use crate::app::filter::{FilterState, evaluate};
 use crate::app::message::Message;
 use crate::app::model::{
-    CollectionState, EditSession, EnvironmentEditSession, Model, ResponseTab, StatusMessage,
+    CollectionState, EditSession, EnvironmentEditSession, Model, ResponseTab, Row, StatusMessage,
     visible_rows,
 };
 use crate::app::tree_filter::{TreeFilterState, filtered_rows, matches_tree_filter};
 use crate::app::update::Command;
 use crate::app::view::{inner, layout_for};
 use crate::app::watch::is_watched_path;
+use crate::app::workspace::{
+    activate, active_member, member_collection, member_expanded, run_in_progress,
+};
 use crate::collection::TreeNode;
 use crate::runner::report::ResponseStatus;
 use crate::writer::FileStamp;
 
 /// Recalcule les lignes visibles de l'arbre.
 pub fn refresh_rows(model: &mut Model) {
+    if model.workspace.is_some() {
+        refresh_workspace_rows(model);
+        return;
+    }
     let previous_path = model.selected_node().map(|node| node.path().to_path_buf());
     let pattern = current_tree_filter_pattern(model).map(str::to_owned);
 
@@ -46,22 +53,14 @@ pub fn refresh_rows(model: &mut Model) {
 
     if let Some(p) = &pattern {
         // Garde la sélection sur le même nœud si possible, sinon sur la première correspondance.
-        let found_same = previous_path.as_ref().and_then(|path| {
-            model
-                .tree
-                .rows
-                .iter()
-                .position(|r| model.node_at(&r.address).is_some_and(|n| n.path() == path))
-        });
+        let found_same = previous_path
+            .as_ref()
+            .and_then(|path| model.active_row_position(|n| n.path() == path));
 
         if let Some(pos) = found_same {
             model.tree.selected = pos;
         } else {
-            let first_match = model.tree.rows.iter().position(|r| {
-                model
-                    .node_at(&r.address)
-                    .is_some_and(|n| matches_tree_filter(n, p))
-            });
+            let first_match = model.active_row_position(|n| matches_tree_filter(n, p));
             model.tree.selected = first_match.unwrap_or(0);
         }
     } else {
@@ -71,6 +70,90 @@ pub fn refresh_rows(model: &mut Model) {
 
     let new_path = model.selected_node().map(|n| n.path().to_path_buf());
     if new_path != previous_path {
+        clear_detail_view_state(model);
+    }
+}
+
+/// Clé d'une ligne indépendante de sa position : membre et chemin du nœud
+/// (`None` pour un en-tête de collection).
+pub(crate) type RowKey = (usize, Option<std::path::PathBuf>);
+
+/// Clé de la ligne sélectionnée.
+pub(crate) fn selected_key(model: &Model) -> Option<RowKey> {
+    let row = model.selected_row()?;
+    Some((
+        row.member,
+        model.row_node(row).map(|node| node.path().to_path_buf()),
+    ))
+}
+
+/// Indice de la ligne de cette clé.
+pub(crate) fn row_of_key(model: &Model, key: &RowKey) -> Option<usize> {
+    model.tree.rows.iter().position(|row| {
+        row.member == key.0
+            && model.row_node(row).map(|node| node.path()) == key.1.as_deref()
+            && (key.1.is_some() || row.is_header())
+    })
+}
+
+/// Lignes du mode workspace : un en-tête par collection, suivi de ses
+/// nœuds visibles si elle est dépliée. Le filtre de l'arbre ne porte que
+/// sur la collection active, alors dépliée.
+fn refresh_workspace_rows(model: &mut Model) {
+    let previous = selected_key(model);
+    let pattern = current_tree_filter_pattern(model).map(str::to_owned);
+    let Some(state) = model.workspace.as_ref() else {
+        return;
+    };
+    let active = state.active;
+    let mut filtered_expanded = None;
+    let mut rows = Vec::new();
+    for member in 0..state.members.len() {
+        rows.push(Row::header(member));
+        let is_filtered = member == active && pattern.is_some();
+        if !(state.open.get(member).copied().unwrap_or(false) || is_filtered) {
+            continue;
+        }
+        let Some(CollectionState::Loaded(collection)) = member_collection(model, member) else {
+            continue;
+        };
+        let member_rows = match (&pattern, is_filtered) {
+            (Some(p), true) => {
+                let mut expanded = std::collections::HashSet::new();
+                let rows = filtered_rows(&collection.tree, p, &mut expanded);
+                filtered_expanded = Some(expanded);
+                rows
+            }
+            _ => match member_expanded(model, member) {
+                Some(expanded) => visible_rows(&collection.tree, expanded),
+                None => Vec::new(),
+            },
+        };
+        rows.extend(member_rows.into_iter().map(|row| Row {
+            depth: row.depth + 1,
+            member,
+            ..row
+        }));
+    }
+    if let Some(expanded) = filtered_expanded {
+        model.tree.expanded = expanded;
+    }
+    model.tree.rows = rows;
+
+    let same = previous.as_ref().and_then(|key| row_of_key(model, key));
+    let first_match = pattern.as_deref().and_then(|p| {
+        model
+            .active_row_position(|n| matches_tree_filter(n, p))
+            .filter(|_| same.is_none_or(|index| model.tree.rows[index].is_header()))
+    });
+    model.tree.selected = match (first_match, same) {
+        (Some(index), _) | (None, Some(index)) => index,
+        (None, None) => model
+            .tree
+            .selected
+            .min(model.tree.rows.len().saturating_sub(1)),
+    };
+    if selected_key(model) != previous {
         clear_detail_view_state(model);
     }
 }
@@ -122,6 +205,18 @@ pub(crate) fn finish_tree_selection(
     before: usize,
     previous_path: Option<std::path::PathBuf>,
 ) {
+    if model.tree.selected != before
+        && let Some(row) = model.selected_row().cloned()
+        && !model.is_active_row(&row)
+    {
+        change_member(model, before, row);
+        return;
+    }
+    if model.workspace.is_some() && model.tree.selected != before {
+        model.selected_collection = selected_header(model).is_some();
+    } else if selected_header(model).is_some() {
+        model.selected_collection = true;
+    }
     if model.tree.selected != before {
         let changed_node =
             model.selected_node().map(|node| node.path().to_path_buf()) != previous_path;
@@ -134,6 +229,60 @@ pub(crate) fn finish_tree_selection(
         clear_detail_view_state(model);
     }
     reset_filter_if_selection_changed(model, previous_path.as_deref());
+    scroll_tree_into_view(model);
+}
+
+/// La sélection est passée sur une ligne d'une autre collection : refus
+/// pendant une exécution ou une édition non enregistrée, sinon changement
+/// de collection active.
+fn change_member(model: &mut Model, before: usize, row: Row) {
+    let refusal = if run_in_progress(model) {
+        Some(StatusMessage::RunLocked)
+    } else if member_switch_locked(model) {
+        Some(StatusMessage::EditLocked)
+    } else {
+        None
+    };
+    if let Some(status) = refusal {
+        model.tree.selected = before;
+        if selected_header(model).is_some() {
+            model.selected_collection = true;
+        }
+        model.last_status = Some(status);
+        scroll_tree_into_view(model);
+        return;
+    }
+    switch_member(model, row);
+}
+
+/// Vrai si une session d'édition (requête ou environnement) porte des
+/// modifications non enregistrées : elle appartient à la collection
+/// active, qui ne peut donc pas changer.
+pub(crate) fn member_switch_locked(model: &Model) -> bool {
+    super::selection_locked(model)
+        || model
+            .environment_editing
+            .as_ref()
+            .is_some_and(EnvironmentEditSession::has_unsaved)
+}
+
+/// Rend active la collection de `row` et y place la sélection. Une
+/// session d'édition d'environnement sans modification est fermée : elle
+/// décrit un fichier de la collection quittée.
+pub(crate) fn switch_member(model: &mut Model, row: Row) {
+    model.environment_editing = None;
+    let key = (
+        row.member,
+        model.row_node(&row).map(|node| node.path().to_path_buf()),
+    );
+    clear_detail_view_state(model);
+    model.filter = None;
+    activate(model, row.member);
+    refresh_rows(model);
+    if let Some(index) = row_of_key(model, &key) {
+        model.tree.selected = index;
+    }
+    model.selected_collection = row.is_header();
     scroll_tree_into_view(model);
 }
 
@@ -161,31 +310,7 @@ pub(crate) fn read_only_collection(model: &Model) -> bool {
 
 /// Traite une notification de modification de fichiers surveillés sur disque.
 pub(crate) fn handle_watch_reload(model: &mut Model, paths: Vec<std::path::PathBuf>) -> Command {
-    let relevant_paths: Vec<std::path::PathBuf> =
-        paths.into_iter().filter(|p| is_watched_path(p)).collect();
-    if relevant_paths.is_empty() {
-        return Command::None;
-    }
-
-    // Vérifie si ces modifications proviennent de nos propres écritures du TUI (Ctrl+S).
-    // Si tous les chemins modifiés correspondent à un fichier enregistré récemment par le TUI
-    // dont le FileStamp sur disque correspond à notre empreinte, il ne s'agit pas d'une modification externe.
-    let root = model
-        .loaded()
-        .map(|c| c.root.clone())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-    // Chemins relatifs à la racine, comme les clés de `last_saved_stamps`.
-    let all_self_saved = relevant_paths.iter().all(|path| {
-        model
-            .last_saved_stamps
-            .get(path)
-            .is_some_and(|saved_stamp| {
-                FileStamp::capture(&root.join(path)).is_ok_and(|current| current == *saved_stamp)
-            })
-    });
-
-    if all_self_saved {
+    if !external_change(model, &paths) {
         return Command::None;
     }
 
@@ -210,6 +335,35 @@ pub(crate) fn handle_watch_reload(model: &mut Model, paths: Vec<std::path::PathB
     }
 }
 
+/// Vrai si un des chemins modifiés justifie un rechargement de la
+/// collection active et ne vient pas d'une écriture du TUI lui-même.
+pub(crate) fn external_change(model: &Model, paths: &[std::path::PathBuf]) -> bool {
+    let relevant_paths: Vec<&std::path::PathBuf> =
+        paths.iter().filter(|p| is_watched_path(p)).collect();
+    if relevant_paths.is_empty() {
+        return false;
+    }
+
+    // Vérifie si ces modifications proviennent de nos propres écritures du TUI (Ctrl+S).
+    // Si tous les chemins modifiés correspondent à un fichier enregistré récemment par le TUI
+    // dont le FileStamp sur disque correspond à notre empreinte, il ne s'agit pas d'une modification externe.
+    let root = model
+        .loaded()
+        .map(|c| c.root.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    // Chemins relatifs à la racine, comme les clés de `last_saved_stamps`.
+    let all_self_saved = relevant_paths.iter().all(|path| {
+        model
+            .last_saved_stamps
+            .get(*path)
+            .is_some_and(|saved_stamp| {
+                FileStamp::capture(&root.join(path)).is_ok_and(|current| current == *saved_stamp)
+            })
+    });
+    !all_self_saved
+}
+
 /// Dossier sélectionné : (chemin, déplié, vide).
 pub(crate) fn selected_folder(model: &Model) -> Option<(std::path::PathBuf, bool, bool)> {
     match model.selected_node()? {
@@ -223,6 +377,20 @@ pub(crate) fn selected_folder(model: &Model) -> Option<(std::path::PathBuf, bool
 }
 
 pub(crate) fn expand_or_enter(model: &mut Model) {
+    if let Some(member) = selected_header(model) {
+        if !member_open(model, member) {
+            set_member_open(model, member, true);
+            refresh_rows(model);
+        } else if model
+            .tree
+            .rows
+            .get(model.tree.selected + 1)
+            .is_some_and(|row| row.member == member && !row.is_header())
+        {
+            model.tree.selected += 1;
+        }
+        return;
+    }
     match selected_folder(model) {
         Some((path, false, _)) => {
             model.tree.expanded.insert(path);
@@ -234,6 +402,17 @@ pub(crate) fn expand_or_enter(model: &mut Model) {
 }
 
 pub(crate) fn collapse_or_parent(model: &mut Model) {
+    if let Some(member) = selected_header(model) {
+        if member_open(model, member) {
+            if member_is_filtered(model, member) {
+                clear_tree_filter(model);
+            }
+            // Les lignes précédant l'en-tête ne changent pas.
+            set_member_open(model, member, false);
+            refresh_rows(model);
+        }
+        return;
+    }
     if current_tree_filter_pattern(model).is_none()
         && let Some((path, true, _)) = selected_folder(model)
     {
@@ -250,15 +429,44 @@ pub(crate) fn collapse_or_parent(model: &mut Model) {
     let Some((_, parent)) = row.address.split_last() else {
         return;
     };
-    if parent.is_empty() {
-        return;
-    }
+    let member = row.member;
     if let Some(index) = model.tree.rows[..selected]
         .iter()
-        .rposition(|candidate| candidate.address == parent)
+        .rposition(|candidate| candidate.member == member && candidate.address == parent)
     {
         model.tree.selected = index;
     }
+}
+
+/// Membre dont l'en-tête est sélectionné.
+pub(crate) fn selected_header(model: &Model) -> Option<usize> {
+    model
+        .selected_row()
+        .filter(|row| row.is_header())
+        .map(|row| row.member)
+}
+
+fn member_open(model: &Model, member: usize) -> bool {
+    model
+        .workspace
+        .as_ref()
+        .and_then(|state| state.open.get(member).copied())
+        .unwrap_or(false)
+}
+
+/// Déplie ou replie l'en-tête d'une collection.
+pub(crate) fn set_member_open(model: &mut Model, member: usize, open: bool) {
+    if let Some(flag) = model
+        .workspace
+        .as_mut()
+        .and_then(|state| state.open.get_mut(member))
+    {
+        *flag = open;
+    }
+}
+
+fn member_is_filtered(model: &Model, member: usize) -> bool {
+    active_member(model) == Some(member) && current_tree_filter_pattern(model).is_some()
 }
 
 /// Hauteur utile du panneau de l'arbre.
