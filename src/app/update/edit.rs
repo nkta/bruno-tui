@@ -5,7 +5,8 @@ use ratatui::text::Line;
 use crate::app::message::InputKey;
 use crate::app::model::{
     EditSession, EditState, EditableField, Focus, InputTarget, Model, PendingConfirm, PickerKind,
-    SavedEdit, StatusMessage, field_enabled, field_value, field_value_committed, section_entries,
+    RequestTab, SavedEdit, StatusMessage, field_enabled, field_value, field_value_committed,
+    section_entries,
 };
 use crate::app::text_input::TextInput;
 use crate::app::update::Command;
@@ -59,7 +60,21 @@ pub(crate) fn start_edit(model: &mut Model) {
     let Ok(stamp) = FileStamp::capture(&full_path) else {
         return;
     };
-    model.editing = Some(EditSession::new(path, stamp, view));
+    // Le curseur part du premier champ de l'onglet affiché, pour qu'`Entrée`
+    // sur l'onglet Auth (par exemple) mène à l'auth et non à la méthode.
+    // Sur Params, l'onglet par défaut, il reste sur la méthode, affichée
+    // juste au-dessus.
+    let shown = model.shown_request_tab();
+    let mut session = EditSession::new(path, stamp, view);
+    if shown != RequestTab::Params
+        && let Some(index) = session
+            .fields
+            .iter()
+            .position(|field| RequestTab::of_field(*field) == Some(shown))
+    {
+        session.cursor = index;
+    }
+    model.editing = Some(session);
     model.last_status = None;
     scroll_edit_into_view(model);
 }
@@ -1115,7 +1130,9 @@ mod tests {
         assert!(model.editing.is_none());
 
         // 4. Sur une requête valide avec Focus::Detail : ouverture
+        // (onglet Params, sinon le curseur part de l'onglet affiché)
         select(&mut model, "simple-get.bru");
+        model.request_tab = RequestTab::Params;
         assert_eq!(model.focus, Focus::Detail);
         update(&mut model, Message::StartEdit);
         assert!(model.editing.is_some());
@@ -1141,6 +1158,27 @@ mod tests {
         assert_eq!(model.focus, Focus::Response);
         update(&mut model, Message::StartEdit);
         assert!(model.editing.is_none());
+    }
+
+    #[test]
+    fn start_edit_puts_cursor_on_the_shown_tab() {
+        let mut model = loaded_model((100, 30));
+        select(&mut model, "simple-get.bru");
+        update(&mut model, Message::NextFocus);
+
+        // Onglet Auth affiché : le curseur part du mode d'auth
+        model.request_tab = RequestTab::Auth;
+        update(&mut model, Message::StartEdit);
+        let session = model.editing.as_ref().unwrap();
+        assert_eq!(session.current_field(), Some(EditableField::AuthMode));
+        assert_eq!(model.shown_request_tab(), RequestTab::Auth);
+        model.editing = None;
+
+        // Onglet Params (par défaut) : le curseur reste sur la méthode
+        model.request_tab = RequestTab::Params;
+        update(&mut model, Message::StartEdit);
+        let session = model.editing.as_ref().unwrap();
+        assert_eq!(session.current_field(), Some(EditableField::Method));
     }
 
     #[test]
