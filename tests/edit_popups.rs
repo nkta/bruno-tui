@@ -53,6 +53,18 @@ impl Ui {
         Self { model, root }
     }
 
+    /// Collection temporaire d'un seul fichier `destination`, de contenu
+    /// `text` (cas écrits en ligne par les tests du writer).
+    fn from_text(tag: &str, destination: &str, text: &str) -> Self {
+        let mut ui = Self::new(tag, &[]);
+        fs::write(ui.root.join(destination), text).expect("écriture du cas");
+        update(
+            &mut ui.model,
+            Message::CollectionLoaded(BruLoader.load(&ui.root)),
+        );
+        ui
+    }
+
     /// Sélectionne le nœud de chemin `path` (relatif à la racine) et donne
     /// le focus au détail.
     fn select(&mut self, path: &str) {
@@ -722,6 +734,81 @@ fn body_popup_edits_graphql_variables() {
     ui.assert_matches(
         "body-graphql-vars-ops.bru",
         "body-graphql-vars-ops.after.bru",
+    );
+}
+
+// --- Script, Tests, Docs -------------------------------------------------------
+
+impl Ui {
+    /// `Entrée` sur un bloc de texte : l'éditeur externe est demandé avec
+    /// le texte actuel ; sa fermeture renvoie `text` au popup.
+    fn edit_in_editor(&mut self, field: EditableField, extension: &str, text: &str) {
+        assert_eq!(self.field(), Some(field));
+        match self.key(KeyCode::Enter) {
+            Command::EditTextInEditor {
+                extension: asked,
+                field: asked_field,
+                ..
+            } => {
+                assert_eq!(asked, extension);
+                assert_eq!(asked_field, field);
+            }
+            other => panic!("éditeur externe attendu, obtenu {other:?}"),
+        }
+        update(
+            &mut self.model,
+            Message::TextEditorClosed {
+                field,
+                result: Ok(text.to_owned()),
+            },
+        );
+        assert!(self.model.editing.as_ref().is_some_and(|s| s.dirty));
+    }
+}
+
+/// Script, Tests et Docs passent par l'éditeur externe depuis leur popup ;
+/// au retour, le popup garde la modification jusqu'au `Ctrl+S`. Mêmes
+/// fichiers attendus que `text_blocks_edit_creation_and_removal`.
+#[test]
+fn script_tests_and_docs_popups_use_the_external_editor() {
+    let initial = "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n}\n\nscript:pre-request {\n  console.log(\"old\");\n}\n";
+    let mut ui = Ui::from_text("text-blocks", "test-req.bru", initial);
+    ui.select("test-req.bru");
+
+    ui.open(RequestTab::Script);
+    ui.edit_in_editor(
+        EditableField::ScriptPreRequest,
+        "js",
+        "console.log(\"new\");",
+    );
+    ui.save();
+    ui.open(RequestTab::Tests);
+    ui.edit_in_editor(EditableField::Tests, "js", "test(\"ok\", () => {});");
+    ui.save();
+    ui.open(RequestTab::Docs);
+    ui.edit_in_editor(EditableField::Docs, "md", "# Title\nDocumentation");
+    ui.save();
+    let written = fs::read_to_string(ui.root.join("test-req.bru")).expect("relecture");
+    assert_eq!(
+        written,
+        "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n}\n\nscript:pre-request {\n  console.log(\"new\");\n}\n\ntests {\n  test(\"ok\", () => {});\n}\n\ndocs {\n  # Title\n  Documentation\n}\n"
+    );
+
+    // Retrait : script vidé, tests réduits à des blancs. `Tab` passe au
+    // script post-réponse, puis revient.
+    ui.open(RequestTab::Script);
+    ui.key(KeyCode::Tab);
+    assert_eq!(ui.field(), Some(EditableField::ScriptPostResponse));
+    ui.key(KeyCode::BackTab);
+    ui.edit_in_editor(EditableField::ScriptPreRequest, "js", "");
+    ui.save();
+    ui.open(RequestTab::Tests);
+    ui.edit_in_editor(EditableField::Tests, "js", "   \n");
+    ui.save();
+    let written = fs::read_to_string(ui.root.join("test-req.bru")).expect("relecture");
+    assert_eq!(
+        written,
+        "meta {\n  name: test\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://example.com\n}\n\ndocs {\n  # Title\n  Documentation\n}\n"
     );
 }
 
