@@ -24,6 +24,7 @@ pub mod tree_filter;
 pub mod update;
 pub mod view;
 pub mod watch;
+pub mod workspace;
 
 use std::ffi::OsString;
 use std::io;

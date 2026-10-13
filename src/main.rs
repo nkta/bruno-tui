@@ -20,16 +20,16 @@ use tokio::sync::mpsc;
 const USAGE_ERROR: u8 = 2;
 
 fn main() -> ExitCode {
-    let (path, secrets, mouse, watch, history, editor) =
+    let (paths, secrets, mouse, watch, history, editor) =
         match cli::parse(std::env::args_os().skip(1)) {
             Ok(Command::Run {
-                path,
+                paths,
                 secrets,
                 mouse,
                 watch,
                 history,
                 editor,
-            }) => (path, secrets, mouse, watch, history, editor),
+            }) => (paths, secrets, mouse, watch, history, editor),
             Ok(Command::Help) => {
                 print!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -43,6 +43,9 @@ fn main() -> ExitCode {
                 return ExitCode::from(USAGE_ERROR);
             }
         };
+
+    // Provisoire : seul le premier chemin est ouvert.
+    let path = paths.into_iter().next().unwrap_or_else(|| ".".into());
 
     // Vérifié avant toute modification de l'état du terminal.
     if !io::stdout().is_terminal() {

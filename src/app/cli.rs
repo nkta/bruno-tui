@@ -1,7 +1,7 @@
 //! Analyse des arguments de la ligne de commande.
 //!
-//! Analyseur écrit à la main : un argument positionnel et quatre options ne
-//! justifient pas une dépendance. Les chemins restent des `OsString` pour
+//! Analyseur écrit à la main : des arguments positionnels et quelques
+//! options ne justifient pas une dépendance. Les chemins restent des `OsString` pour
 //! accepter les noms non UTF-8.
 
 use std::ffi::OsString;
@@ -13,13 +13,16 @@ use crate::secrets::SecretMapping;
 
 /// Texte d'aide affiché par `--help` et en cas d'erreur d'usage.
 pub const USAGE: &str = "\
-Usage : bruno-tui [OPTIONS] [CHEMIN]
+Usage : bruno-tui [OPTIONS] [CHEMIN...]
 
-Explore une collection Bruno dans le terminal.
+Explore une collection Bruno, ou un workspace, dans le terminal.
 
 Arguments :
   CHEMIN          collection, ou fichier ou dossier qu'elle contient
-                  (défaut : répertoire courant)
+                  (défaut : répertoire courant) ; dossier contenant
+                  workspace.yml : toutes les collections du workspace.
+                  Plusieurs chemins : un workspace sans nom, chaque
+                  chemin étant la racine d'une collection.
 
 Options :
   --editor COMMANDE
@@ -52,9 +55,9 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_V
 /// Action demandée par la ligne de commande.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Ouvre l'interface sur ce chemin.
+    /// Ouvre l'interface sur ces chemins (au moins un).
     Run {
-        path: PathBuf,
+        paths: Vec<PathBuf>,
         /// Déclarations `--secret`, dans l'ordre ; un nom répété garde sa
         /// première déclaration.
         secrets: Vec<SecretMapping>,
@@ -75,8 +78,6 @@ pub enum Command {
 pub enum UsageError {
     #[error("option inconnue : {0}")]
     UnknownOption(String),
-    #[error("un seul chemin est accepté")]
-    TooManyArguments,
     #[error("--secret attend NOM ou NOM=CLÉ")]
     MissingSecretArgument,
     /// Porte l'argument fautif, qui n'est qu'un nom et jamais une valeur.
@@ -88,7 +89,7 @@ pub enum UsageError {
 
 /// Analyse les arguments, nom du programme exclu.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageError> {
-    let mut path: Option<PathBuf> = None;
+    let mut paths: Vec<PathBuf> = Vec::new();
     let mut secrets: Vec<SecretMapping> = Vec::new();
     let mut mouse = true;
     let mut watch = true;
@@ -119,16 +120,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
             Some(option) if option.starts_with('-') => {
                 return Err(UsageError::UnknownOption(option.to_owned()));
             }
-            _ => {
-                if path.is_some() {
-                    return Err(UsageError::TooManyArguments);
-                }
-                path = Some(PathBuf::from(arg));
-            }
+            _ => paths.push(PathBuf::from(arg)),
         }
     }
+    if paths.is_empty() {
+        paths.push(PathBuf::from("."));
+    }
     Ok(Command::Run {
-        path: path.unwrap_or_else(|| PathBuf::from(".")),
+        paths,
         secrets,
         mouse,
         watch,
@@ -159,7 +158,7 @@ mod tests {
 
     fn run(path: &str) -> Command {
         Command::Run {
-            path: PathBuf::from(path),
+            paths: vec![PathBuf::from(path)],
             secrets: Vec::new(),
             mouse: true,
             watch: true,
@@ -203,13 +202,21 @@ mod tests {
             parse_strs(&["--inconnu"]),
             Err(UsageError::UnknownOption("--inconnu".into()))
         );
-        assert_eq!(parse_strs(&["a", "b"]), Err(UsageError::TooManyArguments));
+    }
+
+    #[test]
+    fn several_paths_are_kept_in_order() {
+        let Ok(Command::Run { paths, .. }) = parse_strs(&["a", "--no-watch", "b", "c"]) else {
+            panic!("lancement attendu");
+        };
+        assert_eq!(paths, [PathBuf::from("a"), "b".into(), "c".into()]);
+        assert!(USAGE.contains("[CHEMIN...]"));
     }
 
     #[test]
     fn editor_option() {
         let with_editor = |path: &str, editor: &str| Command::Run {
-            path: PathBuf::from(path),
+            paths: vec![PathBuf::from(path)],
             secrets: Vec::new(),
             mouse: true,
             watch: true,
@@ -237,7 +244,7 @@ mod tests {
     #[test]
     fn no_mouse_option() {
         let without_mouse = |path: &str| Command::Run {
-            path: PathBuf::from(path),
+            paths: vec![PathBuf::from(path)],
             secrets: Vec::new(),
             mouse: false,
             watch: true,
@@ -261,7 +268,7 @@ mod tests {
     #[test]
     fn no_watch_option() {
         let without_watch = |path: &str| Command::Run {
-            path: PathBuf::from(path),
+            paths: vec![PathBuf::from(path)],
             secrets: Vec::new(),
             mouse: true,
             watch: false,
@@ -285,7 +292,7 @@ mod tests {
     #[test]
     fn no_history_option() {
         let without_history = |path: &str| Command::Run {
-            path: PathBuf::from(path),
+            paths: vec![PathBuf::from(path)],
             secrets: Vec::new(),
             mouse: true,
             watch: true,
@@ -323,7 +330,7 @@ mod tests {
                 "./c",
             ]),
             Ok(Command::Run {
-                path: PathBuf::from("./c"),
+                paths: vec![PathBuf::from("./c")],
                 secrets: vec![
                     mapping("oktaClientSecret", Some("OKTA_CLIENT_SECRET")),
                     mapping("token", None),
@@ -337,7 +344,7 @@ mod tests {
         assert_eq!(
             parse_strs(&["./c", "--secret=a", "--secret=b=B", "--secret", "a=X"]),
             Ok(Command::Run {
-                path: PathBuf::from("./c"),
+                paths: vec![PathBuf::from("./c")],
                 secrets: vec![mapping("a", None), mapping("b", Some("B"))],
                 mouse: true,
                 watch: true,
@@ -374,7 +381,7 @@ mod tests {
         assert_eq!(
             parse([raw.clone()]),
             Ok(Command::Run {
-                path: PathBuf::from(raw),
+                paths: vec![PathBuf::from(raw)],
                 secrets: Vec::new(),
                 mouse: true,
                 watch: true,
