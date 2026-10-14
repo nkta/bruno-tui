@@ -53,6 +53,21 @@ pub fn file_stamp(time: SystemTime) -> String {
     )
 }
 
+/// Date de suppression d'un `.trashinfo` (heure locale, sans fuseau) :
+/// `2026-10-12T21:54:20`.
+pub fn trash_date(time: SystemTime) -> String {
+    let t = local(time);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,5 +86,11 @@ mod tests {
     fn file_stamp_is_sortable() {
         let time = UNIX_EPOCH + Duration::from_secs(SAMPLE);
         assert_eq!(file_stamp(time), "20261011-215420");
+    }
+
+    #[test]
+    fn trash_date_is_iso_without_offset() {
+        let time = UNIX_EPOCH + Duration::from_secs(SAMPLE);
+        assert_eq!(trash_date(time), "2026-10-11T21:54:20");
     }
 }

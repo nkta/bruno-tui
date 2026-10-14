@@ -18,6 +18,7 @@ mod error;
 mod format;
 pub mod names;
 mod query;
+pub mod trash;
 
 pub(crate) use draft::SUPPORTED_AUTH_MODES;
 pub use edit::{BODY_MODES, EntrySection, FieldEdit};
