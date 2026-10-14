@@ -1,6 +1,11 @@
 # Spécification — Édition, phase 4 : déplacer, et créer depuis `curl`
 
-Statut : **brouillon, à valider par Nicolas**.
+Statut : **approuvée par Nicolas le 2026-10-14**, options recommandées du § 0.
+Décisions : partie 2 (`curl`) sortie dans une spec à part, à rédiger ;
+popup « Déplacer vers » (`m` dans l'arbre) ; `seq` inchangé dans la cible,
+comme Bruno ; pas de déplacement entre collections. Cette spec lève, pour la
+partie 1 seulement, la règle de `CLAUDE.md` sur l'écriture des fichiers `.bru`.
+Les décisions 5 à 7 et le § 6 restent une référence pour la future spec `curl`.
 
 Suite de `docs/edition-phase3.md`. Ses principes s'appliquent :
 fraîcheur (`FileStamp`), écriture atomique, corbeille, écritures confinées
