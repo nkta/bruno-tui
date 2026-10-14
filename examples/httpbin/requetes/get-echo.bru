@@ -1,0 +1,24 @@
+meta {
+  name: Écho GET
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/get?user={{user}}
+  body: none
+  auth: inherit
+}
+
+params:query {
+  user: {{user}}
+}
+
+assert {
+  res.status: eq 200
+  res.body.args.user: eq alice
+}
+
+docs {
+  httpbin renvoie les paramètres reçus dans `args`.
+}

@@ -1,0 +1,20 @@
+meta {
+  name: En-têtes reçus
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{base_url}}/headers
+  body: none
+  auth: inherit
+}
+
+assert {
+  res.status: eq 200
+  res.body.headers.Accept: eq application/json
+}
+
+docs {
+  Vérifie que l'en-tête `Accept` de la collection est bien envoyé.
+}

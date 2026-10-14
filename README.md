@@ -72,6 +72,12 @@ Pour une collection YAML :
 relatif au dossier du workspace ou absolu. Un `workspace.yml` illisible
 ou invalide arrête le lancement avec un message clair.
 
+Exemple prêt à l'emploi : `bruno-tui examples/workspace` ouvre les
+collections `examples/jsonplaceholder` et `examples/httpbin`. Pour
+retrouver ses propres collections à chaque lancement, créer un
+`workspace.yml` qui les liste, puis un alias
+(`alias bt='bruno-tui ~/api/mon-workspace'`).
+
 **Arbre**
 
 - Une ligne d'en-tête par collection : `▸ Clients`.

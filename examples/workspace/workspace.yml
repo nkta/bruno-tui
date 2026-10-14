@@ -1,0 +1,11 @@
+opencollection: 1.0.0
+info:
+  name: Exemples
+  type: workspace
+collections:
+  - name: JSONPlaceholder
+    path: ../jsonplaceholder
+  - name: httpbin
+    path: ../httpbin
+specs: []
+docs: ''

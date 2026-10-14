@@ -1,0 +1,27 @@
+meta {
+  name: Écho POST
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{base_url}}/post
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "nom": "{{user}}",
+    "actif": true
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.json.actif: eq true
+}
+
+docs {
+  httpbin renvoie le corps JSON reçu dans `json`.
+}
