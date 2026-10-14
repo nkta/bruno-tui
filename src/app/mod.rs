@@ -343,18 +343,12 @@ pub async fn run<B: Backend>(
                     } => {
                         let sender = sender.clone();
                         tokio::task::spawn_blocking(move || {
-                            let result =
-                                writer::bruno_config::write_bruno_config(&root, &stamp, &changes)
-                                    .map(|stamp| {
-                                        // Un chemin de certificat introuvable n'est
-                                        // qu'un avertissement : `bru` l'affichera.
-                                        let warnings = added_paths
-                                            .iter()
-                                            .filter(|path| !root.join(path).exists())
-                                            .map(|path| format!("fichier introuvable : {path}"))
-                                            .collect();
-                                        model::SavedSettings { stamp, warnings }
-                                    });
+                            let result = update::settings::execute_save(
+                                &root,
+                                &stamp,
+                                &changes,
+                                &added_paths,
+                            );
                             let _ = sender.blocking_send(AppEvent::SettingsSaved { root, result });
                         });
                     }

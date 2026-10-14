@@ -149,6 +149,7 @@ d'édition non enregistré demande confirmation.
 | `p` | cloner la ligne (Collection) |
 | `Maj+↑` / `Maj+↓` | monter / descendre la ligne parmi ses frères (Collection) |
 | `d` | mettre la ligne à la corbeille, après confirmation (Collection) |
+| `B` | réglages de la collection (`bruno.json` : presets, proxy, certificats clients) ; voir « Réglages de la collection » |
 
 La racine de la collection est surveillée en continu : dès qu'un fichier
 `.bru` ou `.yml` (OpenCollection), `bruno.json`, `collection.bru`, `folder.bru` ou un fichier du dossier
@@ -293,6 +294,75 @@ Règles, reprises de Bruno :
   n'est réécrit.
 - Après l'opération, l'arbre est rechargé et la sélection suit l'élément
   créé, renommé, cloné ou déplacé (en workspace, dans la collection active).
+
+## Réglages de la collection
+
+`B` (Collection) ouvre le popup **Réglages** de la collection active
+(spécification : `docs/reglages-collection.md`). Il édite trois clés de
+`bruno.json`, et rien d'autre : `presets`, `proxy` et `clientCertificates`.
+`Tab` / `Maj+Tab` passent d'une partie à l'autre ; rien n'est écrit avant
+`Ctrl+S`. Refusé : collection YAML (lecture seule), exécution en cours,
+`bruno.json` illisible, JSON invalide, racine qui n'est pas un objet, lien
+symbolique, indentation par tabulations ou fins de ligne mixtes.
+
+| Partie | Contenu |
+|---|---|
+| Presets | type de requête ‹ http › / ‹ graphql › / ‹ grpc › / ‹ ws ›, URL par défaut, environnement par défaut (« aucun » retire la clé) |
+| Proxy | mode ‹ inherit › / ‹ enabled › / ‹ disabled ›, protocole, hôte, port (1 à 65535 ou vide), case d'authentification, utilisateur, mot de passe, contournement. Les lignes sous le mode sont grisées hors du mode `enabled`, leurs valeurs sont conservées. |
+| Certificats | liste des certificats clients : `a` ajouter (domaine, type `cert` ou `pfx`, fichiers, passphrase), `d` supprimer après confirmation `y`/`n`, `Espace` activer / désactiver. Pas de modification d'une entrée, comme Bruno : supprimer, puis ajouter. |
+
+| Touche | Effet |
+|---|---|
+| `↑`/`↓`, `Tab`/`Maj+Tab` | ligne précédente, suivante ; partie suivante, précédente |
+| `←`/`→` | valeur précédente, suivante d'un choix |
+| `Entrée` | modifier la valeur (`Entrée` valide, `Échap` annule) ; sur un choix, valeur suivante |
+| `Espace` | cocher ou décocher ; activer ou désactiver un certificat |
+| `Ctrl+R` | afficher une variable `{{…}}` masquée (un secret littéral reste masqué) |
+| `Ctrl+S` | enregistrer, puis fermer |
+| `Échap` | annuler la saisie ; sinon fermer (confirmation `y`/`n` si modifié) |
+
+Règles :
+
+- **Écriture chirurgicale.** Seule la valeur de la clé modifiée change ;
+  une clé absente est ajoutée à la fin, comme Bruno. Le reste du fichier
+  (autres clés, `"ignore": ["node_modules", ".git"]` sur une ligne,
+  indentation, fins de ligne, retour final) est conservé à l'octet près. La
+  valeur écrite est celle de Bruno (`JSON.stringify(valeur, null, 2)`,
+  décalée au niveau de la clé), `proxy.disabled: false` et
+  `auth.disabled: false` n'étant jamais écrits. Le TUI ne bascule pas
+  `version` et n'applique pas les autres nettoyages de Bruno.
+- **Fraîcheur et atomicité.** `bruno.json` est lu à l'ouverture. Si le
+  fichier a changé sur le disque avant `Ctrl+S`, rien n'est écrit
+  (« bruno.json a changé sur le disque ») et le popup reste ouvert.
+  L'écriture passe par un fichier temporaire puis un renommage, droits
+  conservés. Une clé en double au premier niveau refuse l'écriture.
+  Le seul fichier écrit est `<racine>/bruno.json`.
+- **Secrets.** Un mot de passe de proxy ou une passphrase **littéral est
+  refusé** ; seuls une variable entièrement `{{…}}` (ex. `{{proxyPassword}}`,
+  `{{process.env.PROXY_PASSWORD}}`) et la valeur vide passent. Le statut
+  propose un nom de variable et rappelle le `.env` ou `--secret` ; la valeur
+  tapée est oubliée aussitôt (jamais écrite, jamais loggée, jamais dans un
+  message). Un secret déjà présent dans le fichier est affiché `********`
+  et recopié tel quel si la clé est réécrite.
+- **Ancien format de proxy** (`enabled: true | false | 'global'`) : affiché
+  converti (`transformProxyConfig` de Bruno) ; converti dans le fichier
+  seulement si le proxy est modifié, et le statut le dit.
+- **Certificats.** Un chemin absolu est écrit relatif à la collection
+  (`path.relative`) ; un chemin relatif est gardé. Un fichier introuvable
+  donne un avertissement dans le statut, jamais un refus ; le contenu des
+  fichiers n'est jamais lu. `enabled: true` est réécrit à chaque écriture.
+- **Presets dans le TUI.** `presets.requestType` et `presets.requestUrl`
+  préremplissent le popup `a` (nouvelle requête) ; `grpc` et `ws` ne sont
+  pas créables : repli sur `http`, avec une mention dans le statut.
+  `bru run` les ignore. `presets.defaultEnvironment` n'est pas
+  présélectionné par le TUI : `bru` l'applique seul tant qu'aucun
+  environnement n'est choisi.
+- Les valeurs `{{variable}}` ne sont jamais résolues par le TUI : `bru` s'en
+  charge à l'exécution.
+- Après l'écriture, la collection est rechargée.
+
+Les fichiers attendus des tests sont générés par le vrai code de Bruno
+(`scripts/gen-settings-fixtures.sh` → `tests/fixtures/collections/settings-cases/`).
 
 ## Édition par popups
 

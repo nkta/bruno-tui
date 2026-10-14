@@ -115,6 +115,25 @@ fn save(model: &mut Model) -> Command {
     }
 }
 
+/// Exécute `Command::SaveSettings` : écrit les clés modifiées de
+/// `<root>/bruno.json`, puis relève les chemins de certificats introuvables
+/// (simple avertissement : `bru` l'affichera à l'exécution, le contenu du
+/// fichier n'est jamais lu).
+pub fn execute_save(
+    root: &std::path::Path,
+    stamp: &crate::writer::FileStamp,
+    changes: &[(&'static str, bruno_config::Json)],
+    added_paths: &[String],
+) -> Result<SavedSettings, WriteError> {
+    let stamp = bruno_config::write_bruno_config(root, stamp, changes)?;
+    let warnings = added_paths
+        .iter()
+        .filter(|path| !root.join(path).exists())
+        .map(|path| format!("fichier introuvable : {path}"))
+        .collect();
+    Ok(SavedSettings { stamp, warnings })
+}
+
 /// Applique le résultat d'une écriture de `bruno.json`.
 pub(crate) fn settings_saved(
     model: &mut Model,

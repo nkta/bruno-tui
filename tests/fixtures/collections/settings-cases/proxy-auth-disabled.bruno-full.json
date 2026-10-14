@@ -7,7 +7,7 @@
     ".git"
   ],
   "proxy": {
-    "inherit": true,
+    "inherit": false,
     "config": {
       "protocol": "http",
       "hostname": "",

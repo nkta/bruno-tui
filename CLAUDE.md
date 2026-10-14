@@ -18,6 +18,9 @@ Binaire : `bruno-tui`
   aucune variable et ne connaît pas l'héritage d'auth.
 - Aucune écriture dans un fichier `.bru` tant que la capacité
   d'édition n'a pas été spécifiée et approuvée. Lecture seule par défaut.
+  Exception approuvée (`docs/reglages-collection.md`) : `bruno.json`,
+  clés `proxy`, `clientCertificates` et `presets` seulement, écriture
+  chirurgicale ; aucune autre clé, aucun autre fichier.
 - Tout type désérialisé depuis le reporter JSON est couvert par un test
   de fixture issu d'un vrai `bru run`. Pas de structure devinée.
 - Les secrets ne sont jamais écrits sur disque ni loggués.
