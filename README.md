@@ -148,6 +148,7 @@ d'édition non enregistré demande confirmation.
 | `F2` | renommer la ligne (Collection) |
 | `p` | cloner la ligne (Collection) |
 | `Maj+↑` / `Maj+↓` | monter / descendre la ligne parmi ses frères (Collection) |
+| `m` | déplacer la ligne vers un autre dossier (Collection ; dans le Détail, `m` ouvre le popup Requête) |
 | `d` | mettre la ligne à la corbeille, après confirmation (Collection) |
 | `B` | réglages de la collection (`bruno.json` : presets, proxy, certificats clients) ; voir « Réglages de la collection » |
 
@@ -236,9 +237,10 @@ fichiers `.bru` que pour les collections OpenCollection YAML.
 
 ## Fichiers et dossiers
 
-Depuis l'arbre (focus Collection), on crée, renomme, clone, réordonne et met
-à la corbeille les requêtes et les dossiers, comme dans Bruno 4.2.1
-(spécification : `docs/edition-phase3.md`).
+Depuis l'arbre (focus Collection), on crée, renomme, clone, réordonne,
+déplace et met à la corbeille les requêtes et les dossiers, comme dans
+Bruno 4.2.1 (spécifications : `docs/edition-phase3.md`,
+`docs/edition-phase4.md` pour le déplacement).
 
 | Touche | Effet |
 |---|---|
@@ -247,6 +249,7 @@ Depuis l'arbre (focus Collection), on crée, renomme, clone, réordonne et met
 | `F2` | renommer la ligne : nom affiché (`meta.name`) et, case cochée, le fichier ou le dossier |
 | `p` | cloner la ligne, pré-remplie avec « <nom> copie » ; un dossier est copié en entier |
 | `Maj+↑` / `Maj+↓` | monter / descendre la ligne parmi ses frères |
+| `m` | déplacer la ligne vers un autre dossier de la même collection (popup « Déplacer vers ») |
 | `d` | mettre à la corbeille, après confirmation `y`/`n` (le nombre de requêtes d'un dossier est indiqué) |
 
 Les popups suivent le modèle des popups d'édition :
@@ -294,6 +297,36 @@ Règles, reprises de Bruno :
   n'est réécrit.
 - Après l'opération, l'arbre est rechargé et la sélection suit l'élément
   créé, renommé, cloné ou déplacé (en workspace, dans la collection active).
+
+### Déplacer (`m`)
+
+`m` dans l'arbre ouvre « Déplacer vers » : la racine de la collection, puis
+tous ses dossiers en arbre. Dans le Détail, `m` reste le popup Requête.
+
+| Touche | Effet |
+|---|---|
+| saisie | filtrer les dossiers (sous-chaîne, sans casse, sur le nom ou le chemin) |
+| `↑`/`↓`, `Tab`/`Maj+Tab` | destination précédente, suivante |
+| `Entrée` | déplacer |
+| `Échap` | fermer sans rien déplacer |
+
+- Masqués : le dossier actuel de l'élément (Bruno ne fait rien), l'élément
+  lui-même et, pour un dossier, ses descendants.
+- Un seul `rename`, jamais de copie suivie d'une suppression. Contenu,
+  `folder.bru` et `seq` de l'élément restent identiques à l'octet (comme
+  Bruno : le `seq` n'est pas réécrit dans le dossier cible ; `Maj+↑`/`Maj+↓`
+  règle ensuite la position).
+- Nom déjà pris dans le dossier cible : suffixe ` 1`, ` 2`… comme Bruno
+  (`get-post 1.bru`, `Posts 1`). Le popup l'annonce (« Sera nommé : … ») et
+  le statut donne le nom final ; `meta.name` ne change pas. Rien n'est écrasé.
+- Les frères restants du dossier source sont renumérotés comme après une
+  corbeille (mêmes limites que ci-dessus, le statut le dit).
+- Refusé, avec un message dans le popup et sans rien déplacer : fichier
+  modifié sur disque depuis son chargement, autre disque, lien symbolique
+  dans l'élément ou dossier cible. Refusé avant l'ouverture : collection
+  YAML, exécution en cours, en-tête de la collection, fichier illisible.
+- Pas de déplacement entre collections d'un workspace : la collection
+  active seulement.
 
 ## Réglages de la collection
 

@@ -396,6 +396,14 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
         return command;
     }
 
+    // Popup « Déplacer vers » : modal, comme le popup de fichier.
+    if model.move_popup.is_some()
+        && !is_background_result(&message)
+        && let Some(command) = files::move_popup_message(model, &message)
+    {
+        return command;
+    }
+
     // Popup d'édition : modal, il garde les touches de navigation et
     // laisse passer la saisie, la sauvegarde et les résultats de fond.
     if model.editing.is_some()
@@ -543,6 +551,9 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
         Message::CreateFolder if model.focus == Focus::Tree => files::open_create(model, true),
         Message::RenameItem if model.focus == Focus::Tree => files::open_rename(model),
         Message::CloneItem if model.focus == Focus::Tree => files::open_clone(model),
+        // `m` ouvre « Déplacer vers » dans l'arbre ; dans le Détail, c'est
+        // toujours le popup Requête.
+        Message::OpenRequestEdit if model.focus == Focus::Tree => files::open_move(model),
         Message::MoveItemUp if model.focus == Focus::Tree => files::move_item(model, true),
         Message::MoveItemDown if model.focus == Focus::Tree => files::move_item(model, false),
         Message::MoveItemUp => apply(model, Message::Up),
@@ -554,7 +565,12 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
         | Message::FilePopupNext
         | Message::FilePopupPrevious
         | Message::FilePopupEnter
-        | Message::FilePopupCancel => Command::None,
+        | Message::FilePopupCancel
+        | Message::MovePopupKey(_)
+        | Message::MovePopupNext
+        | Message::MovePopupPrevious
+        | Message::MovePopupEnter
+        | Message::MovePopupCancel => Command::None,
         Message::FileOpDone { root, result } => files::file_op_done(model, &root, result),
         Message::OpenSettings => settings::open_settings(model),
         Message::SettingsKey(_) => Command::None,

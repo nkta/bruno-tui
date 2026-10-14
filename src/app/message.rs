@@ -57,6 +57,8 @@ pub enum TextCapture {
     FilePopup,
     /// Popup « Réglages » de la collection : toute touche lui revient.
     Settings,
+    /// Popup « Déplacer vers » : la frappe va au filtre, `↑↓` choisissent.
+    MovePopup,
 }
 
 /// Touche reçue par le popup « Réglages » (`docs/reglages-collection.md`).
@@ -419,6 +421,16 @@ pub enum Message {
     FilePopupEnter,
     /// `Échap` dans un popup de fichier : fermer sans rien écrire.
     FilePopupCancel,
+    /// Touche de saisie du filtre dans le popup « Déplacer vers ».
+    MovePopupKey(InputKey),
+    /// `↓` ou `Tab` dans le popup « Déplacer vers » : destination suivante.
+    MovePopupNext,
+    /// `↑` ou `Maj+Tab` : destination précédente.
+    MovePopupPrevious,
+    /// `Entrée` : déplacer vers la destination choisie.
+    MovePopupEnter,
+    /// `Échap` : fermer sans rien déplacer.
+    MovePopupCancel,
     /// Renvoyé par la boucle après `Command::FileOp`.
     FileOpDone {
         root: PathBuf,
@@ -601,6 +613,7 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::PlaintextSecretPrompt => plaintext_secret_prompt_capture_message(key),
         TextCapture::FilePopup => file_popup_capture_message(key),
         TextCapture::Settings => settings_capture_message(key),
+        TextCapture::MovePopup => move_popup_capture_message(key),
     }
 }
 
@@ -645,6 +658,26 @@ fn file_popup_capture_message(key: KeyEvent) -> Option<Message> {
         _ => return None,
     };
     Some(Message::FilePopupKey(input))
+}
+
+/// Capture pendant le popup « Déplacer vers » : la frappe va au filtre,
+/// `↑↓`/`Tab` choisissent la destination, `Entrée` déplace, `Échap` ferme.
+fn move_popup_capture_message(key: KeyEvent) -> Option<Message> {
+    let input = match key.code {
+        KeyCode::Up | KeyCode::BackTab => return Some(Message::MovePopupPrevious),
+        KeyCode::Down | KeyCode::Tab => return Some(Message::MovePopupNext),
+        KeyCode::Enter => return Some(Message::MovePopupEnter),
+        KeyCode::Esc => return Some(Message::MovePopupCancel),
+        KeyCode::Char(c) => InputKey::Char(c),
+        KeyCode::Backspace => InputKey::Backspace,
+        KeyCode::Delete => InputKey::Delete,
+        KeyCode::Left => InputKey::Left,
+        KeyCode::Right => InputKey::Right,
+        KeyCode::Home => InputKey::Home,
+        KeyCode::End => InputKey::End,
+        _ => return None,
+    };
+    Some(Message::MovePopupKey(input))
 }
 
 /// Capture pendant le popup d'avertissement de secret en clair :
@@ -1355,6 +1388,34 @@ mod tests {
                 "{code:?}"
             );
         }
+    }
+
+    #[test]
+    fn move_popup_capture() {
+        let none = KeyModifiers::NONE;
+        let capture = TextCapture::MovePopup;
+        for (code, expected) in [
+            (KeyCode::Char('q'), "MovePopupKey"),
+            (KeyCode::Char('m'), "MovePopupKey"),
+            (KeyCode::Char(' '), "MovePopupKey"),
+            (KeyCode::Backspace, "MovePopupKey"),
+            (KeyCode::Up, "MovePopupPrevious"),
+            (KeyCode::BackTab, "MovePopupPrevious"),
+            (KeyCode::Down, "MovePopupNext"),
+            (KeyCode::Tab, "MovePopupNext"),
+            (KeyCode::Enter, "MovePopupEnter"),
+            (KeyCode::Esc, "MovePopupCancel"),
+        ] {
+            assert_eq!(
+                name_capturing(key(code, none), capture).as_deref(),
+                Some(expected),
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            name_capturing(key(KeyCode::Char('c'), KeyModifiers::CONTROL), capture).as_deref(),
+            Some("ForceQuit")
+        );
     }
 
     #[test]

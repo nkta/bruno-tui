@@ -671,3 +671,234 @@ fn trash_without_reproducible_order_keeps_seqs_and_says_so() {
         ))
     );
 }
+
+fn destinations(ui: &Ui) -> Vec<String> {
+    ui.model
+        .move_popup
+        .as_ref()
+        .expect("popup")
+        .visible()
+        .iter()
+        .map(|destination| destination.dir.display().to_string())
+        .collect()
+}
+
+#[test]
+fn m_in_the_tree_opens_move_but_stays_the_request_popup_in_the_detail() {
+    let mut ui = Ui::new("move-routing");
+    ui.select("get-post.bru");
+    ui.press(KeyCode::Char('m'));
+    assert!(ui.model.move_popup.is_some());
+    assert!(ui.model.editing.is_none());
+    assert_eq!(
+        ui.model.move_popup.as_ref().expect("popup").title(),
+        " Déplacer — get-post.bru "
+    );
+    // Le popup est modal : `q` va au filtre, il ne quitte pas.
+    ui.press(KeyCode::Char('q'));
+    assert!(ui.model.exit.is_none());
+    ui.press(KeyCode::Esc);
+    assert!(ui.model.move_popup.is_none());
+
+    // Dans le Détail, `m` ouvre toujours le popup Requête.
+    ui.model.focus = bruno_tui::app::model::Focus::Detail;
+    ui.press(KeyCode::Char('m'));
+    assert!(ui.model.move_popup.is_none());
+    assert!(ui.model.editing.is_some());
+}
+
+#[test]
+fn move_request_through_the_popup_follows_the_item_and_renumbers_the_source() {
+    let mut ui = Ui::new("move-request");
+    let before = ui.read("get-post.bru");
+    ui.select("get-post.bru");
+    ui.press(KeyCode::Char('m'));
+    // Racine masquée (c'est son dossier actuel) ; Posts et NoMeta listés.
+    assert_eq!(destinations(&ui), ["Posts", "NoMeta"]);
+    let screen = ui.screen(100, 30);
+    for needle in [
+        "Déplacer — get-post.bru",
+        "Vers",
+        "▸ Articles",
+        "  NoMeta",
+        "Entrée déplacer  Échap annuler",
+    ] {
+        assert!(screen.contains(needle), "{needle}\n{screen}");
+    }
+    ui.type_text("arti");
+    assert_eq!(destinations(&ui), ["Posts"]);
+    ui.press(KeyCode::Enter);
+
+    assert!(ui.model.move_popup.is_none());
+    assert_eq!(ui.read("Posts/get-post.bru"), before);
+    assert!(!ui.root.join("get-post.bru").exists());
+    assert_eq!(
+        ui.selected_path(),
+        Some(PathBuf::from("Posts/get-post.bru"))
+    );
+    // Source renumérotée comme après une corbeille (NoMeta passe en tête).
+    assert_eq!(
+        ui.read("NoMeta/folder.bru"),
+        files::folder_meta_content("NoMeta", Some(1))
+    );
+    assert_eq!(
+        ui.status(),
+        Some(StatusMessage::FileOpDone(
+            "Déplacé vers Posts : get-post.bru".into()
+        ))
+    );
+}
+
+#[test]
+fn move_to_the_root_and_name_collision_are_announced() {
+    let mut ui = Ui::new("move-collision");
+    ui.write("get-post.bru", &ui.read("get-post.bru"));
+    ui.select("Posts/create.bru");
+    ui.write("Posts/get-post.bru", &request_text("Autre", Some(5)));
+    ui.write("Posts/list-posts.bru", &request_text("Encore", Some(6)));
+    ui.reload();
+    ui.select("Posts/get-post.bru");
+    ui.press(KeyCode::Char('m'));
+    // Racine en tête : un `get-post.bru` y est déjà.
+    assert_eq!(destinations(&ui), ["", "NoMeta"]);
+    assert!(
+        ui.screen(100, 30).contains("Sera nommé : get-post 1.bru"),
+        "{}",
+        ui.screen(100, 30)
+    );
+    // NoMeta : pas de collision, pas de ligne.
+    ui.press(KeyCode::Down);
+    assert!(!ui.screen(100, 30).contains("Sera nommé"));
+    ui.press(KeyCode::Up);
+    ui.press(KeyCode::Enter);
+    assert_eq!(ui.selected_path(), Some(PathBuf::from("get-post 1.bru")));
+    assert_eq!(ui.read("get-post 1.bru"), request_text("Autre", Some(5)));
+    assert_eq!(
+        ui.status(),
+        Some(StatusMessage::FileOpDone(
+            "Déplacé vers la racine de la collection : get-post 1.bru".into()
+        ))
+    );
+}
+
+#[test]
+fn move_folder_hides_itself_its_descendants_and_its_current_folder() {
+    let mut ui = Ui::new("move-folder");
+    std::fs::create_dir_all(ui.root.join("Posts/Sub")).expect("sous-dossier");
+    ui.write("Posts/Sub/x.bru", &request_text("X", Some(1)));
+    ui.reload();
+    ui.select("Posts/Sub");
+    ui.press(KeyCode::Char('m'));
+    // Son dossier actuel (Posts) est masqué, lui-même aussi.
+    assert_eq!(destinations(&ui), ["", "NoMeta"]);
+    ui.press(KeyCode::Esc);
+
+    ui.select("Posts");
+    ui.press(KeyCode::Char('m'));
+    // Posts et Posts/Sub masqués ; la racine l'est aussi (dossier actuel).
+    assert_eq!(destinations(&ui), ["NoMeta"]);
+    ui.press(KeyCode::Enter);
+    assert!(ui.root.join("NoMeta/Posts/Sub/x.bru").is_file());
+    assert_eq!(
+        ui.read("NoMeta/Posts/folder.bru"),
+        fs::read_to_string(fixture().join("Posts/folder.bru")).expect("fixture")
+    );
+    assert_eq!(ui.selected_path(), Some(PathBuf::from("NoMeta/Posts")));
+}
+
+#[test]
+fn move_refusals_are_announced() {
+    // En-tête de la collection.
+    let mut ui = Ui::new("move-header");
+    ui.model.selected_collection = true;
+    ui.press(KeyCode::Char('m'));
+    assert!(ui.model.move_popup.is_none());
+    assert!(matches!(ui.status(), Some(StatusMessage::FileOpRefused(_))));
+
+    // Exécution en cours.
+    let mut ui = Ui::new("move-running");
+    ui.select("get-post.bru");
+    ui.model.series = Some(EnvSeries::new(PathBuf::new(), vec!["a".into()]));
+    ui.press(KeyCode::Char('m'));
+    assert!(ui.model.move_popup.is_none());
+    assert_eq!(
+        ui.status(),
+        Some(StatusMessage::FileOpRefused(
+            "Exécution en cours : opération sur les fichiers refusée".into()
+        ))
+    );
+
+    // Aucune destination (collection d'un seul niveau, élément à la racine).
+    let mut ui = Ui::new("move-nowhere");
+    fs::remove_dir_all(ui.root.join("Posts")).expect("retrait");
+    fs::remove_dir_all(ui.root.join("NoMeta")).expect("retrait");
+    ui.reload();
+    ui.select("get-post.bru");
+    ui.press(KeyCode::Char('m'));
+    assert!(ui.model.move_popup.is_none());
+    assert_eq!(
+        ui.status(),
+        Some(StatusMessage::FileOpRefused(
+            "Aucun autre dossier où déplacer cet élément".into()
+        ))
+    );
+}
+
+#[test]
+fn a_file_changed_on_disk_keeps_the_popup_open_with_the_message() {
+    let mut ui = Ui::new("move-stale");
+    ui.select("get-post.bru");
+    ui.press(KeyCode::Char('m'));
+    ui.write("get-post.bru", "changé par un tiers");
+    ui.press(KeyCode::Enter);
+    let popup = ui.model.move_popup.as_ref().expect("popup toujours ouvert");
+    assert!(!popup.pending);
+    assert!(
+        popup
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("modifié sur disque")),
+        "{:?}",
+        popup.error
+    );
+    let screen = ui.screen(100, 30);
+    assert!(screen.contains("son chargement"), "{screen}");
+    assert_eq!(ui.read("get-post.bru"), "changé par un tiers");
+    assert!(!ui.root.join("Posts/get-post.bru").exists());
+    ui.press(KeyCode::Esc);
+    assert!(ui.model.move_popup.is_none());
+}
+
+#[test]
+fn an_empty_filter_result_refuses_the_validation() {
+    let mut ui = Ui::new("move-nomatch");
+    ui.select("get-post.bru");
+    ui.press(KeyCode::Char('m'));
+    ui.type_text("zzz");
+    assert!(ui.screen(100, 30).contains("aucun dossier ne correspond"));
+    ui.press(KeyCode::Enter);
+    let popup = ui.model.move_popup.as_ref().expect("popup");
+    assert_eq!(
+        popup.error.as_deref(),
+        Some("Aucun dossier ne correspond au filtre.")
+    );
+    assert!(ui.root.join("get-post.bru").exists());
+}
+
+#[test]
+fn workspace_move_targets_the_active_collection_only() {
+    let mut ui = Ui::workspace("move-workspace");
+    ui.select("get-post.bru");
+    ui.press(KeyCode::Char('m'));
+    ui.type_text("arti");
+    ui.press(KeyCode::Enter);
+    assert!(ui.members[0].join("Posts/get-post.bru").is_file());
+    assert!(!ui.members[0].join("get-post.bru").exists());
+    // L'autre collection n'a pas bougé.
+    assert!(ui.members[1].join("get-post.bru").is_file());
+    assert!(!ui.members[1].join("Posts/get-post.bru").exists());
+    assert_eq!(
+        ui.selected_path(),
+        Some(PathBuf::from("Posts/get-post.bru"))
+    );
+}
