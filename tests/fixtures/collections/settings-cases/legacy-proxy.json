@@ -1,0 +1,105 @@
+{
+  "true": {
+    "input": {
+      "enabled": true,
+      "protocol": "https",
+      "hostname": "proxy.example",
+      "port": 8080,
+      "auth": {
+        "enabled": false,
+        "username": "alice",
+        "password": "{{proxy_password}}"
+      },
+      "bypassProxy": "localhost"
+    },
+    "output": {
+      "inherit": false,
+      "config": {
+        "protocol": "https",
+        "hostname": "proxy.example",
+        "port": 8080,
+        "auth": {
+          "username": "alice",
+          "password": "{{proxy_password}}",
+          "disabled": true
+        },
+        "bypassProxy": "localhost"
+      }
+    }
+  },
+  "false": {
+    "input": {
+      "enabled": false,
+      "protocol": "https",
+      "hostname": "proxy.example",
+      "port": 8080,
+      "auth": {
+        "enabled": false,
+        "username": "alice",
+        "password": "{{proxy_password}}"
+      },
+      "bypassProxy": "localhost"
+    },
+    "output": {
+      "inherit": false,
+      "config": {
+        "protocol": "https",
+        "hostname": "proxy.example",
+        "port": 8080,
+        "auth": {
+          "username": "alice",
+          "password": "{{proxy_password}}",
+          "disabled": true
+        },
+        "bypassProxy": "localhost"
+      },
+      "disabled": true
+    }
+  },
+  "global": {
+    "input": {
+      "enabled": "global",
+      "protocol": "https",
+      "hostname": "proxy.example",
+      "port": 8080,
+      "auth": {
+        "enabled": false,
+        "username": "alice",
+        "password": "{{proxy_password}}"
+      },
+      "bypassProxy": "localhost"
+    },
+    "output": {
+      "inherit": true,
+      "config": {
+        "protocol": "https",
+        "hostname": "proxy.example",
+        "port": 8080,
+        "auth": {
+          "username": "alice",
+          "password": "{{proxy_password}}",
+          "disabled": true
+        },
+        "bypassProxy": "localhost"
+      }
+    }
+  },
+  "minimal": {
+    "input": {
+      "enabled": true
+    },
+    "output": {
+      "inherit": false,
+      "config": {
+        "protocol": "http",
+        "hostname": "",
+        "port": null,
+        "auth": {
+          "username": "",
+          "password": ""
+        },
+        "bypassProxy": ""
+      }
+    }
+  }
+}

@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::config::{detect_format, find_opencollection_root, find_root, read_config};
+use super::config::{Presets, detect_format, find_opencollection_root, find_root, read_config};
 use super::error::LoadError;
 use super::opencollection::{self, COLLECTION_FILE};
 use super::tree::{
@@ -67,9 +67,13 @@ fn load_bru(root: PathBuf) -> Result<Collection, LoadError> {
     let walk = load_tree(&root, &Ignore::new(&config.ignore), &BruFormat)?;
     let mut notices = walk.notices;
     let settings = load_settings(&root, &BruFormat, &mut notices);
+    let presets = Some(config.request_presets())
+        .filter(|presets| *presets != Presets::default())
+        .map(Box::new);
     let name = config.name.unwrap_or_else(|| directory_name(&root));
     Ok(Collection {
         settings,
+        presets,
         name,
         format: CollectionFormat::Bru,
         tree: walk.tree,
@@ -101,6 +105,7 @@ fn load_opencollection(root: PathBuf) -> Result<Collection, LoadError> {
     let name = config.name.unwrap_or_else(|| directory_name(&root));
     Ok(Collection {
         settings: Some(Ok(config.meta)),
+        presets: None,
         name,
         format: CollectionFormat::OpenCollection,
         tree: walk.tree,

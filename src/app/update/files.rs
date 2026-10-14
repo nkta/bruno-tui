@@ -14,9 +14,10 @@ use crate::app::file_popup::FilePopup;
 use crate::app::message::Message;
 use crate::app::model::{Model, PendingConfirm, StatusMessage};
 use crate::app::move_popup::{MoveDestination, MovePopup, ROOT_LABEL};
+use crate::app::text_input::TextInput;
 use crate::app::workspace::{active_member, member_of_root, run_in_progress};
 use crate::collection::{FolderNode, TreeNode};
-use crate::writer::files::{FileOp, FileOpError, FileOpOutcome, SeqChange};
+use crate::writer::files::{FileOp, FileOpError, FileOpOutcome, RequestKind, SeqChange};
 use crate::writer::names::first_free_name;
 use crate::writer::sequence::{self, SeqItem};
 
@@ -129,12 +130,38 @@ pub(crate) fn open_create(model: &mut Model, folder: bool) -> Command {
     let seq = children_of(model, &dir).map_or(0, <[TreeNode]>::len) + 1;
     let context = dir_label(model, &dir);
     let seq = u32::try_from(seq).unwrap_or(u32::MAX);
-    model.file_popup = Some(if folder {
+    let mut popup = if folder {
         FilePopup::new_folder(dir, context, seq)
     } else {
         FilePopup::new_request(dir, context, seq)
-    });
+    };
+    if !folder {
+        apply_presets(model, &mut popup);
+    }
+    model.file_popup = Some(popup);
     Command::None
+}
+
+/// `presets.requestType` et `presets.requestUrl` de `bruno.json`
+/// préremplissent le popup de nouvelle requête (`docs/reglages-collection.md`
+/// § 4.1, D6-A). `grpc` et `ws` ne sont pas créables : repli sur `http`,
+/// avec une mention dans le statut. L'URL reste une chaîne, jamais résolue.
+fn apply_presets(model: &mut Model, popup: &mut FilePopup) {
+    let Some(presets) = model.loaded().and_then(|c| c.presets.as_deref()).cloned() else {
+        return;
+    };
+    match presets.request_type.as_deref() {
+        Some("graphql") => popup.request_kind = RequestKind::Graphql,
+        Some(kind @ ("grpc" | "ws")) => {
+            model.last_status = Some(StatusMessage::FileOpDone(format!(
+                "Preset « {kind} » non créable dans le TUI : http utilisé"
+            )));
+        }
+        _ => {}
+    }
+    if let Some(url) = presets.request_url.filter(|url| !url.is_empty()) {
+        popup.url = TextInput::new(&url, false);
+    }
 }
 
 /// Nœud visé par `F2`, `p`, `Maj+↑↓` et `d` ; refus sur l'en-tête.

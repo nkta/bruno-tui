@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "name": "demo",
+  "presets": {
+    "requestType": "graphql",
+    "requestUrl": "{{base_url}}"
+  },
+  "ignore": ["node_modules", ".git"]
+}

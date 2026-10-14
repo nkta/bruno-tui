@@ -147,6 +147,34 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "mettre à la corbeille, après confirmation (y/n), puis renuméroter les frères comme Bruno ; jamais d'effacement définitif",
             },
             HelpEntry {
+                key: "B",
+                effect: "réglages de la collection (bruno.json : presets, proxy, certificats) ; pas en YAML, refusé pendant une exécution",
+            },
+            HelpEntry {
+                key: "Réglages : Tab, Maj+Tab",
+                effect: "partie suivante, précédente (Presets, Proxy, Certificats)",
+            },
+            HelpEntry {
+                key: "Réglages : ↑↓, ←→",
+                effect: "ligne précédente, suivante ; valeur précédente, suivante d'un choix",
+            },
+            HelpEntry {
+                key: "Réglages : Entrée, Espace",
+                effect: "modifier la valeur (Entrée valide, Échap annule) ; cocher la case ; activer / désactiver un certificat",
+            },
+            HelpEntry {
+                key: "Réglages : a, d",
+                effect: "Certificats : ajouter ; supprimer après confirmation (y/n)",
+            },
+            HelpEntry {
+                key: "Réglages : Ctrl+R",
+                effect: "afficher une variable {{…}} masquée ; un secret littéral reste masqué",
+            },
+            HelpEntry {
+                key: "Réglages : Ctrl+S, Échap",
+                effect: "enregistrer (seule la clé modifiée de bruno.json change) ; fermer (confirmation si modifié)",
+            },
+            HelpEntry {
                 key: "Popup fichier : ↑↓, Tab",
                 effect: "ligne précédente, suivante (la frappe va au champ sous le curseur)",
             },
@@ -686,6 +714,19 @@ mod tests {
             .find(|s| s.title == "Collection")
             .expect("section");
         for key in ["a", "A", "F2", "p", "Maj+↑, Maj+↓", "m", "d"] {
+            assert!(section.entries.iter().any(|e| e.key == key), "{key}");
+        }
+    }
+
+    /// `B` ouvre les réglages de la collection (`docs/reglages-collection.md` § 3).
+    #[test]
+    fn collection_documents_the_settings_popup() {
+        let section = HELP_SECTIONS
+            .iter()
+            .find(|s| s.title == "Collection")
+            .expect("section");
+        assert!(section.entries.iter().any(|e| e.key == "B"));
+        for key in ["Réglages : a, d", "Réglages : Ctrl+S, Échap"] {
             assert!(section.entries.iter().any(|e| e.key == key), "{key}");
         }
     }

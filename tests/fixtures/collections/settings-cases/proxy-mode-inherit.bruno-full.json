@@ -1,0 +1,24 @@
+{
+  "version": "1",
+  "name": "demo",
+  "proxy": {
+    "inherit": true,
+    "config": {
+      "protocol": "http",
+      "hostname": "old.example",
+      "port": 3128,
+      "auth": {
+        "username": "alice",
+        "password": "{{proxy_password}}",
+        "disabled": true
+      },
+      "bypassProxy": "localhost"
+    }
+  },
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ],
+  "collectionVersion": "1"
+}

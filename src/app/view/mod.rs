@@ -13,6 +13,7 @@ pub mod help;
 pub mod hit;
 pub mod move_popup;
 pub mod panels;
+pub mod settings;
 pub mod status;
 pub mod theme;
 pub mod tree;
@@ -442,6 +443,9 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
     if let Some(popup) = &model.move_popup {
         move_popup::render_move_popup(popup, frame);
+    }
+    if let Some(session) = &model.settings {
+        settings::render_settings(session, frame);
     }
 
     frame.render_widget(
@@ -951,6 +955,14 @@ fn status_line(model: &Model) -> String {
     }
     if model.move_popup.is_some() {
         return move_popup::help_text();
+    }
+    if let Some(session) = &model.settings {
+        if session.confirm.is_none()
+            && let Some(message) = &model.last_status
+        {
+            return status_message_text(message);
+        }
+        return settings::help_text(session);
     }
     if let Some(popup) = &model.runner_options_popup {
         if popup.editing_text {
@@ -1462,6 +1474,7 @@ mod tests {
                 notices: Vec::new(),
                 tree: Vec::new(),
                 environments: Vec::new(),
+                presets: None,
             })),
         );
         let screen = render(&model, 100, 30).join("\n");
@@ -1992,6 +2005,7 @@ mod tests {
                 notices: Vec::new(),
                 tree: Vec::new(),
                 environments: Vec::new(),
+                presets: None,
             })),
         );
         let clean_lines = render(&clean_model, 100, 30);
@@ -2158,6 +2172,7 @@ mod tests {
                 notices: Vec::new(),
                 tree: Vec::new(),
                 environments: Vec::new(),
+                presets: None,
             })),
         );
         clean_model.focus = Focus::Diagnostics;
@@ -2204,6 +2219,7 @@ mod tests {
                 notices: Vec::new(),
                 tree: Vec::new(),
                 environments: Vec::new(),
+                presets: None,
             })),
         );
         clean_model.focus = Focus::Diagnostics;

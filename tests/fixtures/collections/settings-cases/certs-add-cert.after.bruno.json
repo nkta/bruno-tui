@@ -1,0 +1,18 @@
+{
+  "version": "1",
+  "name": "demo",
+  "type": "collection",
+  "ignore": ["node_modules", ".git"],
+  "clientCertificates": {
+    "enabled": true,
+    "certs": [
+      {
+        "domain": "api.exemple.fr",
+        "type": "cert",
+        "certFilePath": "certs/client.crt",
+        "keyFilePath": "certs/client.key",
+        "passphrase": "{{certPass}}"
+      }
+    ]
+  }
+}

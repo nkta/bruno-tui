@@ -55,8 +55,28 @@ pub enum TextCapture {
     /// Popup de fichier (nouvelle requête, nouveau dossier, renommer,
     /// cloner) : la frappe va au champ sous le curseur.
     FilePopup,
+    /// Popup « Réglages » de la collection : toute touche lui revient.
+    Settings,
     /// Popup « Déplacer vers » : la frappe va au filtre, `↑↓` choisissent.
     MovePopup,
+}
+
+/// Touche reçue par le popup « Réglages » (`docs/reglages-collection.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsKey {
+    Char(char),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    Enter,
+    Tab,
+    BackTab,
+    Esc,
 }
 
 /// Touche d'édition du tampon pendant la saisie d'un champ
@@ -416,6 +436,16 @@ pub enum Message {
         root: PathBuf,
         result: Result<crate::writer::files::FileOpOutcome, crate::writer::files::FileOpError>,
     },
+    /// `B` dans l'arbre : ouvre les réglages de la collection (`bruno.json`).
+    OpenSettings,
+    /// Touche reçue par le popup « Réglages ».
+    SettingsKey(SettingsKey),
+    /// Renvoyé par la boucle après `Command::SaveSettings` ; `root` est la
+    /// racine de la collection écrite.
+    SettingsSaved {
+        root: PathBuf,
+        result: Result<super::model::SavedSettings, crate::writer::WriteError>,
+    },
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -463,6 +493,7 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
             notice,
         }),
         AppEvent::FileOpDone { root, result } => Some(Message::FileOpDone { root, result }),
+        AppEvent::SettingsSaved { root, result } => Some(Message::SettingsSaved { root, result }),
     }
 }
 
@@ -559,6 +590,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('t') => Message::ToggleCampaignView,
         KeyCode::Char('x') => Message::ExportResponseBody,
         KeyCode::Char('A') => Message::CreateFolder,
+        KeyCode::Char('B') => Message::OpenSettings,
         KeyCode::F(2) => Message::RenameItem,
         KeyCode::Char('p') => Message::CloneItem,
         _ => return None,
@@ -580,8 +612,31 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::ExportPath => export_path_capture_message(key),
         TextCapture::PlaintextSecretPrompt => plaintext_secret_prompt_capture_message(key),
         TextCapture::FilePopup => file_popup_capture_message(key),
+        TextCapture::Settings => settings_capture_message(key),
         TextCapture::MovePopup => move_popup_capture_message(key),
     }
+}
+
+/// Capture pendant le popup « Réglages » : le popup reçoit chaque touche et
+/// décide seul de son sens (`Ctrl+S` et `Ctrl+R` sont traités en amont).
+fn settings_capture_message(key: KeyEvent) -> Option<Message> {
+    let key = match key.code {
+        KeyCode::Char(c) => SettingsKey::Char(c),
+        KeyCode::Backspace => SettingsKey::Backspace,
+        KeyCode::Delete => SettingsKey::Delete,
+        KeyCode::Left => SettingsKey::Left,
+        KeyCode::Right => SettingsKey::Right,
+        KeyCode::Up => SettingsKey::Up,
+        KeyCode::Down => SettingsKey::Down,
+        KeyCode::Home => SettingsKey::Home,
+        KeyCode::End => SettingsKey::End,
+        KeyCode::Enter => SettingsKey::Enter,
+        KeyCode::Tab => SettingsKey::Tab,
+        KeyCode::BackTab => SettingsKey::BackTab,
+        KeyCode::Esc => SettingsKey::Esc,
+        _ => return None,
+    };
+    Some(Message::SettingsKey(key))
 }
 
 /// Capture pendant un popup de fichier : la frappe va au champ sous le

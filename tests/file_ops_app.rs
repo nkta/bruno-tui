@@ -862,7 +862,7 @@ fn a_file_changed_on_disk_keeps_the_popup_open_with_the_message() {
         popup.error
     );
     let screen = ui.screen(100, 30);
-    assert!(screen.contains("a été modifié sur"), "{screen}");
+    assert!(screen.contains("son chargement"), "{screen}");
     assert_eq!(ui.read("get-post.bru"), "changé par un tiers");
     assert!(!ui.root.join("Posts/get-post.bru").exists());
     ui.press(KeyCode::Esc);

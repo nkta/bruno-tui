@@ -313,7 +313,11 @@ pub(crate) fn handle_watch_reload(model: &mut Model, paths: Vec<std::path::PathB
         || model
             .environment_editing
             .as_ref()
-            .is_some_and(EnvironmentEditSession::has_unsaved);
+            .is_some_and(EnvironmentEditSession::has_unsaved)
+        || model
+            .settings
+            .as_ref()
+            .is_some_and(crate::app::settings::SettingsSession::has_unsaved);
 
     if has_unsaved_session {
         model.pending_reload = true;
@@ -322,6 +326,7 @@ pub(crate) fn handle_watch_reload(model: &mut Model, paths: Vec<std::path::PathB
     } else {
         model.editing = None;
         model.environment_editing = None;
+        model.settings = None;
         model.pending_reload = false;
         Command::ReloadCollection
     }

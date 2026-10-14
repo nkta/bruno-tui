@@ -529,14 +529,19 @@ Contenu écrit (D5-A : ancien proxy) :
     `bru run` qui passe par un proxy local (comme l'essai du § 1.7).
 11. `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
-## 8. Points ouverts
+## 8. Points ouverts (tranchés par mesure, 2026-10-14)
 
 - **Générateur des fichiers attendus** : `transformBrunoConfigBeforeSave`
-  importe `@usebruno/requests`. Il faut vérifier qu'il se charge hors
-  d'Electron avec `~/.local/lib/bru-cli/node_modules`. Sinon, recopier
-  ses quatre étapes (§ 1.2) dans le script et le dire dans la fixture.
+  se charge hors d'Electron. Mesure : le fichier est extrait de `app.asar`
+  (`/src/utils/transformBrunoConfig.js`), compilé tel quel, seul
+  `./filesystem` est bouchonné ; `@usebruno/requests` vient de
+  `~/.local/lib/bru-cli/node_modules`. Aucune étape recopiée :
+  `scripts/bruno-settings-cases.js` (`scripts/gen-settings-fixtures.sh`).
 - **Fichier temporaire** : `write_atomic` nomme le temporaire
-  `.bruno.json.tmp-<pid>-<n>`. Vérifier que le watcher l'ignore.
-- **Port `""`** : Bruno écrit `""` quand le port est vide ; `bru` en fait
-  `http://hôte:`. À confirmer par un essai avant de figer le comportement.
-- **Fichiers à tabulations** ou fins de ligne mixtes : refusés pour l'instant.
+  `.bruno.json.tmp-<pid>-<n>`. Mesure : `is_watched_path` ne le retient pas
+  (nom hors liste, extension `tmp-…`) ; test dans `src/app/watch.rs`.
+- **Port `""`** : Bruno écrit `""` quand le port est vide. Mesure
+  (`bru` 4.2.1, proxy `http://{{phost}}` et port `""`) : `bru` se connecte
+  au port 80 par défaut (`ECONNREFUSED 127.0.0.1:80`), sans erreur de
+  chargement. Le comportement de Bruno est donc gardé : port vide écrit `""`.
+- **Fichiers à tabulations** ou fins de ligne mixtes : refusés (inchangé).

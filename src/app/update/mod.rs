@@ -25,6 +25,7 @@ pub mod output;
 pub mod pointer;
 pub mod run;
 pub mod scroll;
+pub mod settings;
 #[cfg(test)]
 pub(super) mod test_support;
 pub mod tree;
@@ -90,6 +91,16 @@ pub enum Command {
         stamp: crate::writer::FileStamp,
         edits: Vec<crate::writer::EnvironmentVarEdit>,
     },
+    /// Écrire les clés modifiées de `<root>/bruno.json` ; la boucle
+    /// l'exécute dans `spawn_blocking` via `writer::bruno_config` et renvoie
+    /// `Message::SettingsSaved`. `added_paths` : chemins de certificats
+    /// ajoutés, dont l'absence sur disque donne un avertissement.
+    SaveSettings {
+        root: std::path::PathBuf,
+        stamp: crate::writer::FileStamp,
+        changes: Vec<(&'static str, crate::writer::bruno_config::Json)>,
+        added_paths: Vec<String>,
+    },
     /// Résoudre les variables secrètes depuis `<root>/.env` et le shell ;
     /// la boucle l'exécute dans `spawn_blocking` et renvoie le résultat à
     /// `update` via `Message::SecretsResolved`.
@@ -152,7 +163,8 @@ pub enum Command {
 
 /// Applique un message au modèle.
 pub fn update(model: &mut Model, message: Message) -> Command {
-    let had_session = model.editing.is_some() || model.environment_editing.is_some();
+    let had_session =
+        model.editing.is_some() || model.environment_editing.is_some() || model.settings.is_some();
     let mut command = match workspace::route(model, message) {
         Ok(command) => command,
         Err(message) => apply(model, *message),
@@ -167,6 +179,7 @@ pub fn update(model: &mut Model, message: Message) -> Command {
     if had_session
         && model.editing.is_none()
         && model.environment_editing.is_none()
+        && model.settings.is_none()
         && model.pending_reload
     {
         model.pending_reload = false;
@@ -367,6 +380,14 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
         return apply_global_search(model, message);
     }
 
+    // Popup « Réglages » : modal, il reçoit toutes les touches.
+    if model.settings.is_some()
+        && !is_background_result(&message)
+        && let Some(command) = settings::settings_message(model, &message)
+    {
+        return command;
+    }
+
     // Popup de fichier : modal, il reçoit la frappe et la validation.
     if model.file_popup.is_some()
         && !is_background_result(&message)
@@ -551,6 +572,9 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
         | Message::MovePopupEnter
         | Message::MovePopupCancel => Command::None,
         Message::FileOpDone { root, result } => files::file_op_done(model, &root, result),
+        Message::OpenSettings => settings::open_settings(model),
+        Message::SettingsKey(_) => Command::None,
+        Message::SettingsSaved { root, result } => settings::settings_saved(model, root, result),
         Message::Add => {
             if model.focus == Focus::Secrets {
                 model.secrets.error = None;
@@ -1248,6 +1272,7 @@ fn is_background_result(message: &Message) -> bool {
             | Message::ResponseBodyExported { .. }
             | Message::HistoryLoaded { .. }
             | Message::FileOpDone { .. }
+            | Message::SettingsSaved { .. }
     )
 }
 

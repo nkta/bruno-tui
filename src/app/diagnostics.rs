@@ -143,6 +143,7 @@ mod tests {
             notices: Vec::new(),
             tree: vec![],
             environments: vec![],
+            presets: None,
         };
         let entries = diagnostics(&collection);
         assert!(entries.is_empty());
