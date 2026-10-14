@@ -887,7 +887,7 @@ fn environment_session_help_line(session: &crate::app::model::EnvironmentEditSes
         EnvironmentEditState::Select => {
             let var_name = session.current_variable().map_or("", |v| v.key.as_str());
             format!(
-                "Sélection · {var_name}{unsaved} — ↑↓ variable  Entrée éditer  a ajouter  d supprimer  Ctrl+S sauvegarder  Échap retour"
+                "Sélection · {var_name}{unsaved} — ↑↓ variable  Entrée éditer  Espace basculer  a ajouter  d supprimer  Ctrl+S sauvegarder  Échap retour"
             )
         }
         EnvironmentEditState::Input(_) => {
@@ -2972,6 +2972,7 @@ mod tests {
         let line = status_line(&model);
         assert!(line.contains("Sélection · host"), "{line}");
         assert!(line.contains("Entrée éditer"), "{line}");
+        assert!(line.contains("Espace basculer"), "{line}");
         assert!(line.contains("Ctrl+S sauvegarder"), "{line}");
         assert!(line.contains("Échap retour"), "{line}");
         assert!(!line.contains("● non enregistré"), "{line}");

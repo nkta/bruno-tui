@@ -527,6 +527,44 @@ mod tests {
     }
 
     #[test]
+    fn space_toggles_variable_in_environment_popup() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::StartEdit);
+
+        // Variable 0 ('host') est activée initialement
+        assert!(model.environment_editing.as_ref().unwrap().variables[0].enabled);
+
+        // Espace bascule l'état activé -> désactivé
+        update(&mut model, Message::ToggleField);
+        let session = model.environment_editing.as_ref().unwrap();
+        assert!(!session.variables[0].enabled);
+        assert!(session.dirty);
+        assert_eq!(session.pending.len(), 1);
+        assert_eq!(
+            session.pending[0],
+            crate::writer::EnvironmentVarEdit::Enabled {
+                index: 0,
+                enabled: false,
+            }
+        );
+
+        // Second appui sur Espace bascule désactivé -> activé
+        update(&mut model, Message::ToggleField);
+        let session = model.environment_editing.as_ref().unwrap();
+        assert!(session.variables[0].enabled);
+        assert_eq!(session.pending.len(), 2);
+        assert_eq!(
+            session.pending[1],
+            crate::writer::EnvironmentVarEdit::Enabled {
+                index: 0,
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
     fn escape_cancels_input_if_active_or_closes_environment_editing_to_picker() {
         let mut model = loaded_model((100, 30));
         model.focus = Focus::EnvironmentPicker;

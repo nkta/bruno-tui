@@ -19,6 +19,9 @@ use super::format::detect_eol;
 use super::{FileStamp, write_atomic};
 use crate::collection::{BruFile, NodeKind};
 
+/// Contenu exact d'un nouveau fichier d'environnement .bru (exactement 9 octets).
+pub const NEW_ENVIRONMENT_CONTENT: &str = "vars {\n}\n";
+
 /// Position d'insertion du bloc `vars` s'il n'existe pas encore : juste
 /// après `extends` (déclaration ou liste) s'il existe, sinon tout début de
 /// fichier, cohérent avec les fichiers d'environnement réels où `vars`
@@ -45,6 +48,8 @@ fn vars_creation_anchor(ast: &BruFile) -> usize {
 pub enum EnvironmentVarEdit {
     /// Nouvelle valeur d'une variable déjà présente.
     Value { index: usize, value: String },
+    /// État d'activation d'une variable déjà présente.
+    Enabled { index: usize, enabled: bool },
     /// Ajout d'une variable en fin de bloc.
     Add {
         key: String,
@@ -89,6 +94,17 @@ pub(crate) fn resolve(
                         index: *index,
                     })?;
                 entry.value = value.clone();
+            }
+            EnvironmentVarEdit::Enabled { index, enabled } => {
+                let entry = section
+                    .entries
+                    .get_mut(*index)
+                    .ok_or(EditError::IndexOutOfRange {
+                        block: "vars",
+                        index: *index,
+                    })?;
+                entry.disabled = !*enabled;
+                section.touched = true;
             }
             EnvironmentVarEdit::Add {
                 key,
@@ -463,5 +479,43 @@ mod tests {
         assert_eq!(reloaded.entry("vars", "foo"), Some("bar"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_environment_content_is_nine_bytes_and_parses() {
+        assert_eq!(NEW_ENVIRONMENT_CONTENT, "vars {\n}\n");
+        assert_eq!(NEW_ENVIRONMENT_CONTENT.len(), 9);
+        let parsed =
+            BruFile::parse_environment(NEW_ENVIRONMENT_CONTENT.to_owned()).expect("parse valide");
+        assert_eq!(parsed.raw(), "vars {\n}\n");
+    }
+
+    #[test]
+    fn resolve_toggle_enabled_switches_tilde_and_preserves_surroundings() {
+        let source = "vars {\n  host: localhost\n  ~debug: true\n}\n\nvars:secret [\n  token\n]\n";
+        let file = parse(source);
+
+        // Désactiver host (index 0)
+        let edits = vec![EnvironmentVarEdit::Enabled {
+            index: 0,
+            enabled: false,
+        }];
+        let serialized = serialize(&file, &edits).expect("sérialisation");
+        let expected =
+            "vars {\n  ~host: localhost\n  ~debug: true\n}\n\nvars:secret [\n  token\n]\n";
+        assert_eq!(String::from_utf8(serialized).expect("utf-8"), expected);
+
+        // Réactiver debug (index 1)
+        let edits_enable = vec![EnvironmentVarEdit::Enabled {
+            index: 1,
+            enabled: true,
+        }];
+        let serialized_enable = serialize(&file, &edits_enable).expect("sérialisation");
+        let expected_enable =
+            "vars {\n  host: localhost\n  debug: true\n}\n\nvars:secret [\n  token\n]\n";
+        assert_eq!(
+            String::from_utf8(serialized_enable).expect("utf-8"),
+            expected_enable
+        );
     }
 }

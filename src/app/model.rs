@@ -1083,6 +1083,20 @@ impl EnvironmentEditSession {
         true
     }
 
+    /// Bascule l'état activé/désactivé de la variable sous le curseur.
+    pub fn toggle_current(&mut self) -> bool {
+        let Some(var) = self.variables.get_mut(self.cursor) else {
+            return false;
+        };
+        var.enabled = !var.enabled;
+        self.dirty = true;
+        self.pending.push(EnvironmentVarEdit::Enabled {
+            index: self.cursor,
+            enabled: var.enabled,
+        });
+        true
+    }
+
     /// Indique si la session a des modifications non enregistrées.
     pub fn has_unsaved(&self) -> bool {
         self.dirty

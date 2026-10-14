@@ -915,7 +915,13 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::ToggleField => {
-            toggle_field(model);
+            if let Some(session) = &mut model.environment_editing {
+                if session.state == crate::app::model::EnvironmentEditState::Select {
+                    session.toggle_current();
+                }
+            } else {
+                toggle_field(model);
+            }
             Command::None
         }
         Message::InputKey(key) => {
