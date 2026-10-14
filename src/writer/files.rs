@@ -68,6 +68,8 @@ pub enum FileOpError {
     UnknownMethod,
     #[error("{0}")]
     Trash(#[from] TrashError),
+    #[error("bruno.json : {0}")]
+    Config(#[from] super::bruno_config::ConfigError),
     #[error("erreur d'entrée/sortie sur `{}` : {source}", .path.display())]
     Io {
         path: PathBuf,
@@ -82,6 +84,7 @@ impl From<WriteError> for FileOpError {
             WriteError::Stale { path } => Self::Stale { path },
             WriteError::Edit(error) => Self::Edit(error),
             WriteError::Io { path, source } => Self::Io { path, source },
+            WriteError::Config(error) => Self::Config(error),
         }
     }
 }

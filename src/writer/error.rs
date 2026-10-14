@@ -111,6 +111,11 @@ pub enum WriteError {
     #[error("{0}")]
     Edit(#[from] EditError),
 
+    /// Refus d'écriture de `bruno.json` (`docs/reglages-collection.md`) ;
+    /// ne cite jamais une valeur du fichier.
+    #[error("bruno.json : {0}")]
+    Config(#[from] super::bruno_config::ConfigError),
+
     #[error("erreur d'entrée/sortie sur `{path}` : {source}")]
     Io {
         path: PathBuf,
