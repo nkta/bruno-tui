@@ -6,7 +6,7 @@ use crate::app::message::{InputKey, Message};
 use crate::app::model::{
     EditScope, EditSession, EditState, EditableField, Focus, InputTarget, Model, PendingConfirm,
     PickerKind, SavedEdit, StatusMessage, field_enabled, field_value, field_value_committed,
-    section_entries,
+    picker_options, section_entries,
 };
 use crate::app::text_input::TextInput;
 use crate::app::update::Command;
@@ -225,8 +225,7 @@ pub(crate) fn open_picker(model: &mut Model, kind: PickerKind) {
         return;
     };
     let current = picker_current(session, kind);
-    let selected = kind
-        .options()
+    let selected = picker_options(session, kind)
         .iter()
         .position(|candidate| current.eq_ignore_ascii_case(candidate))
         .unwrap_or(0);
@@ -263,10 +262,13 @@ pub(crate) fn move_picker(model: &mut Model, delta: i8) {
     let Some(session) = &mut model.editing else {
         return;
     };
-    let EditState::Picker { kind, selected } = &mut session.state else {
+    let EditState::Picker { kind, .. } = session.state else {
         return;
     };
-    let count = kind.options().len();
+    let count = picker_options(session, kind).len();
+    let EditState::Picker { selected, .. } = &mut session.state else {
+        return;
+    };
     if delta < 0 {
         *selected = selected.saturating_sub(1);
     } else if delta > 0 {
@@ -284,8 +286,9 @@ pub(crate) fn confirm_picker(model: &mut Model) {
     let EditState::Picker { kind, selected } = session.state else {
         return;
     };
-    if let Some(&choice) = kind.options().get(selected) {
-        apply_choice(model, kind, choice);
+    if let Some(choice) = picker_options(session, kind).get(selected) {
+        let choice = (*choice).to_owned();
+        apply_choice(model, kind, &choice);
     }
     close_input(model);
 }
@@ -350,7 +353,7 @@ pub(crate) fn cycle_choice(model: &mut Model, delta: i8) {
     let Some(kind) = choice_kind(model, field) else {
         return;
     };
-    let options = kind.options();
+    let options = picker_options(session, kind);
     let current = picker_current(session, kind);
     let position = options
         .iter()
@@ -360,8 +363,9 @@ pub(crate) fn cycle_choice(model: &mut Model, delta: i8) {
         (Some(index), false) => (index + 1) % options.len(),
         (None, _) => 0,
     };
-    if let Some(&choice) = options.get(next) {
-        apply_choice(model, kind, choice);
+    if let Some(choice) = options.get(next) {
+        let choice = (*choice).to_owned();
+        apply_choice(model, kind, &choice);
     }
     scroll_edit_into_view(model);
 }
@@ -2913,6 +2917,155 @@ mod tests {
             panic!("requête attendue");
         };
         assert_eq!(request.view, saved_view);
+    }
+
+    /// Popup modal : aucune entrée qui changeait la sélection de l'arbre
+    /// (navigation, filtre, recherche, requête en échec suivante, clic dans
+    /// l'arbre) n'atteint les anciens garde-fous `EditLocked` ; la
+    /// sélection et la session restent en place.
+    #[test]
+    fn modal_popup_keeps_the_selection_without_edit_locked() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        move_to_field(&mut model, EditableField::Url);
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "x");
+        update(&mut model, Message::ValidateInput);
+        assert!(selection_locked(&model));
+        let selected = model.tree.selected;
+        for message in [
+            Message::Down,
+            Message::End,
+            Message::OpenTreeFilter,
+            Message::StartSearch,
+            Message::NextMatch,
+            Message::NextFailedRequest,
+            Message::PreviousFailedRequest,
+            Message::ToggleDiagnostics,
+            Message::ToggleCampaign,
+            Message::ToggleGlobalSearch,
+        ] {
+            update(&mut model, message);
+            assert_eq!(model.tree.selected, selected);
+            assert!(model.editing.is_some());
+            assert!(model.tree_filter.is_none());
+            assert!(model.search.is_none());
+            assert!(model.global_search.is_none());
+            assert!(!matches!(
+                model.last_status,
+                Some(StatusMessage::EditLocked)
+            ));
+        }
+    }
+
+    /// `Début`/`g` et `Fin`/`G` : première et dernière ligne du popup ;
+    /// sans effet sur une liste ouverte.
+    #[test]
+    fn home_and_end_move_to_the_first_and_last_popup_line() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        let last = session(&model).fields.len() - 1;
+        assert!(last > 0);
+        // `g` et `G` donnent les mêmes messages (`message.rs`), hors saisie.
+        assert_eq!(model.text_capture(), None);
+        update(&mut model, Message::End);
+        assert_eq!(session(&model).cursor, last);
+        update(&mut model, Message::Home);
+        assert_eq!(session(&model).cursor, 0);
+
+        // Liste ouverte (méthode) : `Fin` ne bouge pas le curseur de champ.
+        move_to_field(&mut model, EditableField::Method);
+        let cursor = session(&model).cursor;
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::End);
+        assert_eq!(session(&model).cursor, cursor);
+    }
+
+    /// Requête `simple-get.bru` remplacée en mémoire par une requête en
+    /// OAuth 2, mode que le popup ne propose pas, puis popup Auth ouvert.
+    fn oauth2_auth_session() -> Model {
+        let source = "meta {\n  name: o\n  type: http\n  seq: 1\n}\n\nget {\n  url: https://a\n  auth: oauth2\n}\n\nauth:oauth2 {\n  grant_type: client_credentials\n  client_id: app\n}\n";
+        let mut model = loaded_model((100, 40));
+        select(&mut model, "simple-get.bru");
+        let ast = crate::collection::BruFile::parse(source.to_owned()).expect("AST");
+        let view = RequestView::from_ast(&ast).expect("vue");
+        model.replace_request_node(Path::new("simple-get.bru"), ast, view);
+        update(&mut model, Message::NextFocus);
+        model.request_tab = RequestTab::Auth;
+        update(&mut model, Message::Enter);
+        assert_eq!(
+            session(&model).current_field(),
+            Some(EditableField::AuthMode)
+        );
+        model
+    }
+
+    /// Mode hors liste : `←→` le gardent dans le cycle, en tête, et y
+    /// revenir retrouve ses valeurs (`docs/edition-phase2.md` § 3.1).
+    #[test]
+    fn original_auth_mode_outside_the_list_stays_in_the_cycle() {
+        let mut model = oauth2_auth_session();
+        let original = session(&model).preview.clone();
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "oauth2");
+
+        update(&mut model, Message::Right);
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "none");
+        update(&mut model, Message::Left);
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "oauth2");
+        assert_eq!(
+            session(&model).preview.auth_params(),
+            original.auth_params()
+        );
+
+        // `←` depuis la tête de liste : dernier mode, puis retour en boucle.
+        update(&mut model, Message::Left);
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "wsse");
+        update(&mut model, Message::Right);
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "oauth2");
+        assert_eq!(session(&model).preview, original);
+    }
+
+    /// La liste ouverte par `Entrée` commence par le mode d'origine,
+    /// présélectionné ; le choisir ailleurs puis revenir le retrouve.
+    #[test]
+    fn original_auth_mode_heads_the_picker() {
+        let mut model = oauth2_auth_session();
+        update(&mut model, Message::Enter);
+        assert!(matches!(
+            session(&model).state,
+            EditState::Picker {
+                kind: PickerKind::AuthMode,
+                selected: 0
+            }
+        ));
+        let options = picker_options(session(&model), PickerKind::AuthMode);
+        assert_eq!(options.first(), Some(&"oauth2"));
+        assert_eq!(options.len(), crate::app::model::AUTH_MODES.len() + 1);
+
+        update(&mut model, Message::Down); // none
+        update(&mut model, Message::Down); // inherit
+        update(&mut model, Message::Down); // basic
+        update(&mut model, Message::Enter);
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "basic");
+
+        update(&mut model, Message::Enter);
+        for _ in 0..4 {
+            update(&mut model, Message::Up);
+        }
+        update(&mut model, Message::Enter);
+        assert_eq!(shown_value(&model, EditableField::AuthMode), "oauth2");
+        assert_eq!(
+            shown_value(&model, EditableField::AuthParamValue(0)),
+            "client_credentials"
+        );
+    }
+
+    /// Un fichier dans un mode de la liste ne voit pas de mode en plus.
+    #[test]
+    fn listed_auth_mode_adds_no_option() {
+        let model = edit_session("simple-get.bru", (100, 30));
+        assert_eq!(
+            picker_options(session(&model), PickerKind::AuthMode),
+            crate::app::model::AUTH_MODES.to_vec()
+        );
     }
 
     #[test]

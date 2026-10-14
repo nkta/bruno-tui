@@ -71,6 +71,8 @@ identique à celui enregistré par l'autre.
   - `inherit` n'est pas proposé pour la collection (rien à hériter).
   - `oauth1`, `oauth2`, `akamai-edgegrid` ne sont pas proposés (voir § 1),
     mais s'affichent normalement si le fichier les utilise déjà.
+    Dans ce cas, le mode d'origine est proposé en tête de la liste et du
+    cycle `←→`, pour pouvoir y revenir avant `Ctrl+S`.
 
 ### 3.2 Écriture (au `Ctrl+S`)
 

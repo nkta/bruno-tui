@@ -3,7 +3,7 @@ use std::path::Path;
 use super::scroll::{body_height, reset_response_tab_view_state};
 use super::{
     clear_detail_view_state, clear_tree_filter, current_tree_filter_pattern, refresh_rows,
-    reset_filter_if_selection_changed, scroll_tree_into_view, selection_locked,
+    reset_filter_if_selection_changed, scroll_tree_into_view,
 };
 use crate::app::message::Message;
 use crate::app::model::{
@@ -64,15 +64,6 @@ pub(crate) fn navigate_history(model: &mut Model, message: Message) {
 /// déplie les dossiers ancêtres (et le nœud lui-même si dossier), sélectionne
 /// le nœud et repasse le focus à l'arbre.
 pub(crate) fn cross_navigate_to_tree(model: &mut Model, address: &[usize]) {
-    let current = model
-        .tree
-        .rows
-        .get(model.tree.selected)
-        .map(|row| row.address.as_slice());
-    if selection_locked(model) && current != Some(address) {
-        model.last_status = Some(StatusMessage::EditLocked);
-        return;
-    }
     for prefix_len in 1..=address.len() {
         let prefix = &address[..prefix_len];
         if let Some(TreeNode::Folder(folder)) = model.node_at(prefix) {
@@ -160,9 +151,7 @@ pub(crate) fn show_comparison_cell(model: &mut Model, row: usize, column: usize)
         model.last_status = Some(StatusMessage::NoEnvironmentResult(environment));
         return;
     };
-    if !select_request_in_tree(model, &path) {
-        return;
-    }
+    select_request_in_tree(model, &path);
     model.run.outcomes.insert(path, outcome);
     reset_response_tab_view_state(model);
     model.focus = Focus::Response;
@@ -205,20 +194,12 @@ pub(crate) fn navigate_campaign(model: &mut Model, message: Message) {
 /// Sélectionne une requête dans l'arbre en dépliant ses dossiers parents
 /// et donne le focus au panneau Détail.
 pub(crate) fn select_request_and_focus_detail(model: &mut Model, target_path: &Path) {
-    if select_request_in_tree(model, target_path) {
-        model.focus = Focus::Detail;
-    }
+    select_request_in_tree(model, target_path);
+    model.focus = Focus::Detail;
 }
 
 /// Sélectionne une requête dans l'arbre en dépliant ses dossiers parents.
-/// Renvoie `false` sans rien changer si une session d'édition verrouille
-/// la sélection courante.
-pub(crate) fn select_request_in_tree(model: &mut Model, target_path: &Path) -> bool {
-    let current_path = model.selected_node().map(|node| node.path());
-    if selection_locked(model) && current_path != Some(target_path) {
-        model.last_status = Some(StatusMessage::EditLocked);
-        return false;
-    }
+pub(crate) fn select_request_in_tree(model: &mut Model, target_path: &Path) {
     if let Some(pattern) = current_tree_filter_pattern(model) {
         let is_target_visible = model.loaded().is_some_and(|collection| {
             find_node_by_path(&collection.tree, target_path)
@@ -245,7 +226,6 @@ pub(crate) fn select_request_in_tree(model: &mut Model, target_path: &Path) -> b
     clear_detail_view_state(model);
     reset_filter_if_selection_changed(model, previous_path.as_deref());
     scroll_tree_into_view(model);
-    true
 }
 
 /// Navigue vers la requête en échec suivante (`forward = true`) ou précédente

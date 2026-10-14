@@ -851,12 +851,17 @@ pub struct EditSession {
     pub hscroll: u16,
     /// Révélation temporaire des secrets masqués (Ctrl+R pendant la saisie).
     pub unmasked: bool,
+    /// Mode d'auth du fichier à l'ouverture du popup : proposé en tête
+    /// des modes s'il n'y figure pas (OAuth 1, OAuth 2, Akamai…), pour
+    /// pouvoir y revenir avant `Ctrl+S`.
+    pub original_auth: Option<String>,
 }
 
 impl EditSession {
     /// Ouvre une session propre sur une requête chargée avec la portée donnée.
     pub fn new(path: PathBuf, stamp: FileStamp, view: RequestView, scope: EditScope) -> Self {
         let fields = EditableField::list_for_scope(&view, scope);
+        let original_auth = view.auth.as_ref().map(|mode| mode.as_str().to_owned());
         Self {
             path,
             stamp,
@@ -871,6 +876,7 @@ impl EditSession {
             dirty: false,
             hscroll: 0,
             unmasked: false,
+            original_auth,
         }
     }
 
@@ -1098,7 +1104,7 @@ pub enum EditState {
     FieldSelect,
     Input(TextInput),
     /// Sélecteur ouvert : `selected` est l'indice présélectionné dans
-    /// `kind.options()`.
+    /// `picker_options(session, kind)`.
     Picker {
         kind: PickerKind,
         selected: usize,
@@ -1140,6 +1146,26 @@ impl PickerKind {
             Self::ApiKeyPlacement => &APIKEY_PLACEMENTS,
         }
     }
+}
+
+/// Choix du sélecteur `kind` dans `session`, dans l'ordre d'affichage :
+/// ceux de [`PickerKind::options`], précédés pour le mode d'auth du mode
+/// d'origine du fichier s'il n'y figure pas et que `bru-writer` sait le
+/// réécrire (`docs/edition-phase2.md` § 3.1).
+pub fn picker_options(session: &EditSession, kind: PickerKind) -> Vec<&str> {
+    let options = kind.options();
+    let original = match kind {
+        PickerKind::AuthMode | PickerKind::CollectionAuthMode => session
+            .original_auth
+            .as_deref()
+            .filter(|mode| !options.iter().any(|o| o.eq_ignore_ascii_case(mode)))
+            .filter(|mode| crate::writer::SUPPORTED_AUTH_MODES.contains(mode)),
+        _ => None,
+    };
+    original
+        .into_iter()
+        .chain(options.iter().copied())
+        .collect()
 }
 
 /// Modes d'authentification proposés pour une requête ou un dossier.

@@ -101,8 +101,10 @@ retrouver ses propres collections à chaque lancement, créer un
 **Exécution**
 
 - `bru run` part de la racine de la collection active.
-- Avec un `workspace.yml`, l'option de campagne `--workspace-path` vaut
-  par défaut le dossier du workspace (modifiable avec `O`).
+- Avec un `workspace.yml`, `--workspace-path` vaut par défaut le dossier
+  du workspace (modifiable avec `O`). Il est transmis aux campagnes et à
+  l'exécution d'une requête seule (`r`), seule option du runner qui
+  s'applique à une requête seule.
 - Pendant une exécution, la sélection ne peut pas quitter la
   collection : un message le rappelle dans la barre d'état.
 
@@ -258,6 +260,7 @@ Touches communes :
 |---|---|
 | `↑`/`k`, `↓`/`j` | ligne précédente, suivante |
 | `Tab`, `Maj+Tab` | partie suivante, précédente (ex. pré-requête / post-réponse) |
+| `Début`/`g`, `Fin`/`G` | première, dernière ligne du popup |
 | `Entrée` | modifier la valeur ; sur un choix, ouvrir sa liste (`↑↓`, `Entrée`, `Échap`) ; sur un script, des tests ou la doc, ouvrir l'éditeur externe |
 | `←`/`h`, `→`/`l` | sur un choix (méthode, mode, placement) : valeur précédente, suivante |
 | `Ctrl+S` | enregistrer, puis fermer le popup |
@@ -295,7 +298,8 @@ lettre tapée en saisie est du texte.
 ### Édition de l'authentification et protection des secrets
 
 - **Popup Auth** : ligne Mode ‹ bearer ›, puis les paramètres du mode. `←→` sur le mode le change et remplace aussitôt les lignes par celles du nouveau mode (clés vides) ; revenir au mode d'origine avant `Ctrl+S` retrouve les anciennes valeurs.
-- **Modes proposés** : `none`, `inherit` (pas pour la collection), `basic`, `bearer`, `digest`, `ntlm`, `apikey`, `awsv4`, `wsse`. Pour `apikey`, le placement est un choix ‹ header › / ‹ queryparams ›. OAuth 1, OAuth 2 et Akamai : seules les valeurs des clés existantes se modifient.
+- **Auth non déclarée** : sur une requête, un dossier ou la collection sans mode d'auth, le popup affiche ‹ none › (non déclarée), comme le détail ; rien n'est écrit tant qu'un autre mode n'est pas choisi.
+- **Modes proposés** : `none`, `inherit` (pas pour la collection), `basic`, `bearer`, `digest`, `ntlm`, `apikey`, `awsv4`, `wsse`. Pour `apikey`, le placement est un choix ‹ header › / ‹ queryparams ›. OAuth 1, OAuth 2 et Akamai : seules les valeurs des clés existantes se modifient ; si le fichier utilise l'un d'eux, il est proposé en tête de la liste et du cycle `←→`, pour y revenir avant `Ctrl+S` et retrouver ses valeurs.
 - **Masquage et `Ctrl+R`** : les clés sensibles (tokens, mots de passe, clés secrètes) sont masquées par des puces `•` lors de la saisie (les références `{{variable}}` restent visibles). `Ctrl+R` bascule l'affichage en clair ou masqué.
 - **Détection des secrets en clair** : valider une valeur littérale sur une clé sensible sans variable `{{...}}` ouvre la question dans le bas du popup Auth :
   - `[Entrée]` **Remplacer** par la variable suggérée en camelCase (ex. `{{bearerToken}}`, `{{basicPassword}}`) : le secret en clair est immédiatement oublié (jamais écrit sur disque, jamais loggué), et la barre de statut rappelle la configuration `.env` ou `--secret`.
@@ -485,7 +489,8 @@ sélectionnée a un résultat avec un corps non vide.
     - **Environnement global** (`--global-env <nom>`) : exige que la collection soit dans
       un workspace Bruno, détecté automatiquement ou indiqué par le champ suivant.
     - **Workspace** (`--workspace-path`) : dossier contenant `workspace.yml`, vérifié à la
-      saisie et transmis en chemin absolu.
+      saisie et transmis en chemin absolu. En mode workspace, il s'applique aussi à une
+      requête seule.
   - `Entrée` édite ou bascule un champ, `r` (hors saisie) lance directement la
     campagne avec les options configurées, `Échap` enregistre et referme le popup.
 - **Recherche globale** (`Ctrl+K`) : popup centré de recherche en direct dans l'ensemble

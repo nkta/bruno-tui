@@ -218,14 +218,6 @@ pub(crate) fn finish_tree_selection(
         model.selected_collection = true;
     }
     if model.tree.selected != before {
-        let changed_node =
-            model.selected_node().map(|node| node.path().to_path_buf()) != previous_path;
-        if changed_node && super::selection_locked(model) {
-            model.tree.selected = before;
-            model.last_status = Some(StatusMessage::EditLocked);
-            scroll_tree_into_view(model);
-            return;
-        }
         clear_detail_view_state(model);
     }
     reset_filter_if_selection_changed(model, previous_path.as_deref());
@@ -1139,7 +1131,7 @@ mod tests {
 
         // Sélection d'une requête masquée ("grp/sub/deep.bru") efface le filtre
         let target = Path::new("grp/sub/deep.bru");
-        assert!(select_request_in_tree(&mut model, target));
+        select_request_in_tree(&mut model, target);
         assert!(model.tree_filter.is_none());
         assert_eq!(selected_name(&model), "deep");
 
@@ -1151,7 +1143,7 @@ mod tests {
         update(&mut model, Message::ConfirmTreeFilter);
         assert!(model.tree_filter.is_some());
 
-        assert!(select_request_in_tree(&mut model, target));
+        select_request_in_tree(&mut model, target);
         assert!(model.tree_filter.is_some());
         assert_eq!(selected_name(&model), "deep");
     }

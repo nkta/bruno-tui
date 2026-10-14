@@ -773,13 +773,7 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
             if model.focus == Focus::Campaign {
                 cycle_campaign_filter(model);
             } else if model.focus == Focus::Tree && model.loaded().is_some() {
-                // Filtrer peut déplacer la sélection : refusé tant qu'une
-                // édition non enregistrée la verrouille.
-                if selection_locked(model) {
-                    model.last_status = Some(StatusMessage::EditLocked);
-                } else {
-                    open_tree_filter(model);
-                }
+                open_tree_filter(model);
             }
             Command::None
         }
@@ -1324,6 +1318,7 @@ mod tests {
             dirty: true,
             hscroll: 0,
             unmasked: false,
+            original_auth: None,
         });
 
         // 1. PendingConfirm::DiscardEdit
@@ -1382,6 +1377,7 @@ mod tests {
             dirty: true,
             hscroll: 0,
             unmasked: false,
+            original_auth: None,
         });
         model.confirm = Some(PendingConfirm::QuitWithUnsavedEdit);
 
