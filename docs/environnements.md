@@ -1,6 +1,8 @@
 # Spécification — Environnements : créer, renommer, cloner, supprimer
 
-Statut : **brouillon, à valider par Nicolas**.
+Statut : **approuvée par Nicolas le 2026-10-14**, options recommandées
+ci-dessous (1 à 8). Cette spec lève, pour ces opérations seulement, la règle
+de `CLAUDE.md` sur l'écriture des fichiers d'environnement.
 
 Décisions à prendre par Nicolas :
 
