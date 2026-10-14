@@ -70,6 +70,13 @@ pub fn file_popup_lines(popup: &FilePopup) -> (Vec<Line<'static>>, Option<(usize
 
 /// Touches utiles, sur la dernière ligne du popup.
 pub fn help_text(popup: &FilePopup) -> String {
+    if popup.is_environment() {
+        return format!(
+            "Entrée {}  Ctrl+S {}  Échap annuler",
+            popup.verb(),
+            popup.verb()
+        );
+    }
     let choice = match popup.current_field() {
         PopupField::Kind | PopupField::Method => "←→ choisir  ",
         PopupField::RenameFile => "Espace cocher  ",

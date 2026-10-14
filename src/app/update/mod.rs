@@ -274,6 +274,11 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
                     super::model::PendingConfirm::TrashItem { path, .. } => {
                         files::confirm_trash(model, path)
                     }
+                    // L'environnement actif ne passe à « Aucun » qu'au
+                    // rechargement, une fois le fichier vraiment parti.
+                    super::model::PendingConfirm::TrashEnvironment { name } => {
+                        environment::confirm_trash_environment(model, name)
+                    }
                 }
             }
             Message::ConfirmNo | Message::NextMatch | Message::FocusTree => {
@@ -460,6 +465,14 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
                             model.current_environment = None;
                         }
                     }
+                    if let Some(target_env) = model.select_environment_after_reload.take() {
+                        model.environment_selected =
+                            environment::environment_index_for(&collection, Some(&target_env));
+                    } else {
+                        let count = 1 + collection.environments.len();
+                        model.environment_selected =
+                            model.environment_selected.min(count.saturating_sub(1));
+                    }
 
                     model.collection = CollectionState::Loaded(collection);
                     reset_secrets_for_collection(model);
@@ -551,6 +564,18 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
         Message::CreateFolder if model.focus == Focus::Tree => files::open_create(model, true),
         Message::RenameItem if model.focus == Focus::Tree => files::open_rename(model),
         Message::CloneItem if model.focus == Focus::Tree => files::open_clone(model),
+        Message::RenameItem
+            if model.focus == Focus::EnvironmentPicker && model.environment_editing.is_none() =>
+        {
+            environment::open_rename_environment(model);
+            Command::None
+        }
+        Message::CloneItem
+            if model.focus == Focus::EnvironmentPicker && model.environment_editing.is_none() =>
+        {
+            environment::open_clone_environment(model);
+            Command::None
+        }
         // `m` ouvre « Déplacer vers » dans l'arbre ; dans le Détail, c'est
         // toujours le popup Requête.
         Message::OpenRequestEdit if model.focus == Focus::Tree => files::open_move(model),
@@ -581,10 +606,12 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
                 model.secrets.input = Some(SecretInput::Name(String::new()));
             } else if model.focus == Focus::Detail {
                 add_entry(model);
-            } else if model.focus == Focus::EnvironmentPicker
-                && let Some(session) = &mut model.environment_editing
-            {
-                session.begin_add();
+            } else if model.focus == Focus::EnvironmentPicker {
+                if let Some(session) = &mut model.environment_editing {
+                    session.begin_add();
+                } else {
+                    environment::open_create_environment(model);
+                }
             }
             Command::None
         }
@@ -593,10 +620,12 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
                 forget_secret(model);
             } else if model.focus == Focus::Detail {
                 delete_entry(model);
-            } else if model.focus == Focus::EnvironmentPicker
-                && let Some(session) = &mut model.environment_editing
-            {
-                session.remove_current();
+            } else if model.focus == Focus::EnvironmentPicker {
+                if let Some(session) = &mut model.environment_editing {
+                    session.remove_current();
+                } else {
+                    environment::ask_trash_environment(model);
+                }
             }
             Command::None
         }
@@ -955,7 +984,13 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
             Command::None
         }
         Message::ToggleField => {
-            toggle_field(model);
+            if let Some(session) = &mut model.environment_editing {
+                if session.state == crate::app::model::EnvironmentEditState::Select {
+                    session.toggle_current();
+                }
+            } else {
+                toggle_field(model);
+            }
             Command::None
         }
         Message::InputKey(key) => {

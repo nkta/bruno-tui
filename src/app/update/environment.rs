@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 
 use super::Command;
+use crate::app::file_popup::FilePopup;
 use crate::app::message::{InputKey, Message};
 use crate::app::model::{
-    EnvironmentEditSession, EnvironmentEditState, Focus, Model, SavedEnvironment, StatusMessage,
-    environment_name_at,
+    EnvironmentEditSession, EnvironmentEditState, Focus, Model, PendingConfirm, SavedEnvironment,
+    StatusMessage, environment_name_at,
 };
+use crate::app::workspace::run_in_progress;
 use crate::collection::Collection;
+use crate::writer::files::{EnvironmentSource, FileOp};
 use crate::writer::{FileStamp, WriteError};
 
 /// Touche d'édition de tampon pendant une saisie du popup d'environnement
@@ -240,23 +243,236 @@ pub(crate) fn navigate_environment_picker(model: &mut Model, message: Message) {
     }
 }
 
-/// `e` sur une entrée valide de la liste : ouvre le popup d'édition des
-/// variables de l'environnement, sans effet sur « Aucun » ni sur une
-/// entrée en erreur (`add-environment-panel-and-edit-popup`).
-pub(crate) fn open_environment_editing(model: &mut Model, index: usize) {
-    if index == 0 {
-        return;
-    }
+/// Noms de tous les environnements connus dans la collection.
+pub(crate) fn existing_environment_names(collection: &Collection) -> Vec<String> {
+    collection
+        .environments
+        .iter()
+        .filter_map(|entry| match entry {
+            Ok(env) => Some(env.name.clone()),
+            Err(err) => err
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_owned),
+        })
+        .collect()
+}
+
+/// Source chargé des environnements valides autres que `except`.
+fn sibling_sources(collection: &Collection, except: &str) -> Vec<EnvironmentSource> {
+    collection
+        .environments
+        .iter()
+        .flatten()
+        .filter(|env| env.name != except)
+        .filter_map(|env| Some((env.name.clone(), env.ast.as_ref()?.raw().to_owned())))
+        .collect()
+}
+
+/// Refus quand le source chargé de l'environnement manque : sans lui, on ne
+/// peut pas vérifier que le fichier n'a pas changé sur disque.
+fn refuse_unloaded(model: &mut Model, action: &str) {
+    model.last_status = Some(StatusMessage::FileOpRefused(format!(
+        "Source de l'environnement non chargé : {action} refusé"
+    )));
+}
+
+/// `a` dans le panneau Environnement : ouvre le popup « Nouvel environnement ».
+pub(crate) fn open_create_environment(model: &mut Model) {
     let Some(collection) = model.loaded() else {
-        return;
-    };
-    let Some(Ok(env)) = collection.environments.get(index - 1) else {
         return;
     };
     if !collection.format.is_editable() {
         model.last_status = Some(StatusMessage::ReadOnlyCollection);
         return;
     }
+    if run_in_progress(model) {
+        model.last_status = Some(StatusMessage::FileOpRefused(
+            "Exécution en cours : opération sur les fichiers refusée".to_owned(),
+        ));
+        return;
+    }
+    let existing = existing_environment_names(collection);
+    model.file_popup = Some(FilePopup::new_environment(existing));
+}
+
+/// `F2` dans le panneau Environnement : ouvre le popup « Renommer l'environnement ».
+pub(crate) fn open_rename_environment(model: &mut Model) {
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    if !collection.format.is_editable() {
+        model.last_status = Some(StatusMessage::ReadOnlyCollection);
+        return;
+    }
+    if run_in_progress(model) {
+        model.last_status = Some(StatusMessage::FileOpRefused(
+            "Exécution en cours : opération sur les fichiers refusée".to_owned(),
+        ));
+        return;
+    }
+    let index = model.environment_selected;
+    if index == 0 {
+        model.last_status = Some(StatusMessage::FileOpRefused(
+            "Aucun n'est pas un environnement".to_owned(),
+        ));
+        return;
+    }
+    let Some(entry) = collection.environments.get(index - 1) else {
+        return;
+    };
+    let env = match entry {
+        Ok(env) => env,
+        Err(_) => {
+            model.last_status = Some(StatusMessage::FileOpRefused(
+                "Fichier illisible : renommage refusé".to_owned(),
+            ));
+            return;
+        }
+    };
+    let existing = existing_environment_names(collection);
+    let Some(source) = env.ast.as_ref().map(|ast| ast.raw().to_owned()) else {
+        refuse_unloaded(model, "renommage");
+        return;
+    };
+    let siblings = sibling_sources(collection, &env.name);
+    model.file_popup = Some(FilePopup::rename_environment(
+        &env.name, existing, source, siblings,
+    ));
+}
+
+/// `p` dans le panneau Environnement : ouvre le popup « Cloner l'environnement ».
+pub(crate) fn open_clone_environment(model: &mut Model) {
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    if !collection.format.is_editable() {
+        model.last_status = Some(StatusMessage::ReadOnlyCollection);
+        return;
+    }
+    if run_in_progress(model) {
+        model.last_status = Some(StatusMessage::FileOpRefused(
+            "Exécution en cours : opération sur les fichiers refusée".to_owned(),
+        ));
+        return;
+    }
+    let index = model.environment_selected;
+    if index == 0 {
+        model.last_status = Some(StatusMessage::FileOpRefused(
+            "Aucun n'est pas un environnement".to_owned(),
+        ));
+        return;
+    }
+    let Some(entry) = collection.environments.get(index - 1) else {
+        return;
+    };
+    let env = match entry {
+        Ok(env) => env,
+        Err(_) => {
+            model.last_status = Some(StatusMessage::FileOpRefused(
+                "Fichier illisible : clonage refusé".to_owned(),
+            ));
+            return;
+        }
+    };
+    let existing = existing_environment_names(collection);
+    let Some(source) = env.ast.as_ref().map(|ast| ast.raw().to_owned()) else {
+        refuse_unloaded(model, "clonage");
+        return;
+    };
+    model.file_popup = Some(FilePopup::clone_environment(&env.name, existing, source));
+}
+
+/// `d` dans le panneau Environnement : demande confirmation avant mise à la corbeille.
+pub(crate) fn ask_trash_environment(model: &mut Model) {
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    if !collection.format.is_editable() {
+        model.last_status = Some(StatusMessage::ReadOnlyCollection);
+        return;
+    }
+    if run_in_progress(model) {
+        model.last_status = Some(StatusMessage::FileOpRefused(
+            "Exécution en cours : opération sur les fichiers refusée".to_owned(),
+        ));
+        return;
+    }
+    let index = model.environment_selected;
+    if index == 0 {
+        model.last_status = Some(StatusMessage::FileOpRefused(
+            "Aucun n'est pas un environnement".to_owned(),
+        ));
+        return;
+    }
+    let Some(entry) = collection.environments.get(index - 1) else {
+        return;
+    };
+    let name = match entry {
+        Ok(env) => env.name.clone(),
+        Err(err) => err
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_owned(),
+    };
+    model.confirm = Some(PendingConfirm::TrashEnvironment { name });
+}
+
+/// Confirmation « oui » à la mise à la corbeille d'un environnement.
+pub(crate) fn confirm_trash_environment(model: &mut Model, name: String) -> Command {
+    let Some(collection) = model.loaded() else {
+        return Command::None;
+    };
+    if !collection.format.is_editable() {
+        model.last_status = Some(StatusMessage::ReadOnlyCollection);
+        return Command::None;
+    }
+    let root = collection.root.clone();
+    // Source chargé ; `None` pour un fichier invalide (rien à comparer).
+    let expected = collection
+        .environments
+        .iter()
+        .flatten()
+        .find(|env| env.name == name)
+        .and_then(|env| env.ast.as_ref().map(|ast| ast.raw().to_owned()));
+    Command::FileOp {
+        root,
+        op: FileOp::TrashEnvironment { name, expected },
+    }
+}
+
+/// `e` sur une entrée valide de la liste : ouvre le popup d'édition des
+/// variables de l'environnement, sans effet sur « Aucun » ni sur une
+/// entrée en erreur (`add-environment-panel-and-edit-popup`).
+pub(crate) fn open_environment_editing(model: &mut Model, index: usize) {
+    let Some(collection) = model.loaded() else {
+        return;
+    };
+    if !collection.format.is_editable() {
+        model.last_status = Some(StatusMessage::ReadOnlyCollection);
+        return;
+    }
+    if index == 0 {
+        model.last_status = Some(StatusMessage::FileOpRefused(
+            "Aucun n'est pas un environnement".to_owned(),
+        ));
+        return;
+    }
+    let Some(entry) = collection.environments.get(index - 1) else {
+        return;
+    };
+    let env = match entry {
+        Ok(env) => env,
+        Err(_) => {
+            model.last_status = Some(StatusMessage::FileOpRefused(
+                "Fichier illisible : édition refusée".to_owned(),
+            ));
+            return;
+        }
+    };
     let full_path = collection.root.join(&env.path);
     let Ok(stamp) = FileStamp::capture(&full_path) else {
         return;
@@ -524,6 +740,44 @@ mod tests {
             model.last_status,
             Some(StatusMessage::EditRefused(_))
         ));
+    }
+
+    #[test]
+    fn space_toggles_variable_in_environment_popup() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+        update(&mut model, Message::StartEdit);
+
+        // Variable 0 ('host') est activée initialement
+        assert!(model.environment_editing.as_ref().unwrap().variables[0].enabled);
+
+        // Espace bascule l'état activé -> désactivé
+        update(&mut model, Message::ToggleField);
+        let session = model.environment_editing.as_ref().unwrap();
+        assert!(!session.variables[0].enabled);
+        assert!(session.dirty);
+        assert_eq!(session.pending.len(), 1);
+        assert_eq!(
+            session.pending[0],
+            crate::writer::EnvironmentVarEdit::Enabled {
+                index: 0,
+                enabled: false,
+            }
+        );
+
+        // Second appui sur Espace bascule désactivé -> activé
+        update(&mut model, Message::ToggleField);
+        let session = model.environment_editing.as_ref().unwrap();
+        assert!(session.variables[0].enabled);
+        assert_eq!(session.pending.len(), 2);
+        assert_eq!(
+            session.pending[1],
+            crate::writer::EnvironmentVarEdit::Enabled {
+                index: 0,
+                enabled: true,
+            }
+        );
     }
 
     #[test]
@@ -875,5 +1129,307 @@ mod tests {
         update(&mut model, Message::CollectionLoaded(reloaded));
         assert_eq!(model.current_environment, None);
         assert_eq!(model.focus, Focus::EnvironmentPicker);
+    }
+
+    #[test]
+    fn environment_picker_file_ops_open_popups_and_confirm() {
+        use crate::app::model::PendingConfirm;
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1; // "local"
+
+        // Touche 'a' -> ouvre NewEnvironment
+        update(&mut model, Message::Add);
+        assert!(matches!(
+            model.file_popup.as_ref().map(|p| p.kind),
+            Some(crate::app::file_popup::FilePopupKind::NewEnvironment)
+        ));
+        model.file_popup = None;
+
+        // Touche 'F2' -> ouvre RenameEnvironment sur "local"
+        update(&mut model, Message::RenameItem);
+        assert!(matches!(
+            model
+                .file_popup
+                .as_ref()
+                .map(|p| (p.kind, p.context.as_str())),
+            Some((
+                crate::app::file_popup::FilePopupKind::RenameEnvironment,
+                "local"
+            ))
+        ));
+        model.file_popup = None;
+
+        // Touche 'p' -> ouvre CloneEnvironment sur "local"
+        update(&mut model, Message::CloneItem);
+        assert!(matches!(
+            model
+                .file_popup
+                .as_ref()
+                .map(|p| (p.kind, p.context.as_str())),
+            Some((
+                crate::app::file_popup::FilePopupKind::CloneEnvironment,
+                "local"
+            ))
+        ));
+        model.file_popup = None;
+
+        // Touche 'd' -> pose PendingConfirm::TrashEnvironment
+        update(&mut model, Message::Delete);
+        assert_eq!(
+            model.confirm,
+            Some(PendingConfirm::TrashEnvironment {
+                name: "local".into()
+            })
+        );
+        model.confirm = None;
+    }
+
+    #[test]
+    fn environment_picker_restrictions_on_none_and_broken_files() {
+        use crate::app::model::PendingConfirm;
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+
+        // Sur « Aucun » (index 0)
+        model.environment_selected = 0;
+        update(&mut model, Message::RenameItem);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Aucun n'est pas un environnement".into()
+            ))
+        );
+        model.last_status = None;
+
+        update(&mut model, Message::CloneItem);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Aucun n'est pas un environnement".into()
+            ))
+        );
+        model.last_status = None;
+
+        update(&mut model, Message::Delete);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Aucun n'est pas un environnement".into()
+            ))
+        );
+        model.last_status = None;
+
+        update(&mut model, Message::StartEdit);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Aucun n'est pas un environnement".into()
+            ))
+        );
+        model.last_status = None;
+
+        // 'a' reste autorisé sur « Aucun »
+        update(&mut model, Message::Add);
+        assert!(model.file_popup.is_some());
+        model.file_popup = None;
+
+        // Sur un fichier en erreur
+        // Simuler une entrée en erreur à l'index 2
+        if let Some(collection) = model.loaded_mut() {
+            collection
+                .environments
+                .push(Err(crate::collection::ErrorNode {
+                    path: PathBuf::from("environments/broken.bru"),
+                    error: crate::collection::error::ParseError::UnclosedBlock {
+                        name: "vars".into(),
+                        line: 1,
+                    },
+                }));
+        }
+        let broken_idx = model.loaded().expect("collection").environments.len();
+        model.environment_selected = broken_idx;
+
+        // F2 refusé
+        update(&mut model, Message::RenameItem);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Fichier illisible : renommage refusé".into()
+            ))
+        );
+        model.last_status = None;
+
+        // p refusé
+        update(&mut model, Message::CloneItem);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Fichier illisible : clonage refusé".into()
+            ))
+        );
+        model.last_status = None;
+
+        // e refusé
+        update(&mut model, Message::StartEdit);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Fichier illisible : édition refusée".into()
+            ))
+        );
+        model.last_status = None;
+
+        // d est AUTORISÉ sur un fichier en erreur pour le mettre à la corbeille !
+        update(&mut model, Message::Delete);
+        assert_eq!(
+            model.confirm,
+            Some(PendingConfirm::TrashEnvironment {
+                name: "broken".into()
+            })
+        );
+        model.confirm = None;
+    }
+
+    #[test]
+    fn environment_picker_restrictions_on_yaml_and_running_campaign() {
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.environment_selected = 1;
+
+        // Collection YAML (lecture seule)
+        if let Some(collection) = model.loaded_mut() {
+            collection.format = crate::collection::CollectionFormat::OpenCollection;
+        }
+
+        update(&mut model, Message::Add);
+        assert_eq!(model.last_status, Some(StatusMessage::ReadOnlyCollection));
+        model.last_status = None;
+
+        update(&mut model, Message::RenameItem);
+        assert_eq!(model.last_status, Some(StatusMessage::ReadOnlyCollection));
+        model.last_status = None;
+
+        update(&mut model, Message::CloneItem);
+        assert_eq!(model.last_status, Some(StatusMessage::ReadOnlyCollection));
+        model.last_status = None;
+
+        update(&mut model, Message::Delete);
+        assert_eq!(model.last_status, Some(StatusMessage::ReadOnlyCollection));
+        model.last_status = None;
+
+        update(&mut model, Message::StartEdit);
+        assert_eq!(model.last_status, Some(StatusMessage::ReadOnlyCollection));
+        model.last_status = None;
+
+        // Rétablir format Bru mais simuler une exécution en cours
+        if let Some(collection) = model.loaded_mut() {
+            collection.format = crate::collection::CollectionFormat::Bru;
+        }
+        model.series = Some(crate::app::model::EnvSeries::new(
+            PathBuf::from("."),
+            vec!["local".into()],
+        ));
+
+        update(&mut model, Message::Add);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Exécution en cours : opération sur les fichiers refusée".into()
+            ))
+        );
+        model.last_status = None;
+
+        update(&mut model, Message::RenameItem);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Exécution en cours : opération sur les fichiers refusée".into()
+            ))
+        );
+        model.last_status = None;
+
+        update(&mut model, Message::CloneItem);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Exécution en cours : opération sur les fichiers refusée".into()
+            ))
+        );
+        model.last_status = None;
+
+        update(&mut model, Message::Delete);
+        assert_eq!(
+            model.last_status,
+            Some(StatusMessage::FileOpRefused(
+                "Exécution en cours : opération sur les fichiers refusée".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn rename_and_trash_active_environment_updates_current_environment_and_selection() {
+        use crate::app::model::PendingConfirm;
+        use crate::writer::files::FileOp;
+
+        let mut model = loaded_model((100, 30));
+        model.focus = Focus::EnvironmentPicker;
+        model.current_environment = Some("local".into());
+        model.environment_selected = 1; // "local"
+
+        // Renommage via popup submit
+        model.file_popup = Some(crate::app::file_popup::FilePopup::rename_environment(
+            "local",
+            vec!["local".into()],
+            String::new(),
+            vec![],
+        ));
+        if let Some(popup) = &mut model.file_popup {
+            popup.name = crate::app::text_input::TextInput::new("local-v2", false);
+        }
+        let cmd = update(&mut model, Message::FilePopupEnter);
+        assert!(matches!(
+            cmd,
+            Command::FileOp {
+                op: FileOp::RenameEnvironment { .. },
+                ..
+            }
+        ));
+        // current_environment immédiatement mis à jour
+        assert_eq!(model.current_environment, Some("local-v2".into()));
+
+        // Simulation du retour réussi de l'opération
+        let root = model.loaded().unwrap().root.clone();
+        let done_cmd = update(
+            &mut model,
+            Message::FileOpDone {
+                root,
+                result: Ok(crate::writer::files::FileOpOutcome {
+                    select: Some(PathBuf::from("environments/local-v2.bru")),
+                    message: "Renommé : local-v2.bru".into(),
+                }),
+            },
+        );
+        assert!(matches!(done_cmd, Command::ReloadCollection));
+        assert_eq!(
+            model.select_environment_after_reload,
+            Some("local-v2".into())
+        );
+
+        // Suppression de l'environnement actif
+        model.confirm = Some(PendingConfirm::TrashEnvironment {
+            name: "local-v2".into(),
+        });
+        let trash_cmd = update(&mut model, Message::ConfirmYes);
+        assert!(matches!(
+            trash_cmd,
+            Command::FileOp {
+                op: FileOp::TrashEnvironment { .. },
+                ..
+            }
+        ));
+        // L'environnement actif reste choisi jusqu'au rechargement : si la
+        // corbeille échoue, il n'est pas perdu.
+        assert_eq!(model.current_environment, Some("local-v2".into()));
     }
 }

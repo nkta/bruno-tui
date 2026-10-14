@@ -76,6 +76,17 @@ fn js_length(name: &str) -> usize {
     name.encode_utf16().count()
 }
 
+/// Clé de comparaison des noms d'environnement : `toLowerCase().trim()`
+/// de Bruno (minuscules Unicode, puis espaces de bord retirés).
+pub fn environment_name_key(name: &str) -> String {
+    name.to_lowercase().trim().to_owned()
+}
+
+/// Deux noms d'environnement désignent le même environnement pour Bruno.
+pub fn same_environment_name(a: &str, b: &str) -> bool {
+    environment_name_key(a) == environment_name_key(b)
+}
+
 /// `validateNameError` : `Ok` si Bruno accepte ce nom de fichier ou de
 /// dossier (sans extension), sinon le premier problème, dans l'ordre de
 /// Bruno.

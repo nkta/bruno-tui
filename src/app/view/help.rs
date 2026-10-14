@@ -391,8 +391,28 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "naviguer dans la liste des environnements",
             },
             HelpEntry {
+                key: "Début/g, Fin/G",
+                effect: "début, fin de la liste",
+            },
+            HelpEntry {
                 key: "Entrée / →",
                 effect: "activer l'environnement sous le curseur",
+            },
+            HelpEntry {
+                key: "a",
+                effect: "ouvrir le popup « Nouvel environnement » (pas en YAML)",
+            },
+            HelpEntry {
+                key: "F2",
+                effect: "renommer l'environnement sous le curseur",
+            },
+            HelpEntry {
+                key: "p",
+                effect: "cloner l'environnement sous le curseur (« <nom> copie »)",
+            },
+            HelpEntry {
+                key: "d",
+                effect: "mettre l'environnement à la corbeille, après confirmation (y/n)",
             },
             HelpEntry {
                 key: "e",
@@ -401,6 +421,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             HelpEntry {
                 key: "Entrée (popup)",
                 effect: "modifier la valeur (variable désactivée non éditable)",
+            },
+            HelpEntry {
+                key: "Espace (popup)",
+                effect: "basculer la variable entre activée et désactivée (~)",
             },
             HelpEntry {
                 key: "a (popup)",
@@ -727,6 +751,18 @@ mod tests {
             .expect("section");
         assert!(section.entries.iter().any(|e| e.key == "B"));
         for key in ["Réglages : a, d", "Réglages : Ctrl+S, Échap"] {
+            assert!(section.entries.iter().any(|e| e.key == key), "{key}");
+        }
+    }
+
+    /// Les opérations de fichiers du panneau environnement sont documentées.
+    #[test]
+    fn environment_documents_file_operations_and_toggle() {
+        let section = HELP_SECTIONS
+            .iter()
+            .find(|s| s.title == "Environnement (panneau et popup)")
+            .expect("section");
+        for key in ["Début/g, Fin/G", "a", "F2", "p", "d", "Espace (popup)"] {
             assert!(section.entries.iter().any(|e| e.key == key), "{key}");
         }
     }

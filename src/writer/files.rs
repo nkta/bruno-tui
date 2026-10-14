@@ -29,8 +29,8 @@ use thiserror::Error;
 use super::error::{EditError, WriteError};
 use super::meta::{MetaUpdate, MissingMeta, rewrite_meta};
 use super::names::{
-    MAX_DUPLICATE_NAMES, NameError, suffixed_name, truncate_base_for_suffix, validate_name,
-    validate_request_filename,
+    MAX_DUPLICATE_NAMES, NameError, same_environment_name, suffixed_name, truncate_base_for_suffix,
+    validate_name, validate_request_filename,
 };
 use super::trash::{Trash, TrashError};
 use super::url_params::{UnsupportedUrl, bruno_url_params};
@@ -45,6 +45,8 @@ pub const FOLDER_FILE: &str = "folder.bru";
 /// Erreur d'une opération de fichier. Le disque reste dans un état propre.
 #[derive(Debug, Error)]
 pub enum FileOpError {
+    #[error("Un environnement de ce nom existe déjà")]
+    EnvironmentAlreadyExists,
     #[error("{0}")]
     Name(#[from] NameError),
     #[error("{0}")]
@@ -747,6 +749,258 @@ pub fn trash_item(
     Ok(trash.put(&absolute, deletion_date)?)
 }
 
+/// Vérifie si un nom d'environnement est déjà pris dans `env_dir`
+/// (insensible à la casse, sans espaces de bord), à l'exclusion éventuelle de `exclude`.
+fn environment_name_taken(
+    env_dir: &Path,
+    name: &str,
+    exclude: Option<&str>,
+) -> Result<bool, FileOpError> {
+    if !env_dir.is_dir() {
+        return Ok(false);
+    }
+    let entries = fs::read_dir(env_dir).map_err(io_error(env_dir))?;
+    for entry in entries {
+        let entry = entry.map_err(io_error(env_dir))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("bru")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            if let Some(ex) = exclude
+                && stem == ex
+            {
+                continue;
+            }
+            if same_environment_name(stem, name) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Crée un environnement `name` dans `environments/<name>.bru`.
+/// Refuse si un environnement de ce nom existe déjà (insensible à la casse).
+pub fn create_environment(root: &Path, name: &str) -> Result<PathBuf, FileOpError> {
+    validate_name(name)?;
+    let env_dir = root.join("environments");
+    if !env_dir.exists() {
+        fs::create_dir_all(&env_dir).map_err(io_error(&env_dir))?;
+    }
+    let env_rel = Path::new("environments").join(format!("{name}.bru"));
+    let absolute = inside(root, &env_rel)?;
+    let env_dir = absolute.parent().unwrap_or(root);
+    if environment_name_taken(env_dir, name, None)? {
+        return Err(FileOpError::EnvironmentAlreadyExists);
+    }
+    let content = crate::writer::environment::NEW_ENVIRONMENT_CONTENT;
+    if !create_file_no_replace(&absolute, content.as_bytes(), None)? {
+        return Err(FileOpError::EnvironmentAlreadyExists);
+    }
+    Ok(relative_to(root, &absolute))
+}
+
+/// Source chargé d'un environnement frère : `(nom, source)`.
+pub type EnvironmentSource = (String, String);
+
+/// Échec de la mise à jour de `extends` dans un fichier frère.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendsFailure {
+    /// Nom du fichier (`enfant.bru`).
+    pub file: String,
+    pub reason: String,
+}
+
+/// Lit `path` et vérifie qu'il n'a pas changé depuis son chargement
+/// (`expected`) ; version octets, pour copier sans altérer.
+fn read_fresh_bytes(path: &Path, expected: &str) -> Result<Vec<u8>, FileOpError> {
+    let bytes = fs::read(path).map_err(io_error(path))?;
+    if bytes != expected.as_bytes() {
+        return Err(FileOpError::Stale {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(bytes)
+}
+
+/// Réécrit la valeur de la déclaration `extends` d'un environnement dont le
+/// source est `content`, si elle vaut exactement `old_name`. `None` : rien à
+/// changer (pas de `extends` simple égal à l'ancien nom).
+fn rewrite_extends(content: &str, old_name: &str, new_name: &str) -> Option<String> {
+    let ast = crate::collection::BruFile::parse_environment(content.to_owned()).ok()?;
+    let span = ast.nodes().iter().find_map(|node| match &node.kind {
+        crate::collection::NodeKind::Declaration(decl)
+            if decl.name == "extends" && decl.value == old_name =>
+        {
+            Some(node.span.clone())
+        }
+        _ => None,
+    })?;
+    let line = &content[span.clone()];
+    let after = line.find("extends:")? + "extends:".len();
+    let start = span.start + after + line[after..].find(old_name)?;
+    let end = start + old_name.len();
+    let mut rewritten = String::with_capacity(content.len() - old_name.len() + new_name.len());
+    rewritten.push_str(&content[..start]);
+    rewritten.push_str(new_name);
+    rewritten.push_str(&content[end..]);
+    Some(rewritten)
+}
+
+/// Met à jour les références `extends: old_name` des fichiers frères sous
+/// `environments/`, sans toucher au reste (écriture chirurgicale). `loaded`
+/// donne le source chargé de chaque frère : un fichier modifié sur disque,
+/// apparu depuis le chargement ou illisible n'est pas réécrit.
+/// Retourne les échecs, jamais silencieux ; `old_name` est celui d'avant le
+/// renommage (le fichier renommé lui-même est ignoré via `renamed`).
+pub fn rename_environment_extends_references(
+    root: &Path,
+    old_name: &str,
+    new_name: &str,
+    renamed: &str,
+    loaded: &[EnvironmentSource],
+) -> Result<Vec<ExtendsFailure>, FileOpError> {
+    let env_dir = inside(root, Path::new("environments"))?;
+    let mut failures = Vec::new();
+    let entries = fs::read_dir(&env_dir).map_err(io_error(&env_dir))?;
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some(BRU_EXTENSION))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem == renamed {
+            continue;
+        }
+        let file = format!("{stem}.{BRU_EXTENSION}");
+        let mut fail = |reason: &str| {
+            failures.push(ExtendsFailure {
+                file: file.clone(),
+                reason: reason.to_owned(),
+            });
+        };
+        let Some((_, expected)) = loaded.iter().find(|(name, _)| name == stem) else {
+            // Absent du chargement : invalide ou apparu depuis ; on ne peut
+            // pas vérifier sa fraîcheur, donc on ne l'écrit pas.
+            match fs::read_to_string(&path) {
+                Ok(text) if rewrite_extends(&text, old_name, new_name).is_none() => {}
+                Ok(_) => fail("fichier apparu depuis le chargement"),
+                Err(_) => fail("illisible"),
+            }
+            continue;
+        };
+        match read_fresh(&path, expected) {
+            Ok((text, stamp)) => {
+                if let Some(rewritten) = rewrite_extends(&text, old_name, new_name)
+                    && let Err(error) = write_atomic(&path, &stamp, rewritten.as_bytes())
+                {
+                    fail(&FileOpError::from(error).to_string());
+                }
+            }
+            Err(FileOpError::Stale { .. }) => fail("modifié sur le disque depuis le chargement"),
+            Err(error) => fail(&error.to_string()),
+        }
+    }
+    Ok(failures)
+}
+
+/// Renomme un environnement de `old_name` à `new_name` sans jamais écraser
+/// (lien dur puis retrait de l'ancien nom). `expected` est le source chargé
+/// de l'environnement ; `siblings` celui des autres. Retourne le nouveau
+/// chemin et les échecs de mise à jour des `extends` (le renommage reste fait).
+pub fn rename_environment(
+    root: &Path,
+    old_name: &str,
+    new_name: &str,
+    expected: &str,
+    siblings: &[EnvironmentSource],
+) -> Result<(PathBuf, Vec<ExtendsFailure>), FileOpError> {
+    let source_rel = Path::new("environments").join(format!("{old_name}.bru"));
+    if old_name == new_name {
+        return Ok((source_rel, Vec::new()));
+    }
+    validate_name(new_name)?;
+    let source_abs = inside(root, &source_rel)?;
+    if !source_abs.is_file() {
+        return Err(FileOpError::NotFound { path: source_rel });
+    }
+    read_fresh(&source_abs, expected)?;
+    let target_rel = Path::new("environments").join(format!("{new_name}.bru"));
+    let target_abs = inside(root, &target_rel)?;
+    let env_dir = target_abs.parent().unwrap_or(root);
+    if environment_name_taken(env_dir, new_name, Some(old_name))? {
+        return Err(FileOpError::EnvironmentAlreadyExists);
+    }
+    match fs::hard_link(&source_abs, &target_abs) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(FileOpError::EnvironmentAlreadyExists);
+        }
+        Err(error) => return Err(io_error(&target_abs)(error)),
+    }
+    if let Err(error) = fs::remove_file(&source_abs) {
+        let _ = fs::remove_file(&target_abs);
+        return Err(io_error(&source_abs)(error));
+    }
+    let failures =
+        rename_environment_extends_references(root, old_name, new_name, new_name, siblings)?;
+    Ok((relative_to(root, &target_abs), failures))
+}
+
+/// Clone un environnement `source_name` vers `target_name`.
+/// Copie le fichier source à l'octet près ; `expected` est son source chargé.
+pub fn clone_environment(
+    root: &Path,
+    source_name: &str,
+    target_name: &str,
+    expected: &str,
+) -> Result<PathBuf, FileOpError> {
+    validate_name(target_name)?;
+    let source_rel = Path::new("environments").join(format!("{source_name}.bru"));
+    let source_abs = inside(root, &source_rel)?;
+    if !source_abs.is_file() {
+        return Err(FileOpError::NotFound { path: source_rel });
+    }
+    let target_rel = Path::new("environments").join(format!("{target_name}.bru"));
+    let target_abs = inside(root, &target_rel)?;
+    let env_dir = target_abs.parent().unwrap_or(root);
+    if environment_name_taken(env_dir, target_name, None)? {
+        return Err(FileOpError::EnvironmentAlreadyExists);
+    }
+    let bytes = read_fresh_bytes(&source_abs, expected)?;
+    let permissions = fs::metadata(&source_abs)
+        .map_err(io_error(&source_abs))?
+        .permissions();
+    if !create_file_no_replace(&target_abs, &bytes, Some(permissions))? {
+        return Err(FileOpError::EnvironmentAlreadyExists);
+    }
+    Ok(relative_to(root, &target_abs))
+}
+
+/// Met l'environnement `name` à la corbeille. `expected` : source chargé ;
+/// `None` pour un fichier invalide, dont aucun source n'a été chargé.
+pub fn trash_environment(
+    root: &Path,
+    name: &str,
+    expected: Option<&str>,
+    trash: &Trash,
+    deletion_date: &str,
+) -> Result<PathBuf, FileOpError> {
+    let rel = Path::new("environments").join(format!("{name}.bru"));
+    let absolute = inside(root, &rel)?;
+    if !absolute.is_file() {
+        return Err(FileOpError::NotFound { path: rel });
+    }
+    if let Some(expected) = expected {
+        read_fresh(&absolute, expected)?;
+    }
+    Ok(trash.put(&absolute, deletion_date)?)
+}
+
 /// Refuse tout lien symbolique dans `path` (lui-même ou, pour un dossier,
 /// son contenu récursif).
 fn ensure_no_symlink(path: &Path) -> Result<(), FileOpError> {
@@ -906,6 +1160,28 @@ pub enum FileOp {
         /// quand même.
         renumber: Result<Vec<SeqChange>, String>,
     },
+    CreateEnvironment {
+        name: String,
+    },
+    RenameEnvironment {
+        old_name: String,
+        new_name: String,
+        /// Source chargé de l'environnement renommé.
+        expected: String,
+        /// Source chargé des autres environnements valides (pour `extends`).
+        siblings: Vec<EnvironmentSource>,
+    },
+    CloneEnvironment {
+        source_name: String,
+        target_name: String,
+        /// Source chargé de l'environnement cloné.
+        expected: String,
+    },
+    TrashEnvironment {
+        name: String,
+        /// Source chargé ; `None` pour un fichier invalide.
+        expected: Option<String>,
+    },
 }
 
 /// Résultat d'une opération réussie.
@@ -1023,6 +1299,42 @@ pub fn execute(
             Ok(FileOpOutcome {
                 select: None,
                 message,
+            })
+        }
+        FileOp::CreateEnvironment { name } => {
+            create_environment(root, name).map(|path| done(path, "Environnement créé"))
+        }
+        FileOp::RenameEnvironment {
+            old_name,
+            new_name,
+            expected,
+            siblings,
+        } => {
+            let (path, failures) =
+                rename_environment(root, old_name, new_name, expected, siblings)?;
+            let mut outcome = done(path, "Renommé");
+            if !failures.is_empty() {
+                let files = failures
+                    .iter()
+                    .map(|f| format!("{} ({})", f.file, f.reason))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                outcome.message = format!("Renommé ; extends non mis à jour dans : {files}");
+            }
+            Ok(outcome)
+        }
+        FileOp::CloneEnvironment {
+            source_name,
+            target_name,
+            expected,
+        } => clone_environment(root, source_name, target_name, expected)
+            .map(|path| done(path, "Clone créé")),
+        FileOp::TrashEnvironment { name, expected } => {
+            let trash = trash()?;
+            trash_environment(root, name, expected.as_deref(), &trash, deletion_date)?;
+            Ok(FileOpOutcome {
+                select: None,
+                message: format!("Mis à la corbeille : {name}.bru"),
             })
         }
     }
