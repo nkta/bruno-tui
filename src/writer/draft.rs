@@ -1489,6 +1489,21 @@ mod tests {
         BruFile::parse(source.to_owned()).expect("source valide")
     }
 
+    /// Quitter un mode hors liste (OAuth 2) puis y revenir réécrit le
+    /// fichier à l'identique.
+    #[test]
+    fn returning_to_an_unlisted_original_auth_mode_is_identity() {
+        let source = "get {\n  url: https://a\n  auth: oauth2\n}\n\nauth:oauth2 {\n  grant_type: client_credentials\n  client_id: app\n}\n";
+        let out = apply(
+            source,
+            &[
+                FieldEdit::AuthMode("bearer".into()),
+                FieldEdit::AuthMode("oauth2".into()),
+            ],
+        );
+        assert_eq!(out, source);
+    }
+
     fn apply(source: &str, edits: &[FieldEdit]) -> String {
         let file = parse(source);
         String::from_utf8(serialize(&file, edits).expect("sérialisation")).expect("utf-8")

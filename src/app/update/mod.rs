@@ -1324,6 +1324,7 @@ mod tests {
             dirty: true,
             hscroll: 0,
             unmasked: false,
+            original_auth: None,
         });
 
         // 1. PendingConfirm::DiscardEdit
@@ -1382,6 +1383,7 @@ mod tests {
             dirty: true,
             hscroll: 0,
             unmasked: false,
+            original_auth: None,
         });
         model.confirm = Some(PendingConfirm::QuitWithUnsavedEdit);
 

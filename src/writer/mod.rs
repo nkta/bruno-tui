@@ -18,6 +18,7 @@ mod error;
 mod format;
 mod query;
 
+pub(crate) use draft::SUPPORTED_AUTH_MODES;
 pub use edit::{BODY_MODES, EntrySection, FieldEdit};
 pub use environment::{EnvironmentVarEdit, write_environment};
 pub use error::{EditError, EntryProblem, WriteError};

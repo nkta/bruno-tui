@@ -16,7 +16,7 @@ use super::detail::skip_columns;
 use super::theme;
 use crate::app::model::{
     EditScope, EditSession, EditState, EditableField, InputTarget, PickerKind, RequestTab,
-    field_enabled, field_value, section_entries,
+    field_enabled, field_value, picker_options, section_entries,
 };
 use crate::app::text_input::TextInput;
 use crate::collection::auth::{is_sensitive_auth_key, mask_auth_value};
@@ -341,7 +341,7 @@ impl Builder<'_> {
         if self.session.current_field() != Some(field) {
             return;
         }
-        for (index, option) in kind.options().iter().enumerate() {
+        for (index, option) in picker_options(self.session, kind).iter().enumerate() {
             let label = if kind == PickerKind::Method {
                 option.to_ascii_uppercase()
             } else {
