@@ -258,6 +258,7 @@ Touches communes :
 |---|---|
 | `↑`/`k`, `↓`/`j` | ligne précédente, suivante |
 | `Tab`, `Maj+Tab` | partie suivante, précédente (ex. pré-requête / post-réponse) |
+| `Début`/`g`, `Fin`/`G` | première, dernière ligne du popup |
 | `Entrée` | modifier la valeur ; sur un choix, ouvrir sa liste (`↑↓`, `Entrée`, `Échap`) ; sur un script, des tests ou la doc, ouvrir l'éditeur externe |
 | `←`/`h`, `→`/`l` | sur un choix (méthode, mode, placement) : valeur précédente, suivante |
 | `Ctrl+S` | enregistrer, puis fermer le popup |

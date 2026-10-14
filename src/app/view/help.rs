@@ -185,6 +185,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "partie suivante, précédente (ex. pré-requête / post-réponse)",
             },
             HelpEntry {
+                key: "Début/g, Fin/G",
+                effect: "première, dernière ligne du popup",
+            },
+            HelpEntry {
                 key: "Entrée",
                 effect: "modifier la valeur ; liste d'un choix ; éditeur externe pour scripts, tests, docs",
             },
@@ -613,5 +617,15 @@ mod tests {
         assert!(area.height <= screen.height);
         assert_eq!(area.x, (screen.width - area.width) / 2);
         assert_eq!(area.y, (screen.height - area.height) / 2);
+    }
+
+    /// `Début` et `Fin` des popups d'édition sont documentés.
+    #[test]
+    fn edit_popups_document_home_and_end() {
+        let section = HELP_SECTIONS
+            .iter()
+            .find(|s| s.title == "Popups d'édition")
+            .expect("section");
+        assert!(section.entries.iter().any(|e| e.key == "Début/g, Fin/G"));
     }
 }

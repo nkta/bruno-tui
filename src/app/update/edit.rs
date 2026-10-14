@@ -2919,6 +2919,28 @@ mod tests {
         assert_eq!(request.view, saved_view);
     }
 
+    /// `Début`/`g` et `Fin`/`G` : première et dernière ligne du popup ;
+    /// sans effet sur une liste ouverte.
+    #[test]
+    fn home_and_end_move_to_the_first_and_last_popup_line() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        let last = session(&model).fields.len() - 1;
+        assert!(last > 0);
+        // `g` et `G` donnent les mêmes messages (`message.rs`), hors saisie.
+        assert_eq!(model.text_capture(), None);
+        update(&mut model, Message::End);
+        assert_eq!(session(&model).cursor, last);
+        update(&mut model, Message::Home);
+        assert_eq!(session(&model).cursor, 0);
+
+        // Liste ouverte (méthode) : `Fin` ne bouge pas le curseur de champ.
+        move_to_field(&mut model, EditableField::Method);
+        let cursor = session(&model).cursor;
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::End);
+        assert_eq!(session(&model).cursor, cursor);
+    }
+
     /// Requête `simple-get.bru` remplacée en mémoire par une requête en
     /// OAuth 2, mode que le popup ne propose pas, puis popup Auth ouvert.
     fn oauth2_auth_session() -> Model {
