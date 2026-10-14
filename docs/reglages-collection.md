@@ -1,6 +1,8 @@
 # Spécification — Réglages de la collection (`bruno.json`)
 
-Statut : **brouillon, à valider par Nicolas**.
+Statut : **approuvée par Nicolas le 2026-10-14**, options A de D1 à D7.
+Cette spec lève, pour les clés `proxy`, `clientCertificates` et `presets` de
+`bruno.json` seulement, la règle de lecture seule de `CLAUDE.md`.
 
 Aujourd'hui le TUI lit `bruno.json` pour détecter une collection
 (`name`, `ignore`). Il ne l'écrit jamais.
