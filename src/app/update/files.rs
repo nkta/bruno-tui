@@ -283,6 +283,11 @@ fn submit(model: &mut Model) -> Command {
         }
         Ok(Some(op)) => {
             model.file_popup = None;
+            if let FileOp::RenameEnvironment { old_name, new_name } = &op
+                && model.current_environment.as_deref() == Some(old_name)
+            {
+                model.current_environment = Some(new_name.clone());
+            }
             Command::FileOp { root, op }
         }
     }
@@ -467,13 +472,18 @@ pub(crate) fn file_op_done(
         return Command::None;
     }
     if let Some(path) = select {
-        // Les dossiers qui mènent à l'élément sont dépliés.
-        let mut ancestor = path.parent();
-        while let Some(dir) = ancestor.filter(|dir| !dir.as_os_str().is_empty()) {
-            model.tree.expanded.insert(dir.to_path_buf());
-            ancestor = dir.parent();
+        if path.starts_with("environments") {
+            let env_name = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned);
+            model.select_environment_after_reload = env_name;
+        } else {
+            // Les dossiers qui mènent à l'élément sont dépliés.
+            let mut ancestor = path.parent();
+            while let Some(dir) = ancestor.filter(|dir| !dir.as_os_str().is_empty()) {
+                model.tree.expanded.insert(dir.to_path_buf());
+                ancestor = dir.parent();
+            }
+            model.select_after_reload = Some(path);
         }
-        model.select_after_reload = Some(path);
     }
     Command::ReloadCollection
 }
@@ -482,6 +492,12 @@ pub(crate) fn file_op_done(
 /// dans l'arbre rechargé ; sinon l'attente continue (un rechargement plus
 /// ancien a pu arriver d'abord).
 pub(crate) fn apply_pending_selection(model: &mut Model) {
+    if let Some(target_env) = model.select_environment_after_reload.take()
+        && let Some(collection) = model.loaded()
+    {
+        model.environment_selected =
+            super::environment::environment_index_for(collection, Some(&target_env));
+    }
     let Some(path) = model.select_after_reload.clone() else {
         return;
     };

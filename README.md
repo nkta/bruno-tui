@@ -418,11 +418,21 @@ les autres panneaux, il n'a besoin d'aucune touche pour apparaître.
 |---|---|
 | `E` | donner le focus au panneau |
 | `↑`/`k`, `↓`/`j` | naviguer dans la liste des environnements |
+| `Début`/`g`, `Fin`/`G` | début ou fin de la liste |
 | `Entrée`/`→` | activer l'environnement sous le curseur (« Aucun » désactive) |
+| `a` | créer un environnement (`environments/<nom>.bru` vide avec `vars {\n}\n`) |
+| `F2` | renommer l'environnement sous le curseur (met à jour les références `extends` des frères) |
+| `p` | cloner l'environnement sous le curseur (« <nom> copie », copie à l'octet près) |
+| `d` | mettre l'environnement à la corbeille, après confirmation (`y`/`n`) |
 | `e` | ouvrir le popup d'édition de ses variables |
 
 Un double-clic sur une entrée du panneau fait les deux à la fois : active
 l'environnement et ouvre le popup.
+
+Sur « Aucun », `F2`, `p`, `d` et `e` sont refusés (« Aucun n'est pas un environnement ») ; seul `a` est disponible.
+Sur une ligne en erreur (fichier `.bru` malformé), `F2`, `p` et `e` sont refusés, mais `d` reste permis pour envoyer le fichier défectueux à la corbeille.
+Toutes les opérations d'écriture sont refusées sur les collections YAML (OpenCollection en lecture seule) et pendant une exécution active (`bru run`).
+Les noms d'environnement sont uniques (insensible à la casse et sans espaces de bord) : toute collision est refusée sans modification du disque.
 
 Dans le popup (tableau Clé/Valeur, centré) :
 
@@ -430,6 +440,7 @@ Dans le popup (tableau Clé/Valeur, centré) :
 |---|---|
 | `↑`/`k`, `↓`/`j` | variable précédente, suivante |
 | `Entrée` | modifier la valeur (une variable désactivée — `~` en tête de clé dans le fichier — n'est pas éditable) |
+| `Espace` | basculer la variable entre activée et désactivée (`~`) |
 | `a` | ajouter une variable (clé, puis valeur) |
 | `d` | supprimer la variable sous le curseur, sans confirmation |
 | `Ctrl+S` | enregistrer |
@@ -446,6 +457,10 @@ déclarée, si c'est une couleur hexadécimale (`#rgb` ou `#rrggbb`). Le TUI
 ne résout jamais l'héritage : le popup ne montre que les variables du
 fichier lui-même, et c'est `bru` qui fusionne les parents à l'exécution.
 Enregistrer depuis le popup conserve `extends` et `color` tels quels.
+Renommer un environnement met à jour chirurgicalement les déclarations
+`extends: <ancien_nom>` des fichiers frères sans toucher au reste de leur
+contenu. Supprimer un environnement ne modifie aucun fichier frère
+(tolérance aux références orphelines conforme à Bruno desktop).
 Attention : `extends` demande `bru` 4.2 ou plus récent ; `bru` 4.1.0 refuse
 l'environnement (erreur de lecture).
 

@@ -23,6 +23,9 @@ pub enum FilePopupKind {
     NewFolder,
     Rename,
     Clone,
+    NewEnvironment,
+    RenameEnvironment,
+    CloneEnvironment,
 }
 
 /// Ligne du popup.
@@ -67,6 +70,8 @@ pub struct FilePopup {
     /// Source chargé de l'élément visé (requête, ou `folder.bru`).
     pub expected: Option<String>,
     pub seq: u32,
+    /// Noms d'environnements existants, pour la détection de collision dans les popups d'environnement.
+    pub existing_environments: Vec<String>,
     original_name: String,
     original_filename: String,
 }
@@ -91,6 +96,7 @@ impl FilePopup {
             target: PathBuf::new(),
             expected: None,
             seq: 1,
+            existing_environments: Vec::new(),
             original_name: String::new(),
             original_filename: String::new(),
         }
@@ -175,15 +181,63 @@ impl FilePopup {
         }
     }
 
+    /// Nouvel environnement.
+    pub fn new_environment(existing_environments: Vec<String>) -> Self {
+        Self {
+            fields: vec![PopupField::Name],
+            existing_environments,
+            ..Self::base(FilePopupKind::NewEnvironment, false, String::new())
+        }
+    }
+
+    /// Renommer l'environnement `name`.
+    pub fn rename_environment(name: &str, existing_environments: Vec<String>) -> Self {
+        Self {
+            fields: vec![PopupField::Name],
+            name: TextInput::new(name, false),
+            original_name: name.to_owned(),
+            existing_environments,
+            ..Self::base(FilePopupKind::RenameEnvironment, false, name.to_owned())
+        }
+    }
+
+    /// Cloner l'environnement `name`, pré-rempli avec « <nom> copie ».
+    pub fn clone_environment(name: &str, existing_environments: Vec<String>) -> Self {
+        let copy = format!("{name} copie");
+        Self {
+            fields: vec![PopupField::Name],
+            name: TextInput::new(&copy, false),
+            original_name: name.to_owned(),
+            existing_environments,
+            ..Self::base(FilePopupKind::CloneEnvironment, false, name.to_owned())
+        }
+    }
+
+    /// Vrai si le popup concerne un environnement.
+    pub fn is_environment(&self) -> bool {
+        matches!(
+            self.kind,
+            FilePopupKind::NewEnvironment
+                | FilePopupKind::RenameEnvironment
+                | FilePopupKind::CloneEnvironment
+        )
+    }
+
     /// Titre du cadre.
     pub fn title(&self) -> String {
-        let what = match (self.kind, self.is_folder) {
-            (FilePopupKind::NewRequest, _) => "Nouvelle requête — dans",
-            (FilePopupKind::NewFolder, _) => "Nouveau dossier — dans",
-            (FilePopupKind::Rename, _) => "Renommer —",
-            (FilePopupKind::Clone, _) => "Cloner —",
-        };
-        format!(" {what} {} ", self.context)
+        match self.kind {
+            FilePopupKind::NewRequest => format!(" Nouvelle requête — dans {} ", self.context),
+            FilePopupKind::NewFolder => format!(" Nouveau dossier — dans {} ", self.context),
+            FilePopupKind::Rename => format!(" Renommer — {} ", self.context),
+            FilePopupKind::Clone => format!(" Cloner — {} ", self.context),
+            FilePopupKind::NewEnvironment => " Nouvel environnement ".to_owned(),
+            FilePopupKind::RenameEnvironment => {
+                format!(" Renommer l'environnement — {} ", self.context)
+            }
+            FilePopupKind::CloneEnvironment => {
+                format!(" Cloner l'environnement — {} ", self.context)
+            }
+        }
     }
 
     pub fn current_field(&self) -> PopupField {
@@ -223,8 +277,12 @@ impl FilePopup {
     /// Verbe de validation, pour l'aide (`Ctrl+S créer`).
     pub fn verb(&self) -> &'static str {
         match self.kind {
-            FilePopupKind::NewRequest | FilePopupKind::NewFolder | FilePopupKind::Clone => "créer",
-            FilePopupKind::Rename => "appliquer",
+            FilePopupKind::NewRequest
+            | FilePopupKind::NewFolder
+            | FilePopupKind::Clone
+            | FilePopupKind::NewEnvironment => "créer",
+            FilePopupKind::CloneEnvironment => "cloner",
+            FilePopupKind::Rename | FilePopupKind::RenameEnvironment => "appliquer",
         }
     }
 
@@ -309,12 +367,21 @@ impl FilePopup {
         let changed = input.text() != before;
         if changed {
             self.error = None;
-            match field {
-                PopupField::Filename => self.filename_touched = true,
-                PopupField::Name if !self.filename_touched => {
-                    self.filename = TextInput::new(&sanitize_name(self.name.text()), false);
+            if self.is_environment() {
+                let text = self.name.text();
+                if !text.is_empty()
+                    && let Err(err) = validate_name(text)
+                {
+                    self.error = Some(err.to_string());
                 }
-                _ => {}
+            } else {
+                match field {
+                    PopupField::Filename => self.filename_touched = true,
+                    PopupField::Name if !self.filename_touched => {
+                        self.filename = TextInput::new(&sanitize_name(self.name.text()), false);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -329,6 +396,53 @@ impl FilePopup {
         }
         if name.encode_utf16().count() > MAX_NAME_LENGTH {
             return Err("Le nom ne peut pas dépasser 255 caractères.".to_owned());
+        }
+        if self.is_environment() {
+            validate_name(&name).map_err(|error| error.to_string())?;
+            let op = match self.kind {
+                FilePopupKind::NewEnvironment => {
+                    if self
+                        .existing_environments
+                        .iter()
+                        .any(|e| e.trim().eq_ignore_ascii_case(&name))
+                    {
+                        return Err("Un environnement de ce nom existe déjà".to_owned());
+                    }
+                    FileOp::CreateEnvironment { name }
+                }
+                FilePopupKind::RenameEnvironment => {
+                    if name == self.original_name {
+                        return Ok(None);
+                    }
+                    if self
+                        .existing_environments
+                        .iter()
+                        .filter(|e| *e != &self.original_name)
+                        .any(|e| e.trim().eq_ignore_ascii_case(&name))
+                    {
+                        return Err("Un environnement de ce nom existe déjà".to_owned());
+                    }
+                    FileOp::RenameEnvironment {
+                        old_name: self.original_name.clone(),
+                        new_name: name,
+                    }
+                }
+                FilePopupKind::CloneEnvironment => {
+                    if self
+                        .existing_environments
+                        .iter()
+                        .any(|e| e.trim().eq_ignore_ascii_case(&name))
+                    {
+                        return Err("Un environnement de ce nom existe déjà".to_owned());
+                    }
+                    FileOp::CloneEnvironment {
+                        source_name: self.context.clone(),
+                        target_name: name,
+                    }
+                }
+                _ => unreachable!(),
+            };
+            return Ok(Some(op));
         }
         let check_filename = |filename: &str| {
             if self.is_folder {
@@ -414,6 +528,9 @@ impl FilePopup {
                     }
                 }
             }
+            FilePopupKind::NewEnvironment
+            | FilePopupKind::RenameEnvironment
+            | FilePopupKind::CloneEnvironment => unreachable!(),
         };
         Ok(Some(op))
     }
@@ -553,6 +670,76 @@ mod tests {
                 name: "Articles copie".into(),
                 dirname: "Articles copie".into(),
                 seq: 6,
+            }))
+        );
+    }
+
+    #[test]
+    fn environment_popups_validate_live_and_prevent_duplicates() {
+        let existing = vec!["local".into(), "staging".into()];
+
+        // Nouvel environnement
+        let mut new_env = FilePopup::new_environment(existing.clone());
+        assert_eq!(new_env.title(), " Nouvel environnement ");
+        assert_eq!(new_env.verb(), "créer");
+        assert_eq!(new_env.submit(), Err("Le nom est obligatoire.".into()));
+
+        // Frappe en direct avec caractère invalide
+        typed(&mut new_env, "bad/name");
+        assert!(new_env.error.is_some());
+        new_env.name = TextInput::new("", false);
+        new_env.error = None;
+
+        // Collision insensible à la casse
+        typed(&mut new_env, "LOCAL");
+        assert_eq!(
+            new_env.submit(),
+            Err("Un environnement de ce nom existe déjà".into())
+        );
+
+        // Nom valide
+        new_env.name = TextInput::new("production", false);
+        assert_eq!(
+            new_env.submit(),
+            Ok(Some(FileOp::CreateEnvironment {
+                name: "production".into()
+            }))
+        );
+
+        // Renommage
+        let mut rename_env = FilePopup::rename_environment("staging", existing.clone());
+        assert_eq!(rename_env.title(), " Renommer l'environnement — staging ");
+        assert_eq!(rename_env.verb(), "appliquer");
+        // Inchangé -> Ok(None)
+        assert_eq!(rename_env.submit(), Ok(None));
+
+        // Collision avec l'autre environnement
+        rename_env.name = TextInput::new("local", false);
+        assert_eq!(
+            rename_env.submit(),
+            Err("Un environnement de ce nom existe déjà".into())
+        );
+
+        // Nouveau nom valide
+        rename_env.name = TextInput::new("staging-v2", false);
+        assert_eq!(
+            rename_env.submit(),
+            Ok(Some(FileOp::RenameEnvironment {
+                old_name: "staging".into(),
+                new_name: "staging-v2".into(),
+            }))
+        );
+
+        // Clonage
+        let clone_env = FilePopup::clone_environment("staging", existing);
+        assert_eq!(clone_env.title(), " Cloner l'environnement — staging ");
+        assert_eq!(clone_env.verb(), "cloner");
+        assert_eq!(clone_env.name.text(), "staging copie");
+        assert_eq!(
+            clone_env.submit(),
+            Ok(Some(FileOp::CloneEnvironment {
+                source_name: "staging".into(),
+                target_name: "staging copie".into(),
             }))
         );
     }

@@ -1555,6 +1555,8 @@ pub enum PendingConfirm {
         label: String,
         requests: Option<usize>,
     },
+    /// Mettre un environnement à la corbeille (`d` dans le panneau Environnement).
+    TrashEnvironment { name: String },
 }
 
 /// État de saisie du chemin pour l'export du corps de réponse.
@@ -1770,6 +1772,9 @@ pub struct Model {
     /// (chemin relatif à la racine de la collection active), après une
     /// opération de fichier.
     pub select_after_reload: Option<PathBuf>,
+    /// Environnement à sélectionner au prochain chargement de la collection,
+    /// après une création, un renommage ou un clonage d'environnement.
+    pub select_environment_after_reload: Option<String>,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -2421,6 +2426,7 @@ impl Model {
             workspace: None,
             file_popup: None,
             select_after_reload: None,
+            select_environment_after_reload: None,
         }
     }
 

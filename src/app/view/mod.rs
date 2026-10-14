@@ -936,6 +936,9 @@ fn status_line(model: &Model) -> String {
                     "Mettre le dossier « {label} » ({count} requête{plural}) à la corbeille ? (y/n)"
                 )
             }
+            PendingConfirm::TrashEnvironment { name } => {
+                format!("Mettre l'environnement « {name} » à la corbeille ? (y/n)")
+            }
         };
     }
     if model.help.is_some() {

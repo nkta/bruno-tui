@@ -732,3 +732,211 @@ fn trash_reports_a_failed_or_refused_renumbering() {
         "Mis à la corbeille : list-posts.bru ; seq non renumérotés : raison"
     );
 }
+
+#[test]
+fn create_environment_creates_exact_content_and_refuses_collision_and_invalid_name() {
+    let (root, _) = workspace("create-env");
+    let outcome = files::execute(
+        &root,
+        &FileOp::CreateEnvironment {
+            name: "production".into(),
+        },
+        || unreachable!(),
+        "",
+    )
+    .expect("création");
+    assert_eq!(
+        outcome.select,
+        Some(PathBuf::from("environments/production.bru"))
+    );
+    assert_eq!(outcome.message, "Environnement créé : production.bru");
+
+    // Exactement 9 octets : vars {\n}\n
+    let content = fs::read(root.join("environments/production.bru")).expect("lecture");
+    assert_eq!(content, b"vars {\n}\n");
+
+    // Collision insensible à la casse et sans espaces
+    let err = files::execute(
+        &root,
+        &FileOp::CreateEnvironment {
+            name: "PRODUCTION".into(),
+        },
+        || unreachable!(),
+        "",
+    )
+    .expect_err("collision");
+    assert!(matches!(err, FileOpError::EnvironmentAlreadyExists));
+
+    let err2 = files::execute(
+        &root,
+        &FileOp::CreateEnvironment {
+            name: "Production".into(),
+        },
+        || unreachable!(),
+        "",
+    )
+    .expect_err("collision");
+    assert!(matches!(err2, FileOpError::EnvironmentAlreadyExists));
+
+    // Nom invalide
+    let err_name = files::execute(
+        &root,
+        &FileOp::CreateEnvironment {
+            name: "invalid/name".into(),
+        },
+        || unreachable!(),
+        "",
+    )
+    .expect_err("nom invalide");
+    assert!(matches!(err_name, FileOpError::Name(_)));
+}
+
+#[test]
+fn rename_environment_updates_extends_cascade_and_preserves_other_files() {
+    let (root, _) = workspace("rename-env");
+    // Créer base.bru
+    files::execute(
+        &root,
+        &FileOp::CreateEnvironment {
+            name: "base".into(),
+        },
+        || unreachable!(),
+        "",
+    )
+    .expect("créer base");
+
+    // Créer un enfant avec extends: base
+    let child_content =
+        "extends: base\n\nvars {\n  url: http://localhost:3000\n}\n\ncolor: #ff0000\n";
+    fs::write(root.join("environments/child.bru"), child_content).expect("write child");
+
+    // Créer un enfant avec extends: BASE (casse différente : ne doit pas être touché)
+    let different_case_content = "extends: BASE\n\nvars {\n}\n";
+    fs::write(
+        root.join("environments/diff-case.bru"),
+        different_case_content,
+    )
+    .expect("write diff");
+
+    // Créer un enfant avec extends list (ne doit pas être touché)
+    let list_content = "extends [\n  base\n]\n\nvars {\n}\n";
+    fs::write(root.join("environments/list.bru"), list_content).expect("write list");
+
+    // Créer un fichier malformé pour vérifier la résilience
+    fs::write(
+        root.join("environments/broken.bru"),
+        "ceci n'est pas du bru valide {{{",
+    )
+    .expect("write broken");
+
+    // Renommer base -> root-env
+    let outcome = files::execute(
+        &root,
+        &FileOp::RenameEnvironment {
+            old_name: "base".into(),
+            new_name: "root-env".into(),
+        },
+        || unreachable!(),
+        "",
+    )
+    .expect("renommer base");
+    assert_eq!(
+        outcome.select,
+        Some(PathBuf::from("environments/root-env.bru"))
+    );
+    assert_eq!(outcome.message, "Renommé : root-env.bru");
+    assert!(!root.join("environments/base.bru").exists());
+    assert!(root.join("environments/root-env.bru").exists());
+
+    // Vérifier la réécriture chirurgicale de child.bru : seul extends: root-env a changé
+    let expected_child =
+        "extends: root-env\n\nvars {\n  url: http://localhost:3000\n}\n\ncolor: #ff0000\n";
+    assert_eq!(
+        fs::read_to_string(root.join("environments/child.bru")).expect("read"),
+        expected_child
+    );
+
+    // Les autres fichiers n'ont pas bougé
+    assert_eq!(
+        fs::read_to_string(root.join("environments/diff-case.bru")).expect("read"),
+        different_case_content
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("environments/list.bru")).expect("read"),
+        list_content
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("environments/broken.bru")).expect("read"),
+        "ceci n'est pas du bru valide {{{"
+    );
+
+    // Collision au renommage
+    let err = files::execute(
+        &root,
+        &FileOp::RenameEnvironment {
+            old_name: "root-env".into(),
+            new_name: "child".into(),
+        },
+        || unreachable!(),
+        "",
+    )
+    .expect_err("collision");
+    assert!(matches!(err, FileOpError::EnvironmentAlreadyExists));
+}
+
+#[test]
+fn clone_and_trash_environment_behave_faithfully() {
+    let (root, data) = workspace("clone-trash-env");
+    let source_content = "extends: parent\n\nvars {\n  token: secret123\n}\n\nvars:secret [\n  token\n]\n\ncolor: #123456\n";
+    fs::create_dir_all(root.join("environments")).expect("create envs dir");
+    fs::write(root.join("environments/source.bru"), source_content).expect("write source");
+
+    // Clone à l'octet près
+    let outcome = files::execute(
+        &root,
+        &FileOp::CloneEnvironment {
+            source_name: "source".into(),
+            target_name: "source clone".into(),
+        },
+        || unreachable!(),
+        "",
+    )
+    .expect("clonage");
+    assert_eq!(
+        outcome.select,
+        Some(PathBuf::from("environments/source clone.bru"))
+    );
+    assert_eq!(outcome.message, "Clone créé : source clone.bru");
+    assert_eq!(
+        fs::read_to_string(root.join("environments/source clone.bru")).expect("read"),
+        source_content
+    );
+
+    // Collision au clonage
+    let err = files::execute(
+        &root,
+        &FileOp::CloneEnvironment {
+            source_name: "source".into(),
+            target_name: "source".into(),
+        },
+        || unreachable!(),
+        "",
+    )
+    .expect_err("collision");
+    assert!(matches!(err, FileOpError::EnvironmentAlreadyExists));
+
+    // Trash de source clone
+    let outcome = files::execute(
+        &root,
+        &FileOp::TrashEnvironment {
+            name: "source clone".into(),
+        },
+        || Ok(Trash::at(data.join("Trash"))),
+        "2026-10-14T00:00:00",
+    )
+    .expect("corbeille");
+    assert_eq!(outcome.select, None);
+    assert_eq!(outcome.message, "Mis à la corbeille : source clone.bru");
+    assert!(!root.join("environments/source clone.bru").exists());
+    assert!(root.join("environments/source.bru").exists());
+}
