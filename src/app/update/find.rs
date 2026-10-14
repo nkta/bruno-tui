@@ -6,7 +6,6 @@ use crate::app::tree_filter::matches_tree_filter;
 use crate::app::update::{
     clear_detail_view_state, clear_tree_filter, current_tree_filter_pattern, detail_max_scroll,
     refresh_rows, reset_filter_if_selection_changed, response_max_scroll, scroll_tree_into_view,
-    selection_locked,
 };
 use crate::app::view::detail::{plain_lines, response_plain_lines};
 use crate::collection::TreeNode;
@@ -119,10 +118,6 @@ fn search_tree(model: &mut Model, pattern: &str, forward: bool) -> bool {
         return false;
     };
     let address = all[found].address.clone();
-    if selection_locked(model) && current.as_ref() != Some(&address) {
-        model.last_status = Some(StatusMessage::EditLocked);
-        return true;
-    }
     let should_clear_filter = if let Some(p) = current_tree_filter_pattern(model) {
         model.loaded().is_some_and(|col| {
             !tree_node_at(&col.tree, &address).is_some_and(|node| matches_tree_filter(node, p))

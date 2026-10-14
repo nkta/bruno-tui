@@ -2919,6 +2919,44 @@ mod tests {
         assert_eq!(request.view, saved_view);
     }
 
+    /// Popup modal : aucune entrée qui changeait la sélection de l'arbre
+    /// (navigation, filtre, recherche, requête en échec suivante, clic dans
+    /// l'arbre) n'atteint les anciens garde-fous `EditLocked` ; la
+    /// sélection et la session restent en place.
+    #[test]
+    fn modal_popup_keeps_the_selection_without_edit_locked() {
+        let mut model = edit_session("scripted.bru", (100, 30));
+        move_to_field(&mut model, EditableField::Url);
+        update(&mut model, Message::Enter);
+        type_input(&mut model, "x");
+        update(&mut model, Message::ValidateInput);
+        assert!(selection_locked(&model));
+        let selected = model.tree.selected;
+        for message in [
+            Message::Down,
+            Message::End,
+            Message::OpenTreeFilter,
+            Message::StartSearch,
+            Message::NextMatch,
+            Message::NextFailedRequest,
+            Message::PreviousFailedRequest,
+            Message::ToggleDiagnostics,
+            Message::ToggleCampaign,
+            Message::ToggleGlobalSearch,
+        ] {
+            update(&mut model, message);
+            assert_eq!(model.tree.selected, selected);
+            assert!(model.editing.is_some());
+            assert!(model.tree_filter.is_none());
+            assert!(model.search.is_none());
+            assert!(model.global_search.is_none());
+            assert!(!matches!(
+                model.last_status,
+                Some(StatusMessage::EditLocked)
+            ));
+        }
+    }
+
     /// `Début`/`g` et `Fin`/`G` : première et dernière ligne du popup ;
     /// sans effet sur une liste ouverte.
     #[test]
