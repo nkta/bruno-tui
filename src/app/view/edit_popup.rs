@@ -359,13 +359,28 @@ impl Builder<'_> {
 
     /// Ligne « libellé ‹ valeur › » d'un choix, suivie de sa liste ouverte.
     fn choice(&mut self, field: EditableField, label: &str, width: usize, value: Span<'static>) {
-        let line = Line::from(vec![
+        self.choice_noted(field, label, width, value, None);
+    }
+
+    /// Comme [`Self::choice`], avec une note après la valeur.
+    fn choice_noted(
+        &mut self,
+        field: EditableField,
+        label: &str,
+        width: usize,
+        value: Span<'static>,
+        note: Option<&'static str>,
+    ) {
+        let mut spans = vec![
             Span::styled(pad(label, width), theme::LABEL),
             Span::raw("‹ "),
             value,
             Span::raw(" ›"),
-        ]);
-        self.field(field, vec![line]);
+        ];
+        if let Some(note) = note {
+            spans.push(Span::styled(note, theme::EMPTY_MESSAGE));
+        }
+        self.field(field, vec![Line::from(spans)]);
         self.picker_rows(field);
     }
 
@@ -404,11 +419,20 @@ impl Builder<'_> {
             .unwrap_or(0)
             .max(LABEL_WIDTH);
         let mode = field_value(self.session, &EditableField::AuthMode).to_owned();
-        self.choice(
+        // Sans mode dans le fichier, `none` est la valeur par défaut :
+        // le détail dit « non déclarée », le popup le rappelle.
+        let note = self
+            .session
+            .preview
+            .auth
+            .is_none()
+            .then_some(" (non déclarée)");
+        self.choice_noted(
             EditableField::AuthMode,
             "Mode",
             width,
             Span::styled(mode, theme::FOCUS),
+            note,
         );
         if params.is_empty() {
             self.push(Line::styled("aucun paramètre", theme::EMPTY_MESSAGE));
@@ -1289,5 +1313,31 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("… (+3 lignes)")));
         assert!(session(&model).dirty);
         assert!(edit_popup_title(session(&model)).contains("● non enregistré"));
+    }
+
+    /// Dossier sans bloc `auth` : `none` est rappelé comme « non
+    /// déclarée », comme dans le détail, sans rien écrire tant que
+    /// l'utilisateur ne change rien ; un mode choisi s'affiche normalement.
+    #[test]
+    fn undeclared_auth_mode_is_labelled_until_a_mode_is_chosen() {
+        let mut model = popup_on("grp/sub", Some(RequestTab::Auth), (100, 30));
+        let line = texts(&model)[line_of(&model, "Mode")].clone();
+        assert!(line.contains("‹ none › (non déclarée)"), "{line}");
+
+        // Liste ouverte puis validée sur `none` : aucune modification.
+        update(&mut model, Message::Enter);
+        update(&mut model, Message::Enter);
+        assert!(!session(&model).dirty);
+        assert!(session(&model).pending.is_empty());
+        assert!(texts(&model)[line_of(&model, "Mode")].contains("(non déclarée)"));
+
+        update(&mut model, Message::Right);
+        let line = texts(&model)[line_of(&model, "Mode")].clone();
+        assert!(line.contains("‹ inherit ›"), "{line}");
+        assert!(!line.contains("non déclarée"), "{line}");
+        update(&mut model, Message::Left);
+        let line = texts(&model)[line_of(&model, "Mode")].clone();
+        assert!(line.contains("‹ none ›"), "{line}");
+        assert!(!line.contains("non déclarée"), "{line}");
     }
 }

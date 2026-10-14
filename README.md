@@ -295,6 +295,7 @@ lettre tapée en saisie est du texte.
 ### Édition de l'authentification et protection des secrets
 
 - **Popup Auth** : ligne Mode ‹ bearer ›, puis les paramètres du mode. `←→` sur le mode le change et remplace aussitôt les lignes par celles du nouveau mode (clés vides) ; revenir au mode d'origine avant `Ctrl+S` retrouve les anciennes valeurs.
+- **Auth non déclarée** : sur une requête, un dossier ou la collection sans mode d'auth, le popup affiche ‹ none › (non déclarée), comme le détail ; rien n'est écrit tant qu'un autre mode n'est pas choisi.
 - **Modes proposés** : `none`, `inherit` (pas pour la collection), `basic`, `bearer`, `digest`, `ntlm`, `apikey`, `awsv4`, `wsse`. Pour `apikey`, le placement est un choix ‹ header › / ‹ queryparams ›. OAuth 1, OAuth 2 et Akamai : seules les valeurs des clés existantes se modifient.
 - **Masquage et `Ctrl+R`** : les clés sensibles (tokens, mots de passe, clés secrètes) sont masquées par des puces `•` lors de la saisie (les références `{{variable}}` restent visibles). `Ctrl+R` bascule l'affichage en clair ou masqué.
 - **Détection des secrets en clair** : valider une valeur littérale sur une clé sensible sans variable `{{...}}` ouvre la question dans le bas du popup Auth :
