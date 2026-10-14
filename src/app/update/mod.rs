@@ -274,10 +274,9 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
                     super::model::PendingConfirm::TrashItem { path, .. } => {
                         files::confirm_trash(model, path)
                     }
+                    // L'environnement actif ne passe à « Aucun » qu'au
+                    // rechargement, une fois le fichier vraiment parti.
                     super::model::PendingConfirm::TrashEnvironment { name } => {
-                        if model.current_environment.as_deref() == Some(&name) {
-                            model.current_environment = None;
-                        }
                         environment::confirm_trash_environment(model, name)
                     }
                 }

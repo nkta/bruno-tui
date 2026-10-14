@@ -1428,7 +1428,8 @@ mod tests {
                 ..
             }
         ));
-        // current_environment immédiatement repassé à None
-        assert_eq!(model.current_environment, None);
+        // L'environnement actif reste choisi jusqu'au rechargement : si la
+        // corbeille échoue, il n'est pas perdu.
+        assert_eq!(model.current_environment, Some("local-v2".into()));
     }
 }
