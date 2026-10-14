@@ -248,6 +248,9 @@ mod tests {
     fn watched_paths_filter_correctly() {
         // Déclencheurs valides
         assert!(is_watched_path(Path::new("bruno.json")));
+        // Fichier temporaire de l'écriture atomique de `bruno.json`
+        // (`docs/reglages-collection.md` § 8) : jamais surveillé.
+        assert!(!is_watched_path(Path::new(".bruno.json.tmp-4242-0")));
         assert!(is_watched_path(Path::new("sub/bruno.json")));
         assert!(is_watched_path(Path::new("collection.bru")));
         assert!(is_watched_path(Path::new("sub/collection.bru")));

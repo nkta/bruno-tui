@@ -148,7 +148,9 @@ d'édition non enregistré demande confirmation.
 | `F2` | renommer la ligne (Collection) |
 | `p` | cloner la ligne (Collection) |
 | `Maj+↑` / `Maj+↓` | monter / descendre la ligne parmi ses frères (Collection) |
+| `m` | déplacer la ligne vers un autre dossier (Collection ; dans le Détail, `m` ouvre le popup Requête) |
 | `d` | mettre la ligne à la corbeille, après confirmation (Collection) |
+| `B` | réglages de la collection (`bruno.json` : presets, proxy, certificats clients) ; voir « Réglages de la collection » |
 
 La racine de la collection est surveillée en continu : dès qu'un fichier
 `.bru` ou `.yml` (OpenCollection), `bruno.json`, `collection.bru`, `folder.bru` ou un fichier du dossier
@@ -235,9 +237,10 @@ fichiers `.bru` que pour les collections OpenCollection YAML.
 
 ## Fichiers et dossiers
 
-Depuis l'arbre (focus Collection), on crée, renomme, clone, réordonne et met
-à la corbeille les requêtes et les dossiers, comme dans Bruno 4.2.1
-(spécification : `docs/edition-phase3.md`).
+Depuis l'arbre (focus Collection), on crée, renomme, clone, réordonne,
+déplace et met à la corbeille les requêtes et les dossiers, comme dans
+Bruno 4.2.1 (spécifications : `docs/edition-phase3.md`,
+`docs/edition-phase4.md` pour le déplacement).
 
 | Touche | Effet |
 |---|---|
@@ -246,6 +249,7 @@ Depuis l'arbre (focus Collection), on crée, renomme, clone, réordonne et met
 | `F2` | renommer la ligne : nom affiché (`meta.name`) et, case cochée, le fichier ou le dossier |
 | `p` | cloner la ligne, pré-remplie avec « <nom> copie » ; un dossier est copié en entier |
 | `Maj+↑` / `Maj+↓` | monter / descendre la ligne parmi ses frères |
+| `m` | déplacer la ligne vers un autre dossier de la même collection (popup « Déplacer vers ») |
 | `d` | mettre à la corbeille, après confirmation `y`/`n` (le nombre de requêtes d'un dossier est indiqué) |
 
 Les popups suivent le modèle des popups d'édition :
@@ -293,6 +297,105 @@ Règles, reprises de Bruno :
   n'est réécrit.
 - Après l'opération, l'arbre est rechargé et la sélection suit l'élément
   créé, renommé, cloné ou déplacé (en workspace, dans la collection active).
+
+### Déplacer (`m`)
+
+`m` dans l'arbre ouvre « Déplacer vers » : la racine de la collection, puis
+tous ses dossiers en arbre. Dans le Détail, `m` reste le popup Requête.
+
+| Touche | Effet |
+|---|---|
+| saisie | filtrer les dossiers (sous-chaîne, sans casse, sur le nom ou le chemin) |
+| `↑`/`↓`, `Tab`/`Maj+Tab` | destination précédente, suivante |
+| `Entrée` | déplacer |
+| `Échap` | fermer sans rien déplacer |
+
+- Masqués : le dossier actuel de l'élément (Bruno ne fait rien), l'élément
+  lui-même et, pour un dossier, ses descendants.
+- Un seul `rename`, jamais de copie suivie d'une suppression. Contenu,
+  `folder.bru` et `seq` de l'élément restent identiques à l'octet (comme
+  Bruno : le `seq` n'est pas réécrit dans le dossier cible ; `Maj+↑`/`Maj+↓`
+  règle ensuite la position).
+- Nom déjà pris dans le dossier cible : suffixe ` 1`, ` 2`… comme Bruno
+  (`get-post 1.bru`, `Posts 1`). Le popup l'annonce (« Sera nommé : … ») et
+  le statut donne le nom final ; `meta.name` ne change pas. Rien n'est écrasé.
+- Les frères restants du dossier source sont renumérotés comme après une
+  corbeille (mêmes limites que ci-dessus, le statut le dit).
+- Refusé, avec un message dans le popup et sans rien déplacer : fichier
+  modifié sur disque depuis son chargement, autre disque, lien symbolique
+  dans l'élément ou dossier cible. Refusé avant l'ouverture : collection
+  YAML, exécution en cours, en-tête de la collection, fichier illisible.
+- Pas de déplacement entre collections d'un workspace : la collection
+  active seulement.
+
+## Réglages de la collection
+
+`B` (Collection) ouvre le popup **Réglages** de la collection active
+(spécification : `docs/reglages-collection.md`). Il édite trois clés de
+`bruno.json`, et rien d'autre : `presets`, `proxy` et `clientCertificates`.
+`Tab` / `Maj+Tab` passent d'une partie à l'autre ; rien n'est écrit avant
+`Ctrl+S`. Refusé : collection YAML (lecture seule), exécution en cours,
+`bruno.json` illisible, JSON invalide, racine qui n'est pas un objet, lien
+symbolique, indentation par tabulations ou fins de ligne mixtes.
+
+| Partie | Contenu |
+|---|---|
+| Presets | type de requête ‹ http › / ‹ graphql › / ‹ grpc › / ‹ ws ›, URL par défaut, environnement par défaut (« aucun » retire la clé) |
+| Proxy | mode ‹ inherit › / ‹ enabled › / ‹ disabled ›, protocole, hôte, port (1 à 65535 ou vide), case d'authentification, utilisateur, mot de passe, contournement. Les lignes sous le mode sont grisées hors du mode `enabled`, leurs valeurs sont conservées. |
+| Certificats | liste des certificats clients : `a` ajouter (domaine, type `cert` ou `pfx`, fichiers, passphrase), `d` supprimer après confirmation `y`/`n`, `Espace` activer / désactiver. Pas de modification d'une entrée, comme Bruno : supprimer, puis ajouter. |
+
+| Touche | Effet |
+|---|---|
+| `↑`/`↓`, `Tab`/`Maj+Tab` | ligne précédente, suivante ; partie suivante, précédente |
+| `←`/`→` | valeur précédente, suivante d'un choix |
+| `Entrée` | modifier la valeur (`Entrée` valide, `Échap` annule) ; sur un choix, valeur suivante |
+| `Espace` | cocher ou décocher ; activer ou désactiver un certificat |
+| `Ctrl+R` | afficher une variable `{{…}}` masquée (un secret littéral reste masqué) |
+| `Ctrl+S` | enregistrer, puis fermer |
+| `Échap` | annuler la saisie ; sinon fermer (confirmation `y`/`n` si modifié) |
+
+Règles :
+
+- **Écriture chirurgicale.** Seule la valeur de la clé modifiée change ;
+  une clé absente est ajoutée à la fin, comme Bruno. Le reste du fichier
+  (autres clés, `"ignore": ["node_modules", ".git"]` sur une ligne,
+  indentation, fins de ligne, retour final) est conservé à l'octet près. La
+  valeur écrite est celle de Bruno (`JSON.stringify(valeur, null, 2)`,
+  décalée au niveau de la clé), `proxy.disabled: false` et
+  `auth.disabled: false` n'étant jamais écrits. Le TUI ne bascule pas
+  `version` et n'applique pas les autres nettoyages de Bruno.
+- **Fraîcheur et atomicité.** `bruno.json` est lu à l'ouverture. Si le
+  fichier a changé sur le disque avant `Ctrl+S`, rien n'est écrit
+  (« bruno.json a changé sur le disque ») et le popup reste ouvert.
+  L'écriture passe par un fichier temporaire puis un renommage, droits
+  conservés. Une clé en double au premier niveau refuse l'écriture.
+  Le seul fichier écrit est `<racine>/bruno.json`.
+- **Secrets.** Un mot de passe de proxy ou une passphrase **littéral est
+  refusé** ; seuls une variable entièrement `{{…}}` (ex. `{{proxyPassword}}`,
+  `{{process.env.PROXY_PASSWORD}}`) et la valeur vide passent. Le statut
+  propose un nom de variable et rappelle le `.env` ou `--secret` ; la valeur
+  tapée est oubliée aussitôt (jamais écrite, jamais loggée, jamais dans un
+  message). Un secret déjà présent dans le fichier est affiché `********`
+  et recopié tel quel si la clé est réécrite.
+- **Ancien format de proxy** (`enabled: true | false | 'global'`) : affiché
+  converti (`transformProxyConfig` de Bruno) ; converti dans le fichier
+  seulement si le proxy est modifié, et le statut le dit.
+- **Certificats.** Un chemin absolu est écrit relatif à la collection
+  (`path.relative`) ; un chemin relatif est gardé. Un fichier introuvable
+  donne un avertissement dans le statut, jamais un refus ; le contenu des
+  fichiers n'est jamais lu. `enabled: true` est réécrit à chaque écriture.
+- **Presets dans le TUI.** `presets.requestType` et `presets.requestUrl`
+  préremplissent le popup `a` (nouvelle requête) ; `grpc` et `ws` ne sont
+  pas créables : repli sur `http`, avec une mention dans le statut.
+  `bru run` les ignore. `presets.defaultEnvironment` n'est pas
+  présélectionné par le TUI : `bru` l'applique seul tant qu'aucun
+  environnement n'est choisi.
+- Les valeurs `{{variable}}` ne sont jamais résolues par le TUI : `bru` s'en
+  charge à l'exécution.
+- Après l'écriture, la collection est rechargée.
+
+Les fichiers attendus des tests sont générés par le vrai code de Bruno
+(`scripts/gen-settings-fixtures.sh` → `tests/fixtures/collections/settings-cases/`).
 
 ## Édition par popups
 

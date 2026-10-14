@@ -1,6 +1,6 @@
 //! Opérations sur les fichiers et dossiers d'une collection `.bru`
 //! (`docs/edition-phase3.md`) : créer, renommer, cloner, réordonner,
-//! mettre à la corbeille.
+//! déplacer, mettre à la corbeille.
 //!
 //! Comportement repris de Bruno desktop 4.2.1 (relevé dans `app.asar`) :
 //! contenus écrits identiques à ceux de `jsonToBru` /
@@ -14,7 +14,10 @@
 //! - un fichier modifié sur disque depuis son chargement est refusé ;
 //! - rien n'est créé à moitié : fichier ou dossier construit sous un nom
 //!   temporaire, puis renommé ; un nom pris n'est jamais écrasé ;
-//! - aucune suppression définitive : la corbeille ([`super::trash`]) seule.
+//! - aucune suppression définitive : la corbeille ([`super::trash`]) seule ;
+//! - déplacer = un seul `rename` (jamais copie puis suppression), refusé
+//!   sur un autre disque ou si l'élément contient un lien symbolique
+//!   (`docs/edition-phase4.md` § 3).
 
 use std::fs;
 use std::io;
@@ -56,6 +59,16 @@ pub enum FileOpError {
     NotFound { path: PathBuf },
     #[error("lien symbolique dans `{}` : clonage refusé", .path.display())]
     Symlink { path: PathBuf },
+    #[error("lien symbolique dans `{}` : déplacement refusé", .path.display())]
+    SymlinkMove { path: PathBuf },
+    #[error("Impossible de déplacer : autre disque")]
+    CrossDevice,
+    #[error("Impossible de déplacer `{}` dans lui-même ou dans un de ses sous-dossiers", .path.display())]
+    IntoItself { path: PathBuf },
+    #[error("`{}` est déjà dans ce dossier", .path.display())]
+    SameDirectory { path: PathBuf },
+    #[error("`{}` ne peut pas être déplacé seul", .path.display())]
+    NotMovable { path: PathBuf },
     #[error("{0}")]
     UnsupportedUrl(#[from] UnsupportedUrl),
     /// Nom de paramètre que `jsonToBru` mettrait entre guillemets (`:`,
@@ -70,6 +83,8 @@ pub enum FileOpError {
     UnknownMethod,
     #[error("{0}")]
     Trash(#[from] TrashError),
+    #[error("bruno.json : {0}")]
+    Config(#[from] super::bruno_config::ConfigError),
     #[error("erreur d'entrée/sortie sur `{}` : {source}", .path.display())]
     Io {
         path: PathBuf,
@@ -84,6 +99,7 @@ impl From<WriteError> for FileOpError {
             WriteError::Stale { path } => Self::Stale { path },
             WriteError::Edit(error) => Self::Edit(error),
             WriteError::Io { path, source } => Self::Io { path, source },
+            WriteError::Config(error) => Self::Config(error),
         }
     }
 }
@@ -369,11 +385,16 @@ pub fn create_folder(
     }
 }
 
-/// Déplace `from` vers un nom libre dérivé de `base` dans le même
-/// répertoire, sans jamais écraser. Le nom actuel compte comme libre
-/// (`getUniqueRenamePath`).
-fn move_to_free_name(from: &Path, base: &str, extension: &str) -> Result<PathBuf, FileOpError> {
-    let dir = from.parent().unwrap_or_else(|| Path::new("."));
+/// Déplace `from` vers un nom libre dérivé de `base` dans le répertoire
+/// `dir` (le sien pour un renommage, un autre pour un déplacement), sans
+/// jamais écraser. Dans son propre répertoire, le nom actuel compte comme
+/// libre (`getUniqueRenamePath`).
+fn move_to_free_name(
+    from: &Path,
+    dir: &Path,
+    base: &str,
+    extension: &str,
+) -> Result<PathBuf, FileOpError> {
     let is_dir = fs::symlink_metadata(from).map_err(io_error(from))?.is_dir();
     let safe = truncate_base_for_suffix(base, extension);
     for n in 0..MAX_DUPLICATE_NAMES {
@@ -395,6 +416,9 @@ fn move_to_free_name(from: &Path, base: &str, extension: &str) -> Result<PathBuf
         match moved {
             Ok(()) => return Ok(candidate),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                return Err(FileOpError::CrossDevice);
+            }
             Err(error) => return Err(io_error(&candidate)(error)),
         }
     }
@@ -425,7 +449,10 @@ pub fn rename_request(
         write_atomic(&absolute, &stamp, rewritten.as_bytes())?;
     }
     let target = match filename {
-        Some(filename) => move_to_free_name(&absolute, filename, BRU_EXTENSION)?,
+        Some(filename) => {
+            let dir = absolute.parent().unwrap_or(&absolute);
+            move_to_free_name(&absolute, dir, filename, BRU_EXTENSION)?
+        }
         None => absolute,
     };
     Ok(relative_to(root, &target))
@@ -463,7 +490,10 @@ pub fn rename_folder(
         folder_meta_content(name, None),
     )?;
     let target = match dirname {
-        Some(dirname) => move_to_free_name(&absolute, dirname, "")?,
+        Some(dirname) => {
+            let dir = absolute.parent().unwrap_or(&absolute);
+            move_to_free_name(&absolute, dir, dirname, "")?
+        }
         None => absolute,
     };
     Ok(relative_to(root, &target))
@@ -904,6 +934,102 @@ pub fn trash_environment(
     Ok(trash.put(&absolute, deletion_date)?)
 }
 
+/// Refuse tout lien symbolique dans `path` (lui-même ou, pour un dossier,
+/// son contenu récursif).
+fn ensure_no_symlink(path: &Path) -> Result<(), FileOpError> {
+    let kind = fs::symlink_metadata(path)
+        .map_err(io_error(path))?
+        .file_type();
+    if kind.is_symlink() {
+        return Err(FileOpError::SymlinkMove {
+            path: path.to_path_buf(),
+        });
+    }
+    if kind.is_dir() {
+        for entry in fs::read_dir(path).map_err(io_error(path))? {
+            ensure_no_symlink(&entry.map_err(io_error(path))?.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// Déplace une requête ou un dossier (`path`) dans le dossier `target_dir`
+/// de la même collection (vide : la racine). Un seul `rename` : rien n'est
+/// copié ni supprimé ; le `seq` et le contenu ne changent pas. Nom pris :
+/// suffixe ` 1`, ` 2`… comme Bruno. `expected` donne le source chargé de
+/// chaque fichier de l'élément : un fichier modifié sur disque le refuse.
+/// Retourne le nouveau chemin relatif.
+pub fn move_item(
+    root: &Path,
+    path: &Path,
+    target_dir: &Path,
+    expected: &[(PathBuf, String)],
+) -> Result<PathBuf, FileOpError> {
+    if path.as_os_str().is_empty() {
+        return Err(FileOpError::Outside {
+            path: path.to_path_buf(),
+        });
+    }
+    let absolute = inside(root, path)?;
+    let target = inside(root, target_dir)?;
+    let metadata = fs::symlink_metadata(&absolute).map_err(|_| FileOpError::NotFound {
+        path: path.to_path_buf(),
+    })?;
+    let name = display_name(&absolute);
+    let (base, extension) = if metadata.is_dir() {
+        (name, "")
+    } else {
+        // `bruno.json`, `collection.bru`, `folder.bru` ne sont jamais
+        // déplacés seuls.
+        let reserved = name == FOLDER_FILE || name == "collection.bru";
+        match Path::new(&name).extension() {
+            Some(extension) if extension == BRU_EXTENSION && !reserved => {
+                (file_stem_of(&name), BRU_EXTENSION)
+            }
+            _ => {
+                return Err(FileOpError::NotMovable {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+    };
+    ensure_no_symlink(&absolute)?;
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(metadata) if metadata.is_symlink() => {
+            return Err(FileOpError::SymlinkMove { path: target });
+        }
+        _ => {
+            return Err(FileOpError::NotFound {
+                path: target_dir.to_path_buf(),
+            });
+        }
+    }
+    if target.starts_with(&absolute) {
+        return Err(FileOpError::IntoItself {
+            path: path.to_path_buf(),
+        });
+    }
+    if absolute.parent() == Some(target.as_path()) {
+        return Err(FileOpError::SameDirectory {
+            path: path.to_path_buf(),
+        });
+    }
+    for (file, source) in expected {
+        read_fresh(&inside(root, file)?, source)?;
+    }
+    let moved = move_to_free_name(&absolute, &target, &base, extension)?;
+    Ok(relative_to(root, &moved))
+}
+
+/// Nom de fichier sans son extension `.bru`.
+fn file_stem_of(name: &str) -> String {
+    Path::new(name)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Opération demandée par l'application, exécutée hors de la boucle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOp {
@@ -946,6 +1072,19 @@ pub enum FileOp {
         changes: Vec<SeqChange>,
         /// Élément déplacé, à garder sélectionné.
         moved: PathBuf,
+    },
+    /// Déplacer vers un autre dossier de la collection
+    /// (`docs/edition-phase4.md`).
+    Move {
+        path: PathBuf,
+        /// Dossier cible, relatif à la racine ; vide : la racine.
+        target_dir: PathBuf,
+        /// Source chargé de chaque fichier de l'élément (chemin relatif).
+        expected: Vec<(PathBuf, String)>,
+        /// Frères restants du dossier source, renumérotés comme après une
+        /// corbeille ; `Err` : renumérotation impossible (raison), le
+        /// déplacement se fait quand même.
+        renumber: Result<Vec<SeqChange>, String>,
     },
     Trash {
         path: PathBuf,
@@ -1040,6 +1179,33 @@ pub fn execute(
             resequence(root, changes).map(|()| FileOpOutcome {
                 select: Some(moved.clone()),
                 message: "Ordre enregistré".to_owned(),
+            })
+        }
+        FileOp::Move {
+            path,
+            target_dir,
+            expected,
+            renumber,
+        } => {
+            let moved = move_item(root, path, target_dir, expected)?;
+            let destination = if target_dir.as_os_str().is_empty() {
+                "la racine de la collection".to_owned()
+            } else {
+                target_dir.display().to_string()
+            };
+            let done = format!("Déplacé vers {destination} : {}", display_name(&moved));
+            // Le déplacement est fait : un échec de renumérotation n'annule
+            // rien, il est signalé.
+            let message = match renumber {
+                Ok(changes) => match resequence(root, changes) {
+                    Ok(()) => done,
+                    Err(error) => format!("{done} ; renumérotation des seq en échec : {error}"),
+                },
+                Err(reason) => format!("{done} ; seq non renumérotés : {reason}"),
+            };
+            Ok(FileOpOutcome {
+                select: Some(moved),
+                message,
             })
         }
         FileOp::Trash { path, renumber } => {

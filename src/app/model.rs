@@ -1590,6 +1590,14 @@ pub struct SavedEnvironment {
     pub ast: crate::collection::BruFile,
 }
 
+/// Résultat d'une écriture réussie de `bruno.json`.
+#[derive(Debug, Clone)]
+pub struct SavedSettings {
+    pub stamp: FileStamp,
+    /// Avertissements non bloquants (ex. fichier de certificat introuvable).
+    pub warnings: Vec<String>,
+}
+
 /// Valeur affichée d'un champ : tampon de saisie si la valeur de ce champ
 /// est en saisie, sinon valeur de l'aperçu.
 pub fn field_value<'a>(session: &'a EditSession, field: &EditableField) -> &'a str {
@@ -1768,6 +1776,10 @@ pub struct Model {
     pub workspace: Option<super::workspace::WorkspaceState>,
     /// Popup de fichier ouvert sur l'arbre (`a`, `A`, `F2`, `p`).
     pub file_popup: Option<super::file_popup::FilePopup>,
+    /// Popup « Réglages » de la collection (`bruno.json`).
+    pub settings: Option<super::settings::SettingsSession>,
+    /// Popup « Déplacer vers » ouvert sur l'arbre (`m`).
+    pub move_popup: Option<super::move_popup::MovePopup>,
     /// Élément à sélectionner au prochain chargement qui le contient
     /// (chemin relatif à la racine de la collection active), après une
     /// opération de fichier.
@@ -2425,6 +2437,8 @@ impl Model {
             editor: None,
             workspace: None,
             file_popup: None,
+            settings: None,
+            move_popup: None,
             select_after_reload: None,
             select_environment_after_reload: None,
         }
@@ -2516,6 +2530,12 @@ impl Model {
         }
         if self.file_popup.is_some() {
             return Some(TextCapture::FilePopup);
+        }
+        if self.move_popup.is_some() {
+            return Some(TextCapture::MovePopup);
+        }
+        if self.settings.is_some() {
+            return Some(TextCapture::Settings);
         }
         match &self.secrets.input {
             Some(SecretInput::Name(_)) => return Some(TextCapture::SecretName),

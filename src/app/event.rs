@@ -14,7 +14,7 @@ use ratatui::crossterm::event::{self, Event};
 use tokio::sync::mpsc;
 
 use super::clipboard::ClipboardError;
-use super::model::{EditableField, HistoryEntry, SavedEdit, SavedEnvironment};
+use super::model::{EditableField, HistoryEntry, SavedEdit, SavedEnvironment, SavedSettings};
 use crate::collection::{Collection, LoadError};
 use crate::runner;
 use crate::secrets::Resolved;
@@ -94,6 +94,12 @@ pub enum AppEvent {
     FileOpDone {
         root: PathBuf,
         result: Result<FileOpOutcome, FileOpError>,
+    },
+    /// Issue de l'écriture de `bruno.json` (`Command::SaveSettings`) dans
+    /// la collection de racine `root`.
+    SettingsSaved {
+        root: PathBuf,
+        result: Result<SavedSettings, WriteError>,
     },
 }
 

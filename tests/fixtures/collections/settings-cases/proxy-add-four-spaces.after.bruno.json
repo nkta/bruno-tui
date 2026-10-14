@@ -1,0 +1,18 @@
+{
+    "version": "1",
+    "name": "demo",
+    "ignore": ["node_modules", ".git"],
+    "proxy": {
+      "inherit": false,
+      "config": {
+        "protocol": "http",
+        "hostname": "{{proxy_host}}",
+        "port": 8080,
+        "auth": {
+          "username": "",
+          "password": ""
+        },
+        "bypassProxy": ""
+      }
+    }
+}

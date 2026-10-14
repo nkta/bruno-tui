@@ -171,6 +171,7 @@ fn stub_collection(root: PathBuf, paths: &[&str]) -> Collection {
         notices: Vec::new(),
         tree: paths.iter().map(|path| stub_request(path)).collect(),
         environments: Vec::new(),
+        presets: None,
     }
 }
 

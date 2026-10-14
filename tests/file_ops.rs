@@ -733,6 +733,331 @@ fn trash_reports_a_failed_or_refused_renumbering() {
     );
 }
 
+/// Source chargé d'un fichier de la fixture, pour la vérification de
+/// fraîcheur d'un déplacement.
+fn loaded(path: &str) -> (PathBuf, String) {
+    (PathBuf::from(path), original(path))
+}
+
+#[test]
+fn move_request_keeps_the_bytes_and_suffixes_collisions() {
+    let (root, _) = workspace("move-request");
+    let moved = files::move_item(
+        &root,
+        Path::new("get-post.bru"),
+        Path::new("Posts"),
+        &[loaded("get-post.bru")],
+    )
+    .expect("déplacement");
+    assert_eq!(moved, PathBuf::from("Posts/get-post.bru"));
+    assert!(!root.join("get-post.bru").exists());
+    // Octets identiques, `seq` compris (décision 3).
+    assert_eq!(read(&root, "Posts/get-post.bru"), original("get-post.bru"));
+
+    // Même nom dans la cible : suffixes ` 1`, ` 2`, comme Bruno.
+    for expected in ["Posts/get-post 1.bru", "Posts/get-post 2.bru"] {
+        fs::copy(root.join("Posts/get-post.bru"), root.join("list-posts.bru")).expect("copie");
+        fs::rename(root.join("list-posts.bru"), root.join("get-post.bru")).expect("nom");
+        let moved = files::move_item(&root, Path::new("get-post.bru"), Path::new("Posts"), &[])
+            .expect("collision");
+        assert_eq!(moved, PathBuf::from(expected));
+        assert_eq!(read(&root, expected), original("get-post.bru"));
+    }
+    assert_eq!(
+        names_in(&root.join("Posts")),
+        [
+            "create.bru",
+            "folder.bru",
+            "get-post 1.bru",
+            "get-post 2.bru",
+            "get-post.bru"
+        ]
+    );
+
+    // Vers la racine : un dossier vers sa racine.
+    let back = files::move_item(&root, Path::new("Posts/create.bru"), Path::new(""), &[])
+        .expect("vers la racine");
+    assert_eq!(back, PathBuf::from("create.bru"));
+    assert_eq!(read(&root, "create.bru"), original("Posts/create.bru"));
+    assert!(names_in(&root).iter().all(|name| !name.starts_with('.')));
+}
+
+#[test]
+fn move_folder_keeps_its_content_and_suffixes_the_directory() {
+    let (root, _) = workspace("move-folder");
+    fs::create_dir_all(root.join("Posts/Sub/Deep")).expect("sous-dossiers");
+    fs::write(root.join("Posts/Sub/y.bru"), original("get-post.bru")).expect("y");
+    fs::write(
+        root.join("Posts/Sub/Deep/z.bru"),
+        original("list-posts.bru"),
+    )
+    .expect("z");
+    fs::write(root.join("Posts/notes.txt"), "pas un .bru").expect("notes");
+
+    let moved = files::move_item(
+        &root,
+        Path::new("Posts"),
+        Path::new("NoMeta"),
+        &[loaded("Posts/folder.bru"), loaded("Posts/create.bru")],
+    )
+    .expect("déplacement");
+    assert_eq!(moved, PathBuf::from("NoMeta/Posts"));
+    assert!(!root.join("Posts").exists());
+    assert_eq!(
+        read(&root, "NoMeta/Posts/folder.bru"),
+        original("Posts/folder.bru")
+    );
+    assert_eq!(
+        read(&root, "NoMeta/Posts/create.bru"),
+        original("Posts/create.bru")
+    );
+    assert_eq!(
+        read(&root, "NoMeta/Posts/Sub/y.bru"),
+        original("get-post.bru")
+    );
+    assert_eq!(
+        read(&root, "NoMeta/Posts/Sub/Deep/z.bru"),
+        original("list-posts.bru")
+    );
+    assert_eq!(read(&root, "NoMeta/Posts/notes.txt"), "pas un .bru");
+
+    // Le suffixe va sur le nom du répertoire ; `meta.name` ne change pas.
+    fs::create_dir(root.join("Posts")).expect("nouveau Posts");
+    let again =
+        files::move_item(&root, Path::new("Posts"), Path::new("NoMeta"), &[]).expect("collision");
+    assert_eq!(again, PathBuf::from("NoMeta/Posts 1"));
+    fs::create_dir(root.join("Posts")).expect("encore");
+    let third =
+        files::move_item(&root, Path::new("Posts"), Path::new("NoMeta"), &[]).expect("collision");
+    assert_eq!(third, PathBuf::from("NoMeta/Posts 2"));
+    assert_eq!(
+        names_in(&root.join("NoMeta")),
+        ["Posts", "Posts 1", "Posts 2", "x.bru"]
+    );
+}
+
+#[test]
+fn move_refusals_leave_the_disk_untouched() {
+    let (root, _) = workspace("move-refusals");
+    fs::create_dir_all(root.join("Posts/Sub")).expect("sous-dossier");
+    let before = names_in(&root);
+    let to =
+        |path: &str, target: &str| files::move_item(&root, Path::new(path), Path::new(target), &[]);
+
+    // Dans lui-même ou un descendant.
+    assert!(matches!(
+        to("Posts", "Posts"),
+        Err(FileOpError::IntoItself { .. })
+    ));
+    assert!(matches!(
+        to("Posts", "Posts/Sub"),
+        Err(FileOpError::IntoItself { .. })
+    ));
+    // Même dossier (racine ou sous-dossier).
+    assert!(matches!(
+        to("get-post.bru", ""),
+        Err(FileOpError::SameDirectory { .. })
+    ));
+    assert!(matches!(
+        to("Posts/create.bru", "Posts"),
+        Err(FileOpError::SameDirectory { .. })
+    ));
+    assert!(matches!(
+        to("Posts", ""),
+        Err(FileOpError::SameDirectory { .. })
+    ));
+    // Fichiers qui ne se déplacent jamais seuls.
+    for path in ["bruno.json", "Posts/folder.bru"] {
+        assert!(
+            matches!(to(path, "NoMeta"), Err(FileOpError::NotMovable { .. })),
+            "{path}"
+        );
+    }
+    // La racine elle-même, sortie de la collection, cible absente.
+    assert!(matches!(to("", "NoMeta"), Err(FileOpError::Outside { .. })));
+    assert!(matches!(
+        to("../escape.bru", "NoMeta"),
+        Err(FileOpError::Outside { .. })
+    ));
+    assert!(matches!(
+        to("get-post.bru", "../elsewhere"),
+        Err(FileOpError::Outside { .. })
+    ));
+    assert!(matches!(
+        to("get-post.bru", "Absent"),
+        Err(FileOpError::NotFound { .. })
+    ));
+    assert!(matches!(
+        to("absent.bru", "Posts"),
+        Err(FileOpError::NotFound { .. })
+    ));
+    // Cible qui est un fichier.
+    assert!(matches!(
+        to("get-post.bru", "list-posts.bru"),
+        Err(FileOpError::NotFound { .. })
+    ));
+    assert_eq!(names_in(&root), before);
+    assert_eq!(read(&root, "get-post.bru"), original("get-post.bru"));
+}
+
+#[test]
+fn move_refuses_stale_files() {
+    let (root, _) = workspace("move-stale");
+    fs::write(root.join("Posts/create.bru"), "changé par un tiers").expect("tiers");
+    let result = files::move_item(
+        &root,
+        Path::new("Posts"),
+        Path::new("NoMeta"),
+        &[loaded("Posts/folder.bru"), loaded("Posts/create.bru")],
+    );
+    assert!(
+        matches!(result, Err(FileOpError::Stale { .. })),
+        "{result:?}"
+    );
+    assert!(root.join("Posts/folder.bru").exists());
+    assert!(!root.join("NoMeta/Posts").exists());
+    assert_eq!(read(&root, "Posts/create.bru"), "changé par un tiers");
+}
+
+#[cfg(unix)]
+#[test]
+fn move_refuses_symlinks_in_the_item_or_the_target() {
+    use std::os::unix::fs::symlink;
+    let (root, base) = {
+        let (root, data) = workspace("move-symlink");
+        let base = data.parent().expect("base").to_path_buf();
+        (root, base)
+    };
+    fs::write(base.join("outside.bru"), "meta {\n  name: Dehors\n}\n").expect("dehors");
+    // Lien dans un dossier à déplacer.
+    symlink(base.join("outside.bru"), root.join("Posts/lien.bru")).expect("lien");
+    assert!(matches!(
+        files::move_item(&root, Path::new("Posts"), Path::new("NoMeta"), &[]),
+        Err(FileOpError::SymlinkMove { .. })
+    ));
+    // Requête qui est un lien : vers l'extérieur, `inside` le refuse déjà ;
+    // vers l'intérieur, c'est le refus des liens.
+    symlink(base.join("outside.bru"), root.join("lien.bru")).expect("lien");
+    assert!(matches!(
+        files::move_item(&root, Path::new("lien.bru"), Path::new("NoMeta"), &[]),
+        Err(FileOpError::Outside { .. })
+    ));
+    symlink(root.join("get-post.bru"), root.join("lien-interne.bru")).expect("lien");
+    assert!(matches!(
+        files::move_item(
+            &root,
+            Path::new("lien-interne.bru"),
+            Path::new("NoMeta"),
+            &[]
+        ),
+        Err(FileOpError::SymlinkMove { .. })
+    ));
+    // Dossier cible qui est un lien, vers l'intérieur ou l'extérieur.
+    symlink(root.join("NoMeta"), root.join("LienInterne")).expect("lien");
+    symlink(&base, root.join("LienExterne")).expect("lien");
+    assert!(matches!(
+        files::move_item(
+            &root,
+            Path::new("get-post.bru"),
+            Path::new("LienInterne"),
+            &[]
+        ),
+        Err(FileOpError::SymlinkMove { .. })
+    ));
+    assert!(matches!(
+        files::move_item(
+            &root,
+            Path::new("get-post.bru"),
+            Path::new("LienExterne"),
+            &[]
+        ),
+        Err(FileOpError::Outside { .. })
+    ));
+    assert!(root.join("get-post.bru").exists());
+    assert!(root.join("Posts/create.bru").exists());
+    assert!(base.join("outside.bru").exists());
+    assert!(!root.join("NoMeta/get-post.bru").exists());
+}
+
+#[test]
+fn execute_move_reports_the_final_name_and_renumbers() {
+    let (root, data) = workspace("move-execute");
+    fs::write(root.join("Posts/get-post.bru"), "déjà là").expect("collision");
+    let renumber = |expected: &str| {
+        Ok(vec![SeqChange {
+            path: "list-posts.bru".into(),
+            is_folder: false,
+            seq: 1,
+            expected: Some(expected.into()),
+        }])
+    };
+    let op = |renumber| FileOp::Move {
+        path: "get-post.bru".into(),
+        target_dir: "Posts".into(),
+        expected: vec![loaded("get-post.bru")],
+        renumber,
+    };
+    let outcome = files::execute(
+        &root,
+        &op(renumber(&original("list-posts.bru"))),
+        || Ok(Trash::at(data.join("Trash"))),
+        "2026-10-14T00:00:00",
+    )
+    .expect("déplacement");
+    assert_eq!(outcome.select, Some(PathBuf::from("Posts/get-post 1.bru")));
+    assert_eq!(outcome.message, "Déplacé vers Posts : get-post 1.bru");
+    assert_eq!(
+        read(&root, "Posts/get-post 1.bru"),
+        original("get-post.bru")
+    );
+    assert_eq!(read(&root, "Posts/get-post.bru"), "déjà là");
+    // Le `seq` de la source est renuméroté (list-posts : 2 → 1).
+    assert!(read(&root, "list-posts.bru").contains("seq: 1"));
+
+    // Renumérotation en échec ou impossible : le déplacement est fait, le
+    // statut le dit.
+    let outcome = files::execute(
+        &root,
+        &FileOp::Move {
+            path: "list-posts.bru".into(),
+            target_dir: "NoMeta".into(),
+            expected: vec![],
+            renumber: renumber("source périmée"),
+        },
+        || Ok(Trash::at(data.join("Trash"))),
+        "2026-10-14T00:00:00",
+    )
+    .expect("déplacement fait");
+    assert!(root.join("NoMeta/list-posts.bru").exists());
+    assert!(
+        outcome
+            .message
+            .starts_with("Déplacé vers NoMeta : list-posts.bru ; renumérotation des seq en échec"),
+        "{}",
+        outcome.message
+    );
+    let outcome = files::execute(
+        &root,
+        &FileOp::Move {
+            path: "NoMeta/list-posts.bru".into(),
+            target_dir: "".into(),
+            expected: vec![],
+            renumber: Err("raison".into()),
+        },
+        || Ok(Trash::at(data.join("Trash"))),
+        "2026-10-14T00:00:00",
+    )
+    .expect("déplacement fait");
+    assert_eq!(
+        outcome.message,
+        "Déplacé vers la racine de la collection : list-posts.bru ; seq non renumérotés : raison"
+    );
+    assert!(
+        !data.join("Trash").exists(),
+        "rien n'est mis à la corbeille"
+    );
+}
+
 #[test]
 fn create_environment_creates_exact_content_and_refuses_collision_and_invalid_name() {
     let (root, _) = workspace("create-env");

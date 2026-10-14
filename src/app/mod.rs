@@ -19,7 +19,9 @@ pub mod history;
 pub mod message;
 pub mod model;
 pub mod mouse;
+pub mod move_popup;
 pub mod search;
+pub mod settings;
 pub mod text_input;
 pub mod tree_filter;
 pub mod update;
@@ -332,6 +334,23 @@ pub async fn run<B: Backend>(
                                 path,
                                 result,
                             });
+                        });
+                    }
+                    Command::SaveSettings {
+                        root,
+                        stamp,
+                        changes,
+                        added_paths,
+                    } => {
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result = update::settings::execute_save(
+                                &root,
+                                &stamp,
+                                &changes,
+                                &added_paths,
+                            );
+                            let _ = sender.blocking_send(AppEvent::SettingsSaved { root, result });
                         });
                     }
                     Command::SetMouseCapture(enabled) => {
