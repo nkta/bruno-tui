@@ -9,7 +9,7 @@ use crate::app::model::{
 };
 use crate::app::workspace::run_in_progress;
 use crate::collection::Collection;
-use crate::writer::files::FileOp;
+use crate::writer::files::{EnvironmentSource, FileOp};
 use crate::writer::{FileStamp, WriteError};
 
 /// Touche d'édition de tampon pendant une saisie du popup d'environnement
@@ -259,6 +259,25 @@ pub(crate) fn existing_environment_names(collection: &Collection) -> Vec<String>
         .collect()
 }
 
+/// Source chargé des environnements valides autres que `except`.
+fn sibling_sources(collection: &Collection, except: &str) -> Vec<EnvironmentSource> {
+    collection
+        .environments
+        .iter()
+        .flatten()
+        .filter(|env| env.name != except)
+        .filter_map(|env| Some((env.name.clone(), env.ast.as_ref()?.raw().to_owned())))
+        .collect()
+}
+
+/// Refus quand le source chargé de l'environnement manque : sans lui, on ne
+/// peut pas vérifier que le fichier n'a pas changé sur disque.
+fn refuse_unloaded(model: &mut Model, action: &str) {
+    model.last_status = Some(StatusMessage::FileOpRefused(format!(
+        "Source de l'environnement non chargé : {action} refusé"
+    )));
+}
+
 /// `a` dans le panneau Environnement : ouvre le popup « Nouvel environnement ».
 pub(crate) fn open_create_environment(model: &mut Model) {
     let Some(collection) = model.loaded() else {
@@ -313,7 +332,14 @@ pub(crate) fn open_rename_environment(model: &mut Model) {
         }
     };
     let existing = existing_environment_names(collection);
-    model.file_popup = Some(FilePopup::rename_environment(&env.name, existing));
+    let Some(source) = env.ast.as_ref().map(|ast| ast.raw().to_owned()) else {
+        refuse_unloaded(model, "renommage");
+        return;
+    };
+    let siblings = sibling_sources(collection, &env.name);
+    model.file_popup = Some(FilePopup::rename_environment(
+        &env.name, existing, source, siblings,
+    ));
 }
 
 /// `p` dans le panneau Environnement : ouvre le popup « Cloner l'environnement ».
@@ -351,7 +377,11 @@ pub(crate) fn open_clone_environment(model: &mut Model) {
         }
     };
     let existing = existing_environment_names(collection);
-    model.file_popup = Some(FilePopup::clone_environment(&env.name, existing));
+    let Some(source) = env.ast.as_ref().map(|ast| ast.raw().to_owned()) else {
+        refuse_unloaded(model, "clonage");
+        return;
+    };
+    model.file_popup = Some(FilePopup::clone_environment(&env.name, existing, source));
 }
 
 /// `d` dans le panneau Environnement : demande confirmation avant mise à la corbeille.
@@ -401,9 +431,16 @@ pub(crate) fn confirm_trash_environment(model: &mut Model, name: String) -> Comm
         return Command::None;
     }
     let root = collection.root.clone();
+    // Source chargé ; `None` pour un fichier invalide (rien à comparer).
+    let expected = collection
+        .environments
+        .iter()
+        .flatten()
+        .find(|env| env.name == name)
+        .and_then(|env| env.ast.as_ref().map(|ast| ast.raw().to_owned()));
     Command::FileOp {
         root,
-        op: FileOp::TrashEnvironment { name },
+        op: FileOp::TrashEnvironment { name, expected },
     }
 }
 
@@ -1344,6 +1381,8 @@ mod tests {
         model.file_popup = Some(crate::app::file_popup::FilePopup::rename_environment(
             "local",
             vec!["local".into()],
+            String::new(),
+            vec![],
         ));
         if let Some(popup) = &mut model.file_popup {
             popup.name = crate::app::text_input::TextInput::new("local-v2", false);

@@ -313,7 +313,9 @@ fn submit(model: &mut Model) -> Command {
         }
         Ok(Some(op)) => {
             model.file_popup = None;
-            if let FileOp::RenameEnvironment { old_name, new_name } = &op
+            if let FileOp::RenameEnvironment {
+                old_name, new_name, ..
+            } = &op
                 && model.current_environment.as_deref() == Some(old_name)
             {
                 model.current_environment = Some(new_name.clone());

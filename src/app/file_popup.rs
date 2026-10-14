@@ -11,9 +11,10 @@ use std::path::PathBuf;
 use super::message::InputKey;
 use super::text_input::TextInput;
 use crate::collection::ast::METHODS;
+use crate::writer::files::EnvironmentSource;
 use crate::writer::files::{FileOp, NewRequest, RequestKind, new_request_content};
 use crate::writer::names::{
-    MAX_NAME_LENGTH, sanitize_name, validate_name, validate_request_filename,
+    MAX_NAME_LENGTH, same_environment_name, sanitize_name, validate_name, validate_request_filename,
 };
 
 /// Opération du popup.
@@ -72,6 +73,8 @@ pub struct FilePopup {
     pub seq: u32,
     /// Noms d'environnements existants, pour la détection de collision dans les popups d'environnement.
     pub existing_environments: Vec<String>,
+    /// Source chargé des autres environnements valides (cascade `extends`).
+    pub sibling_sources: Vec<EnvironmentSource>,
     original_name: String,
     original_filename: String,
 }
@@ -97,6 +100,7 @@ impl FilePopup {
             expected: None,
             seq: 1,
             existing_environments: Vec::new(),
+            sibling_sources: Vec::new(),
             original_name: String::new(),
             original_filename: String::new(),
         }
@@ -191,24 +195,36 @@ impl FilePopup {
     }
 
     /// Renommer l'environnement `name`.
-    pub fn rename_environment(name: &str, existing_environments: Vec<String>) -> Self {
+    pub fn rename_environment(
+        name: &str,
+        existing_environments: Vec<String>,
+        source: String,
+        sibling_sources: Vec<EnvironmentSource>,
+    ) -> Self {
         Self {
             fields: vec![PopupField::Name],
             name: TextInput::new(name, false),
             original_name: name.to_owned(),
             existing_environments,
+            expected: Some(source),
+            sibling_sources,
             ..Self::base(FilePopupKind::RenameEnvironment, false, name.to_owned())
         }
     }
 
     /// Cloner l'environnement `name`, pré-rempli avec « <nom> copie ».
-    pub fn clone_environment(name: &str, existing_environments: Vec<String>) -> Self {
+    pub fn clone_environment(
+        name: &str,
+        existing_environments: Vec<String>,
+        source: String,
+    ) -> Self {
         let copy = format!("{name} copie");
         Self {
             fields: vec![PopupField::Name],
             name: TextInput::new(&copy, false),
             original_name: name.to_owned(),
             existing_environments,
+            expected: Some(source),
             ..Self::base(FilePopupKind::CloneEnvironment, false, name.to_owned())
         }
     }
@@ -404,7 +420,7 @@ impl FilePopup {
                     if self
                         .existing_environments
                         .iter()
-                        .any(|e| e.trim().eq_ignore_ascii_case(&name))
+                        .any(|e| same_environment_name(e, &name))
                     {
                         return Err("Un environnement de ce nom existe déjà".to_owned());
                     }
@@ -418,26 +434,29 @@ impl FilePopup {
                         .existing_environments
                         .iter()
                         .filter(|e| *e != &self.original_name)
-                        .any(|e| e.trim().eq_ignore_ascii_case(&name))
+                        .any(|e| same_environment_name(e, &name))
                     {
                         return Err("Un environnement de ce nom existe déjà".to_owned());
                     }
                     FileOp::RenameEnvironment {
                         old_name: self.original_name.clone(),
                         new_name: name,
+                        expected: self.expected.clone().unwrap_or_default(),
+                        siblings: self.sibling_sources.clone(),
                     }
                 }
                 FilePopupKind::CloneEnvironment => {
                     if self
                         .existing_environments
                         .iter()
-                        .any(|e| e.trim().eq_ignore_ascii_case(&name))
+                        .any(|e| same_environment_name(e, &name))
                     {
                         return Err("Un environnement de ce nom existe déjà".to_owned());
                     }
                     FileOp::CloneEnvironment {
                         source_name: self.context.clone(),
                         target_name: name,
+                        expected: self.expected.clone().unwrap_or_default(),
                     }
                 }
                 _ => unreachable!(),
@@ -707,7 +726,12 @@ mod tests {
         );
 
         // Renommage
-        let mut rename_env = FilePopup::rename_environment("staging", existing.clone());
+        let mut rename_env = FilePopup::rename_environment(
+            "staging",
+            existing.clone(),
+            "vars {\n}\n".into(),
+            vec![],
+        );
         assert_eq!(rename_env.title(), " Renommer l'environnement — staging ");
         assert_eq!(rename_env.verb(), "appliquer");
         // Inchangé -> Ok(None)
@@ -727,11 +751,13 @@ mod tests {
             Ok(Some(FileOp::RenameEnvironment {
                 old_name: "staging".into(),
                 new_name: "staging-v2".into(),
+                expected: "vars {\n}\n".into(),
+                siblings: vec![],
             }))
         );
 
         // Clonage
-        let clone_env = FilePopup::clone_environment("staging", existing);
+        let clone_env = FilePopup::clone_environment("staging", existing, "vars {\n}\n".into());
         assert_eq!(clone_env.title(), " Cloner l'environnement — staging ");
         assert_eq!(clone_env.verb(), "cloner");
         assert_eq!(clone_env.name.text(), "staging copie");
@@ -740,6 +766,7 @@ mod tests {
             Ok(Some(FileOp::CloneEnvironment {
                 source_name: "staging".into(),
                 target_name: "staging copie".into(),
+                expected: "vars {\n}\n".into(),
             }))
         );
     }
