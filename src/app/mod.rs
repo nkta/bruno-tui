@@ -19,6 +19,7 @@ pub mod history;
 pub mod message;
 pub mod model;
 pub mod mouse;
+pub mod move_popup;
 pub mod search;
 pub mod text_input;
 pub mod tree_filter;

@@ -135,6 +135,14 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "monter, descendre la ligne parmi ses frères (seq réécrits comme Bruno)",
             },
             HelpEntry {
+                key: "m",
+                effect: "déplacer la ligne vers un autre dossier de la collection (popup « Déplacer vers » ; dans le Détail, m ouvre le popup Requête)",
+            },
+            HelpEntry {
+                key: "Popup Déplacer : saisie, ↑↓, Entrée, Échap",
+                effect: "filtrer les dossiers ; choisir ; déplacer (un seul rename, seq inchangé, frères de la source renumérotés) ; fermer",
+            },
+            HelpEntry {
                 key: "d",
                 effect: "mettre à la corbeille, après confirmation (y/n), puis renuméroter les frères comme Bruno ; jamais d'effacement définitif",
             },
@@ -677,7 +685,7 @@ mod tests {
             .iter()
             .find(|s| s.title == "Collection")
             .expect("section");
-        for key in ["a", "A", "F2", "p", "Maj+↑, Maj+↓", "d"] {
+        for key in ["a", "A", "F2", "p", "Maj+↑, Maj+↓", "m", "d"] {
             assert!(section.entries.iter().any(|e| e.key == key), "{key}");
         }
     }

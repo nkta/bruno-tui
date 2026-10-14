@@ -11,6 +11,7 @@ pub mod file_popup;
 pub mod global_search;
 pub mod help;
 pub mod hit;
+pub mod move_popup;
 pub mod panels;
 pub mod status;
 pub mod theme;
@@ -437,6 +438,10 @@ pub fn view(model: &Model, frame: &mut Frame) {
 
     if let Some(popup) = &model.file_popup {
         file_popup::render_file_popup(popup, frame);
+    }
+
+    if let Some(popup) = &model.move_popup {
+        move_popup::render_move_popup(popup, frame);
     }
 
     frame.render_widget(
@@ -943,6 +948,9 @@ fn status_line(model: &Model) -> String {
     }
     if let Some(popup) = &model.file_popup {
         return file_popup::help_text(popup);
+    }
+    if model.move_popup.is_some() {
+        return move_popup::help_text();
     }
     if let Some(popup) = &model.runner_options_popup {
         if popup.editing_text {
