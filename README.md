@@ -101,8 +101,10 @@ retrouver ses propres collections à chaque lancement, créer un
 **Exécution**
 
 - `bru run` part de la racine de la collection active.
-- Avec un `workspace.yml`, l'option de campagne `--workspace-path` vaut
-  par défaut le dossier du workspace (modifiable avec `O`).
+- Avec un `workspace.yml`, `--workspace-path` vaut par défaut le dossier
+  du workspace (modifiable avec `O`). Il est transmis aux campagnes et à
+  l'exécution d'une requête seule (`r`), seule option du runner qui
+  s'applique à une requête seule.
 - Pendant une exécution, la sélection ne peut pas quitter la
   collection : un message le rappelle dans la barre d'état.
 
@@ -487,7 +489,8 @@ sélectionnée a un résultat avec un corps non vide.
     - **Environnement global** (`--global-env <nom>`) : exige que la collection soit dans
       un workspace Bruno, détecté automatiquement ou indiqué par le champ suivant.
     - **Workspace** (`--workspace-path`) : dossier contenant `workspace.yml`, vérifié à la
-      saisie et transmis en chemin absolu.
+      saisie et transmis en chemin absolu. En mode workspace, il s'applique aussi à une
+      requête seule.
   - `Entrée` édite ou bascule un champ, `r` (hors saisie) lance directement la
     campagne avec les options configurées, `Échap` enregistre et referme le popup.
 - **Recherche globale** (`Ctrl+K`) : popup centré de recherche en direct dans l'ensemble

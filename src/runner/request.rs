@@ -547,4 +547,30 @@ mod tests {
             ]
         );
     }
+
+    /// Requête seule avec `--workspace-path` : forme acceptée par
+    /// `bru run --help` 4.2.1 (`bru run request.bru --workspace-path …`).
+    #[test]
+    fn bru_args_for_a_single_request_with_a_workspace_path() {
+        let request = RunRequest {
+            targets: vec!["api/ping.bru".into()],
+            recursive: false,
+            options: RunnerOptions {
+                workspace_path: Some("/abs/ws".into()),
+                ..RunnerOptions::default()
+            },
+            ..RunRequest::collection("/c")
+        };
+        assert_eq!(
+            args(&request),
+            [
+                "run",
+                "api/ping.bru",
+                "--workspace-path",
+                "/abs/ws",
+                "--reporter-json",
+                "/dev/fd/3"
+            ]
+        );
+    }
 }

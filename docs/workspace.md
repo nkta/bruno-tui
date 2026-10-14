@@ -74,7 +74,8 @@ docs: ''
 
 - `bru run` part de la racine de la collection active, comme aujourd'hui.
 - Avec un `workspace.yml`, `--workspace-path` vaut par défaut le dossier
-  du workspace (modifiable dans les options du runner `O`).
+  du workspace (modifiable dans les options du runner `O`). Il est transmis
+  aux campagnes et à l'exécution d'une requête seule (`r`).
 - Pendant une exécution, la sélection ne peut pas quitter la collection :
   message dans le statut, comme pour une session d'édition.
 

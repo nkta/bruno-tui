@@ -606,7 +606,18 @@ fn start_run_in(
             .runner_options
             .build_runner_options(&model.reports_dir)
     } else {
-        (crate::runner::RunnerOptions::default(), Vec::new())
+        // Requête seule : pas d'options de campagne, sauf, en mode
+        // workspace, `--workspace-path` (dossier de `workspace.yml` par
+        // défaut, ou valeur des options `O`), accepté par `bru run` 4.2.1
+        // avec une requête seule.
+        let options = crate::runner::RunnerOptions {
+            workspace_path: model
+                .workspace
+                .as_ref()
+                .and(model.runner_options.workspace_path.clone()),
+            ..crate::runner::RunnerOptions::default()
+        };
+        (options, Vec::new())
     };
     // Une série cumule les rapports exportés de chacune de ses exécutions.
     if model
@@ -1340,6 +1351,51 @@ mod tests {
         }
         assert!(model.run.active.is_none());
         assert!(model.run.last_failure.is_none());
+    }
+
+    /// Requête seule : `--workspace-path` en mode workspace (valeur par
+    /// défaut, puis celle des options `O`), jamais hors workspace.
+    #[test]
+    fn single_request_passes_the_workspace_path_only_in_a_workspace() {
+        let args = |command: Command| match command {
+            Command::StartRun { request, .. } => {
+                assert!(!request.recursive);
+                request
+                    .bru_args()
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            }
+            other => panic!("StartRun attendu, obtenu {other:?}"),
+        };
+
+        let mut model = crate::app::test_support::workspace_model();
+        model.runner_options.workspace_path = Some("/ws/demo".into());
+        select(&mut model, "ok.bru");
+        model.selected_collection = false;
+        let run = args(update(&mut model, Message::RunSelected));
+        let at = run
+            .iter()
+            .position(|a| a == "--workspace-path")
+            .expect("option");
+        assert_eq!(run[at + 1], "/ws/demo");
+
+        // Valeur réglée dans les options `O`.
+        model.runner_options.workspace_path = Some("/autre/ws".into());
+        model.run.active = None;
+        let run = args(update(&mut model, Message::RunSelected));
+        let at = run
+            .iter()
+            .position(|a| a == "--workspace-path")
+            .expect("option");
+        assert_eq!(run[at + 1], "/autre/ws");
+
+        // Hors workspace : jamais, même réglée dans les options.
+        let mut model = loaded_model((100, 30));
+        model.runner_options.workspace_path = Some("/ws/demo".into());
+        select(&mut model, "simple-get.bru");
+        let run = args(update(&mut model, Message::RunSelected));
+        assert!(!run.iter().any(|a| a == "--workspace-path"), "{run:?}");
     }
 
     #[test]

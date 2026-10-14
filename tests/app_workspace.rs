@@ -161,9 +161,14 @@ async fn each_collection_runs_from_its_own_root() {
     let (cwd, args) = lines[0].split_once('|').expect("ligne");
     assert_eq!(Path::new(cwd), multi_env, "{lines:?}");
     assert!(args.contains("data.bru"), "{args}");
-    // La requête est unitaire : les options de campagne (dont
-    // --workspace-path) ne s'y appliquent pas.
-    assert!(!args.contains("--workspace-path"), "{args}");
+    // Requête seule en mode workspace : seul --workspace-path, dossier du
+    // workspace, s'ajoute ; les autres options de campagne ne s'y
+    // appliquent pas.
+    assert!(
+        args.contains(&format!("--workspace-path {}", ws_dir.display())),
+        "{args}"
+    );
+    assert!(!args.contains("--reporter-skip-all-headers"), "{args}");
 
     // Fin de l'exécution, puis retour à la première collection.
     tokio::time::sleep(Duration::from_millis(500)).await;
