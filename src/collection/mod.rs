@@ -23,7 +23,7 @@ pub use ast::{Block, BlockBody, BruFile, Declaration, Entry, Node, NodeKind};
 pub use auth::{
     MASKED_SECRET, is_sensitive_auth_key, is_variable_reference, mask_auth_params, mask_auth_value,
 };
-pub use config::BrunoConfig;
+pub use config::{BrunoConfig, Presets};
 pub use error::{LoadError, ParseError};
 pub use loader::{AutoLoader, BruLoader, CollectionLoader, OpenCollectionLoader};
 pub use tree::{

@@ -100,6 +100,26 @@ impl Json {
         }
     }
 
+    /// Objet enfant `key`, créé (ou remplacé s'il n'est pas un objet) à la
+    /// place ou à la fin. Hors objet, rend `self`.
+    pub fn object_entry(&mut self, key: &str) -> &mut Json {
+        let Json::Obj(members) = self else {
+            return self;
+        };
+        let index = match members.iter().position(|(k, _)| k == key) {
+            Some(i) => i,
+            None => {
+                members.push((key.to_owned(), Json::Obj(Vec::new())));
+                members.len() - 1
+            }
+        };
+        let slot = &mut members[index].1;
+        if !matches!(slot, Json::Obj(_)) {
+            *slot = Json::Obj(Vec::new());
+        }
+        slot
+    }
+
     /// Retire `key` (`delete objet.clé`).
     pub fn remove(&mut self, key: &str) {
         if let Json::Obj(members) = self {

@@ -68,6 +68,9 @@ pub struct Collection {
     pub environments: Environments,
     /// Avis non bloquants (champs ignorés), dans l'ordre du parcours.
     pub notices: Vec<LoadNotice>,
+    /// `presets.requestType` / `presets.requestUrl` de `bruno.json`.
+    /// Boîté pour garder `CollectionState` compact ; `None` sans préréglage.
+    pub presets: Option<Box<super::config::Presets>>,
 }
 
 /// Environnements d'une collection ; un fichier invalide donne une erreur

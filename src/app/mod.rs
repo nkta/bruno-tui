@@ -20,6 +20,7 @@ pub mod message;
 pub mod model;
 pub mod mouse;
 pub mod search;
+pub mod settings;
 pub mod text_input;
 pub mod tree_filter;
 pub mod update;
@@ -332,6 +333,29 @@ pub async fn run<B: Backend>(
                                 path,
                                 result,
                             });
+                        });
+                    }
+                    Command::SaveSettings {
+                        root,
+                        stamp,
+                        changes,
+                        added_paths,
+                    } => {
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result =
+                                writer::bruno_config::write_bruno_config(&root, &stamp, &changes)
+                                    .map(|stamp| {
+                                        // Un chemin de certificat introuvable n'est
+                                        // qu'un avertissement : `bru` l'affichera.
+                                        let warnings = added_paths
+                                            .iter()
+                                            .filter(|path| !root.join(path).exists())
+                                            .map(|path| format!("fichier introuvable : {path}"))
+                                            .collect();
+                                        model::SavedSettings { stamp, warnings }
+                                    });
+                            let _ = sender.blocking_send(AppEvent::SettingsSaved { root, result });
                         });
                     }
                     Command::SetMouseCapture(enabled) => {

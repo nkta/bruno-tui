@@ -20,6 +20,36 @@ pub struct BrunoConfig {
     /// Entrées relatives à la racine à ne pas parcourir.
     #[serde(default)]
     pub ignore: Vec<String>,
+    /// Bloc `presets`, lu sans rien exiger : un type inattendu ne doit pas
+    /// empêcher de charger la collection.
+    #[serde(default)]
+    pub presets: serde_json::Value,
+}
+
+/// Préréglages de nouvelle requête de `bruno.json` (`presets.requestType`
+/// et `presets.requestUrl`), que le TUI applique au popup `a`
+/// (`docs/reglages-collection.md`, D6). Jamais résolus : `{{variable}}`
+/// reste une chaîne.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Presets {
+    pub request_type: Option<String>,
+    pub request_url: Option<String>,
+}
+
+impl BrunoConfig {
+    /// Préréglages lisibles ; toute valeur qui n'est pas une chaîne est ignorée.
+    pub fn request_presets(&self) -> Presets {
+        let text = |key: &str| {
+            self.presets
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        Presets {
+            request_type: text("requestType"),
+            request_url: text("requestUrl"),
+        }
+    }
 }
 
 /// Remonte depuis `path` (fichier ou répertoire) jusqu'au premier
@@ -94,6 +124,27 @@ mod tests {
         .expect("config valide");
         assert_eq!(config.name.as_deref(), Some("c"));
         assert_eq!(config.ignore, ["tmp"]);
+    }
+
+    #[test]
+    fn presets_are_read_leniently() {
+        let config: BrunoConfig = serde_json::from_str(
+            r#"{"presets":{"requestType":"graphql","requestUrl":"{{base}}"}}"#,
+        )
+        .expect("config valide");
+        assert_eq!(
+            config.request_presets(),
+            Presets {
+                request_type: Some("graphql".into()),
+                request_url: Some("{{base}}".into()),
+            }
+        );
+        let odd: BrunoConfig =
+            serde_json::from_str(r#"{"presets":{"requestType":3,"requestUrl":null}}"#)
+                .expect("config valide");
+        assert_eq!(odd.request_presets(), Presets::default());
+        let wrong: BrunoConfig = serde_json::from_str(r#"{"presets":"x"}"#).expect("valide");
+        assert_eq!(wrong.request_presets(), Presets::default());
     }
 
     #[test]
