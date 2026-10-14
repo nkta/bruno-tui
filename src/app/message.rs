@@ -52,6 +52,9 @@ pub enum TextCapture {
     ExportPath,
     /// Avertissement de secret en clair dans le fichier .bru.
     PlaintextSecretPrompt,
+    /// Popup de fichier (nouvelle requête, nouveau dossier, renommer,
+    /// cloner) : la frappe va au champ sous le curseur.
+    FilePopup,
 }
 
 /// Touche d'édition du tampon pendant la saisie d'un champ
@@ -375,6 +378,32 @@ pub enum Message {
     CancelPlaintextSecretPrompt,
     /// Afficher ou masquer le secret sensible (Ctrl+R pendant la saisie).
     ToggleRevealSecret,
+    /// `A` dans l'arbre : nouveau dossier.
+    CreateFolder,
+    /// `F2` dans l'arbre : renommer la ligne sélectionnée.
+    RenameItem,
+    /// `p` dans l'arbre : cloner la ligne sélectionnée.
+    CloneItem,
+    /// `Maj+↑` dans l'arbre : monter la ligne parmi ses frères.
+    MoveItemUp,
+    /// `Maj+↓` dans l'arbre : descendre la ligne parmi ses frères.
+    MoveItemDown,
+    /// Touche d'édition dans un popup de fichier.
+    FilePopupKey(InputKey),
+    /// `↓` ou `Tab` dans un popup de fichier : ligne suivante.
+    FilePopupNext,
+    /// `↑` ou `Maj+Tab` dans un popup de fichier : ligne précédente.
+    FilePopupPrevious,
+    /// `Entrée` dans un popup de fichier : ligne suivante, ou créer /
+    /// appliquer sur la dernière ligne.
+    FilePopupEnter,
+    /// `Échap` dans un popup de fichier : fermer sans rien écrire.
+    FilePopupCancel,
+    /// Renvoyé par la boucle après `Command::FileOp`.
+    FileOpDone {
+        root: PathBuf,
+        result: Result<crate::writer::files::FileOpOutcome, crate::writer::files::FileOpError>,
+    },
 }
 
 /// Traduit une entrée brute en message ; `None` si elle est ignorée.
@@ -421,6 +450,7 @@ pub fn to_message(event: AppEvent, capture: Option<TextCapture>) -> Option<Messa
             entries,
             notice,
         }),
+        AppEvent::FileOpDone { root, result } => Some(Message::FileOpDone { root, result }),
     }
 }
 
@@ -464,6 +494,13 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
     }
     if key.modifiers.contains(KeyModifiers::ALT) {
         return None;
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        match key.code {
+            KeyCode::Up => return Some(Message::MoveItemUp),
+            KeyCode::Down => return Some(Message::MoveItemDown),
+            _ => {}
+        }
     }
     let message = match key.code {
         KeyCode::Up | KeyCode::Char('k') => Message::Up,
@@ -509,6 +546,9 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('R') => Message::RunFailedRequests,
         KeyCode::Char('t') => Message::ToggleCampaignView,
         KeyCode::Char('x') => Message::ExportResponseBody,
+        KeyCode::Char('A') => Message::CreateFolder,
+        KeyCode::F(2) => Message::RenameItem,
+        KeyCode::Char('p') => Message::CloneItem,
         _ => return None,
     };
     Some(message)
@@ -527,7 +567,29 @@ fn capture_message(key: KeyEvent, capture: TextCapture) -> Option<Message> {
         TextCapture::GlobalSearch => global_search_capture_message(key),
         TextCapture::ExportPath => export_path_capture_message(key),
         TextCapture::PlaintextSecretPrompt => plaintext_secret_prompt_capture_message(key),
+        TextCapture::FilePopup => file_popup_capture_message(key),
     }
+}
+
+/// Capture pendant un popup de fichier : la frappe va au champ sous le
+/// curseur, `↑↓`/`Tab` changent de ligne, `Entrée` avance ou valide,
+/// `Échap` ferme. `Ctrl+S` (valider) est traité en amont.
+fn file_popup_capture_message(key: KeyEvent) -> Option<Message> {
+    let input = match key.code {
+        KeyCode::Up | KeyCode::BackTab => return Some(Message::FilePopupPrevious),
+        KeyCode::Down | KeyCode::Tab => return Some(Message::FilePopupNext),
+        KeyCode::Enter => return Some(Message::FilePopupEnter),
+        KeyCode::Esc => return Some(Message::FilePopupCancel),
+        KeyCode::Char(c) => InputKey::Char(c),
+        KeyCode::Backspace => InputKey::Backspace,
+        KeyCode::Delete => InputKey::Delete,
+        KeyCode::Left => InputKey::Left,
+        KeyCode::Right => InputKey::Right,
+        KeyCode::Home => InputKey::Home,
+        KeyCode::End => InputKey::End,
+        _ => return None,
+    };
+    Some(Message::FilePopupKey(input))
 }
 
 /// Capture pendant le popup d'avertissement de secret en clair :
@@ -1214,6 +1276,58 @@ mod tests {
                 TextCapture::PlaintextSecretPrompt
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn file_operation_keys() {
+        let none = KeyModifiers::NONE;
+        let shift = KeyModifiers::SHIFT;
+        for (code, modifiers, expected) in [
+            (KeyCode::Char('a'), none, "Add"),
+            (KeyCode::Char('A'), shift, "CreateFolder"),
+            (KeyCode::F(2), none, "RenameItem"),
+            (KeyCode::Char('p'), none, "CloneItem"),
+            (KeyCode::Up, shift, "MoveItemUp"),
+            (KeyCode::Down, shift, "MoveItemDown"),
+            (KeyCode::Char('d'), none, "Delete"),
+            (KeyCode::Up, none, "Up"),
+            (KeyCode::Down, none, "Down"),
+        ] {
+            assert_eq!(
+                name(key(code, modifiers)).as_deref(),
+                Some(expected),
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_popup_capture() {
+        let none = KeyModifiers::NONE;
+        let capture = TextCapture::FilePopup;
+        for (code, expected) in [
+            (KeyCode::Char('q'), "FilePopupKey"),
+            (KeyCode::Char('?'), "FilePopupKey"),
+            (KeyCode::Char(' '), "FilePopupKey"),
+            (KeyCode::Backspace, "FilePopupKey"),
+            (KeyCode::Left, "FilePopupKey"),
+            (KeyCode::Up, "FilePopupPrevious"),
+            (KeyCode::BackTab, "FilePopupPrevious"),
+            (KeyCode::Down, "FilePopupNext"),
+            (KeyCode::Tab, "FilePopupNext"),
+            (KeyCode::Enter, "FilePopupEnter"),
+            (KeyCode::Esc, "FilePopupCancel"),
+        ] {
+            assert_eq!(
+                name_capturing(key(code, none), capture).as_deref(),
+                Some(expected),
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            name_capturing(key(KeyCode::Char('s'), KeyModifiers::CONTROL), capture).as_deref(),
+            Some("SaveEdit")
         );
     }
 }

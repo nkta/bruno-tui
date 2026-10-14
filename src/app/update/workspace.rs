@@ -121,6 +121,7 @@ fn keep_selection(model: &mut Model, f: impl FnOnce(&mut Model) -> Command) -> C
         model.tree.selected = index;
     }
     scroll_tree_into_view(model);
+    super::files::apply_pending_selection(model);
     command
 }
 
