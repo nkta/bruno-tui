@@ -115,6 +115,46 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "filtrer l'arbre",
             },
             HelpEntry {
+                key: "a",
+                effect: "nouvelle requête dans le dossier sélectionné (ou celui de la requête) ; sur l'en-tête : à la racine",
+            },
+            HelpEntry {
+                key: "A",
+                effect: "nouveau dossier, au même endroit",
+            },
+            HelpEntry {
+                key: "F2",
+                effect: "renommer la ligne (nom affiché ; fichier ou dossier si la case est cochée)",
+            },
+            HelpEntry {
+                key: "p",
+                effect: "cloner la ligne (« <nom> copie » ; un dossier est copié en entier)",
+            },
+            HelpEntry {
+                key: "Maj+↑, Maj+↓",
+                effect: "monter, descendre la ligne parmi ses frères (seq réécrits comme Bruno)",
+            },
+            HelpEntry {
+                key: "d",
+                effect: "mettre à la corbeille, après confirmation (y/n) ; jamais d'effacement définitif",
+            },
+            HelpEntry {
+                key: "Popup fichier : ↑↓, Tab",
+                effect: "ligne précédente, suivante (la frappe va au champ sous le curseur)",
+            },
+            HelpEntry {
+                key: "Popup fichier : ←→, Espace",
+                effect: "changer le type, la méthode ; cocher ou décocher la case",
+            },
+            HelpEntry {
+                key: "Popup fichier : Entrée",
+                effect: "ligne suivante ; sur la dernière ligne, créer ou appliquer",
+            },
+            HelpEntry {
+                key: "Popup fichier : Ctrl+S, Échap",
+                effect: "créer ou appliquer ; fermer sans rien écrire",
+            },
+            HelpEntry {
                 key: "/",
                 effect: "chercher dans la collection",
             },
@@ -627,5 +667,18 @@ mod tests {
             .find(|s| s.title == "Popups d'édition")
             .expect("section");
         assert!(section.entries.iter().any(|e| e.key == "Début/g, Fin/G"));
+    }
+
+    /// Les opérations de fichiers de l'arbre sont documentées
+    /// (`docs/edition-phase3.md` § 3).
+    #[test]
+    fn collection_documents_file_operations() {
+        let section = HELP_SECTIONS
+            .iter()
+            .find(|s| s.title == "Collection")
+            .expect("section");
+        for key in ["a", "A", "F2", "p", "Maj+↑, Maj+↓", "d"] {
+            assert!(section.entries.iter().any(|e| e.key == key), "{key}");
+        }
     }
 }

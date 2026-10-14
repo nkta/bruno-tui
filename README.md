@@ -144,6 +144,11 @@ d'édition non enregistré demande confirmation.
 | `t` | panneau Campagne : liste / tableau comparatif multi-environnements |
 | `]` / `[` | requête en échec suivante / précédente (Collection, Détail, Réponse) |
 | `z` | basculer le mode plein écran du panneau focalisé (Collection, Détail, Réponse) |
+| `a` / `A` | nouvelle requête / nouveau dossier (Collection ; voir « Fichiers et dossiers ») |
+| `F2` | renommer la ligne (Collection) |
+| `p` | cloner la ligne (Collection) |
+| `Maj+↑` / `Maj+↓` | monter / descendre la ligne parmi ses frères (Collection) |
+| `d` | mettre la ligne à la corbeille, après confirmation (Collection) |
 
 La racine de la collection est surveillée en continu : dès qu'un fichier
 `.bru` ou `.yml` (OpenCollection), `bruno.json`, `collection.bru`, `folder.bru` ou un fichier du dossier
@@ -227,6 +232,56 @@ fichiers `.bru` que pour les collections OpenCollection YAML.
   Requête, ni Params, ni Corps. Les collections OpenCollection (YAML), gRPC et WebSocket
   restent strictement en lecture seule.
 
+
+## Fichiers et dossiers
+
+Depuis l'arbre (focus Collection), on crée, renomme, clone, réordonne et met
+à la corbeille les requêtes et les dossiers, comme dans Bruno 4.2.1
+(spécification : `docs/edition-phase3.md`).
+
+| Touche | Effet |
+|---|---|
+| `a` | nouvelle requête, dans le dossier sélectionné (ou celui de la requête) ; sur l'en-tête de la collection, à la racine |
+| `A` | nouveau dossier, au même endroit |
+| `F2` | renommer la ligne : nom affiché (`meta.name`) et, case cochée, le fichier ou le dossier |
+| `p` | cloner la ligne, pré-remplie avec « <nom> copie » ; un dossier est copié en entier |
+| `Maj+↑` / `Maj+↓` | monter / descendre la ligne parmi ses frères |
+| `d` | mettre à la corbeille, après confirmation `y`/`n` (le nombre de requêtes d'un dossier est indiqué) |
+
+Les popups suivent le modèle des popups d'édition :
+
+| Touche | Effet |
+|---|---|
+| `↑`/`↓`, `Tab`/`Maj+Tab` | ligne précédente, suivante ; la frappe va au champ sous le curseur |
+| `←`/`→`, `Espace` | changer le type (‹ http › / ‹ graphql ›), la méthode ; cocher ou décocher la case |
+| `Entrée` | ligne suivante ; sur la dernière ligne, créer ou appliquer |
+| `Ctrl+S` | créer ou appliquer |
+| `Échap` | fermer sans rien écrire |
+
+Règles, reprises de Bruno :
+
+- Le nom de fichier suit le nom (`sanitizeName`) tant qu'il n'a pas été
+  saisi. Un nom refusé par `validateName` (caractères `< > : " / \ | ? *`,
+  espace ou `-` en tête, espace ou `.` en fin, noms réservés Windows) est
+  signalé dans le popup avec le message de Bruno ; `collection` et `folder`
+  sont réservés pour une requête.
+- Collision : suffixe ` 1`, ` 2`… ; le statut donne le nom final.
+- Nouvelle requête : contenu identique à celui que Bruno écrit
+  (`jsonToBru`), `seq` = nombre d'éléments du dossier + 1. Une URL avec
+  paramètres (`?…`, `:id`) est refusée à la création : les ajouter ensuite
+  avec le popup Requête (`m`).
+- Renommer, cloner, réordonner : seules les lignes `name:` et `seq:` de
+  `meta` changent, le reste du fichier est conservé à l'octet près. Un
+  dossier sans `folder.bru` en reçoit un, avec le contenu que Bruno écrit.
+- Corbeille freedesktop (`$XDG_DATA_HOME/Trash`, par défaut
+  `~/.local/share/Trash`) : jamais d'effacement définitif. Un élément situé
+  sur un autre disque que la corbeille est refusé.
+- Refusé : collection YAML (lecture seule), exécution en cours, et, sur
+  l'en-tête de la collection, tout sauf `a` et `A`. Aucune écriture hors de
+  la collection, aucun fichier modifié sur disque depuis son chargement
+  n'est réécrit.
+- Après l'opération, l'arbre est rechargé et la sélection suit l'élément
+  créé, renommé, cloné ou déplacé (en workspace, dans la collection active).
 
 ## Édition par popups
 
