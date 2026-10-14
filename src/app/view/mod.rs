@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod detail;
 pub mod edit_popup;
+pub mod file_popup;
 pub mod global_search;
 pub mod help;
 pub mod hit;
@@ -434,6 +435,10 @@ pub fn view(model: &Model, frame: &mut Frame) {
         render_edit_popup(session, frame);
     }
 
+    if let Some(popup) = &model.file_popup {
+        file_popup::render_file_popup(popup, frame);
+    }
+
     frame.render_widget(
         Paragraph::new(status_line(model)).style(Style::new().add_modifier(Modifier::DIM)),
         areas.status,
@@ -817,6 +822,8 @@ fn status_message_text(message: &StatusMessage) -> String {
         StatusMessage::SecretVariableHint(var_name) => {
             format!("Définis {var_name} dans .env ou avec --secret {var_name}")
         }
+        StatusMessage::FileOpDone(text) => text.clone(),
+        StatusMessage::FileOpRefused(reason) => format!("Refusé : {reason}"),
     }
 }
 
@@ -914,10 +921,28 @@ fn status_line(model: &Model) -> String {
             PendingConfirm::DeleteAuthBlock { former_mode } => {
                 format!("L'ancien bloc auth:{former_mode} sera supprimé. Continuer ? (y/n)")
             }
+            PendingConfirm::TrashItem {
+                label,
+                requests: None,
+                ..
+            } => format!("Mettre « {label} » à la corbeille ? (y/n)"),
+            PendingConfirm::TrashItem {
+                label,
+                requests: Some(count),
+                ..
+            } => {
+                let plural = if *count > 1 { "s" } else { "" };
+                format!(
+                    "Mettre le dossier « {label} » ({count} requête{plural}) à la corbeille ? (y/n)"
+                )
+            }
         };
     }
     if model.help.is_some() {
         return "↑↓ défiler  Début/Fin  ? / Échap / q fermer".to_owned();
+    }
+    if let Some(popup) = &model.file_popup {
+        return file_popup::help_text(popup);
     }
     if let Some(popup) = &model.runner_options_popup {
         if popup.editing_text {

@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod editor;
 pub mod event;
 pub mod export;
+pub mod file_popup;
 pub mod filter;
 pub mod global_search;
 pub mod history;
@@ -456,6 +457,19 @@ pub async fn run<B: Backend>(
                     Command::SaveHistory { root, history } => {
                         tokio::task::spawn_blocking(move || {
                             let _ = history::save_history(&root, &history);
+                        });
+                    }
+                    Command::FileOp { root, op } => {
+                        let sender = sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let date = clock::trash_date(std::time::SystemTime::now());
+                            let result = writer::files::execute(
+                                &root,
+                                &op,
+                                writer::trash::Trash::from_env,
+                                &date,
+                            );
+                            let _ = sender.blocking_send(AppEvent::FileOpDone { root, result });
                         });
                     }
                 }

@@ -348,3 +348,236 @@ process.stdout.write(regenerated);
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Références des opérations de fichiers (`docs/edition-phase3.md`) :
+/// `scripts/bruno-new-items.js` les régénère avec le sérialiseur officiel ;
+/// elles doivent être identiques aux fichiers versionnés.
+#[test]
+#[ignore = "nécessite node et @usebruno/cli (bru) installés"]
+fn file_ops_references_are_still_produced_by_bruno() {
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp-bruno-new-items");
+    let _ = fs::remove_dir_all(&out);
+    fs::create_dir_all(&out).expect("dossier créé");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/bruno-new-items.js");
+    let output = Command::new("node")
+        .arg(&script)
+        .arg(&out)
+        .output()
+        .expect("node lancé");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut count = 0;
+    for entry in fs::read_dir(&out).expect("sortie") {
+        let entry = entry.expect("entrée");
+        let fresh = fs::read_to_string(entry.path()).expect("régénéré");
+        let versioned = fs::read_to_string(cases().join("files").join(entry.file_name()))
+            .expect("référence versionnée");
+        assert_eq!(fresh, versioned, "{:?}", entry.file_name());
+        count += 1;
+    }
+    assert_eq!(count, 10);
+
+    // Table des paramètres d'URL, recalculée par le code de Bruno.
+    let table = out.join("bruno-url-params.json");
+    let output = Command::new("node")
+        .arg(&script)
+        .arg("--url-params")
+        .arg(&table)
+        .output()
+        .expect("node lancé");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let versioned = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/url-params/bruno-url-params.json");
+    assert_eq!(
+        fs::read_to_string(&table).expect("table régénérée"),
+        fs::read_to_string(versioned).expect("table versionnée")
+    );
+
+    // Table de renumérotation (`sortItems`, `localeCompare`) par Bruno.
+    let sort_table = out.join("bruno-sort-items.json");
+    let output = Command::new("node")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/bruno-sort-items.js"))
+        .arg(&sort_table)
+        .output()
+        .expect("node lancé");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&sort_table).expect("table régénérée"),
+        fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/sequence/bruno-sort-items.json")
+        )
+        .expect("table versionnée")
+    );
+    let _ = fs::remove_dir_all(&out);
+}
+
+/// Les fichiers créés, renommés, clonés ou réordonnés par le TUI se relisent
+/// avec le parser officiel, avec le nom, le `seq` et l'URL attendus.
+#[test]
+#[ignore = "nécessite node et @usebruno/cli (bru) installés"]
+fn bruno_reads_files_written_by_file_operations() {
+    use bruno_tui::writer::files::{self, NewRequest, RequestKind, SeqChange};
+
+    let script_eval = r#"
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+function langDir() {
+  if (process.env.BRUNO_LANG_DIR) return process.env.BRUNO_LANG_DIR;
+  const globalRoot = execSync('npm root -g', { encoding: 'utf8' }).trim();
+  return path.join(globalRoot, '@usebruno', 'cli', 'node_modules', '@usebruno', 'lang');
+}
+const { bruToJsonV2, collectionBruToJson } = require(langDir());
+const file = process.argv[2];
+const content = fs.readFileSync(file, 'utf8');
+const json = path.basename(file) === 'folder.bru' ? collectionBruToJson(content) : bruToJsonV2(content);
+process.stdout.write(JSON.stringify({
+  name: json.meta && json.meta.name,
+  seq: json.meta && json.meta.seq,
+  type: json.meta && json.meta.type,
+  url: json.http ? json.http.url : null,
+  params: (json.params || []).map((p) => [p.type, p.name, p.value, p.enabled]),
+  method: json.http ? json.http.method : null,
+  auth: json.auth && json.auth.mode
+}));
+"#;
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp-bruno-file-ops");
+    let _ = fs::remove_dir_all(&base);
+    let root = base.join("collection");
+    copy_tree(&cases().join("files/collection"), &root);
+    let script_js = base.join("read.js");
+    fs::write(&script_js, script_eval).expect("script écrit");
+
+    let created = files::create_request(
+        &root,
+        Path::new("Posts"),
+        &NewRequest {
+            name: "Lire: un article".into(),
+            filename: "Lire un article".into(),
+            kind: RequestKind::Graphql,
+            method: "post".into(),
+            url: "{{base_url}}/graphql".into(),
+            seq: 2,
+        },
+    )
+    .expect("création");
+    let folder =
+        files::create_folder(&root, Path::new(""), "Nouveau", "Nouveau", 5).expect("dossier");
+    let with_params = files::create_request(
+        &root,
+        Path::new(""),
+        &NewRequest {
+            name: "Paramètres".into(),
+            filename: "params".into(),
+            kind: RequestKind::Http,
+            method: "get".into(),
+            url: "{{base_url}}/odata/Items(id=:key)/:id?full=1&flag&a=1=2".into(),
+            seq: 9,
+        },
+    )
+    .expect("création avec paramètres");
+    let get = fs::read_to_string(root.join("get-post.bru")).expect("source");
+    let cloned = files::clone_request(&root, Path::new("get-post.bru"), &get, "Copie", "Copie", 7)
+        .expect("clone");
+    let renamed = files::rename_request(
+        &root,
+        Path::new("get-post.bru"),
+        &get,
+        "Renommée",
+        Some("renommee"),
+    )
+    .expect("renommage");
+    files::resequence(
+        &root,
+        &[SeqChange {
+            path: "NoMeta".into(),
+            is_folder: true,
+            seq: 4,
+            expected: None,
+        }],
+    )
+    .expect("seq");
+
+    let read = |relative: &Path| -> Value {
+        let output = Command::new("node")
+            .arg(&script_js)
+            .arg(root.join(relative))
+            .output()
+            .expect("node lancé");
+        assert!(
+            output.status.success(),
+            "{} : {}",
+            relative.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("JSON valide")
+    };
+    // `meta.seq` est relu en texte par `bruToJsonV2`, en nombre ailleurs.
+    let seq = |value: &Value| match &value["seq"] {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let value = read(&created);
+    assert_eq!(value["name"], "Lire: un article");
+    assert_eq!(seq(&value), "2");
+    assert_eq!(value["type"], "graphql");
+    assert_eq!(value["url"], "{{base_url}}/graphql");
+    assert_eq!(value["method"], "post");
+    let value = read(&with_params);
+    assert_eq!(
+        value["params"],
+        serde_json::json!([
+            ["query", "full", "1", true],
+            ["query", "flag", "", true],
+            ["query", "a", "1=2", true],
+            ["path", "key", "", true],
+            ["path", "id", "", true]
+        ])
+    );
+    let value = read(&folder.join("folder.bru"));
+    assert_eq!(value["name"], "Nouveau");
+    assert_eq!(seq(&value), "5");
+    assert_eq!(value["auth"], "inherit");
+    let value = read(&cloned);
+    assert_eq!(
+        (value["name"].as_str(), seq(&value)),
+        (Some("Copie"), "7".to_owned())
+    );
+    let value = read(&renamed);
+    assert_eq!(
+        (value["name"].as_str(), seq(&value)),
+        (Some("Renommée"), "1".to_owned())
+    );
+    let value = read(Path::new("NoMeta/folder.bru"));
+    assert_eq!(
+        (value["name"].as_str(), seq(&value)),
+        (Some("NoMeta"), "4".to_owned())
+    );
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("copie");
+    for entry in fs::read_dir(from).expect("lecture") {
+        let entry = entry.expect("entrée");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).expect("copie fichier");
+        }
+    }
+}

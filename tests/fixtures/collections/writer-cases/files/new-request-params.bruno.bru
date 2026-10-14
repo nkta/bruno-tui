@@ -1,0 +1,27 @@
+meta {
+  name: Commentaires
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{base_url}}/posts/:id/comments?full=1&flag&a=1=2&full=2#haut
+  body: none
+  auth: inherit
+}
+
+params:query {
+  full: 1
+  flag: 
+  a: 1=2
+  full: 2
+}
+
+params:path {
+  id: 
+}
+
+settings {
+  encodeUrl: true
+  forwardAuthorizationHeader: false
+}

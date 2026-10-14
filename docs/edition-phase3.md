@@ -102,6 +102,7 @@ Ici, `Entrée` sur la dernière ligne (ou `Ctrl+S`) **crée** ou **applique**.
 
 - `Fichier` suit le `Nom` (`sanitizeName`) tant qu'on ne l'a pas modifié.
 - `Type` : `http` ou `graphql`.
+- Paramètres de l'URL (`?…`, `:id`) : extraits comme Bruno (décision du 2026-10-14), refus si le résultat de Bruno n'est pas reproductible à l'identique.
 - Nom ou fichier invalide : refus avec le message de Bruno, en français.
 - Collision : suffixe ` 1`, ` 2`… comme Bruno ; le statut indique le nom final.
 - `seq` : celui que Bruno donnerait (relevé dans `app.asar`).
@@ -137,6 +138,7 @@ l'octet près, sauf `meta.name` (et `seq` si Bruno le change).
 Confirmation dans la barre de statut :
 « Mettre « Lire un article » à la corbeille ? (y/n) ».
 Pour un dossier, elle donne le nombre de requêtes qu'il contient.
+Ensuite, les `seq` des frères restants sont renumérotés comme Bruno (`getItemsToResequence`, décision du 2026-10-14) ; si l'ordre de Bruno n'est pas reproductible à l'identique, ils restent tels quels et le statut le dit.
 
 ## 5. Réordonner
 

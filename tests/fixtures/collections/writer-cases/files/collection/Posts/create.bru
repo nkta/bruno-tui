@@ -1,0 +1,17 @@
+meta {
+  name: Créer
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{base_url}}/posts
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "title": "x"
+  }
+}

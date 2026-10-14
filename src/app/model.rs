@@ -1534,6 +1534,13 @@ pub enum PendingConfirm {
     OverwriteExport { path: PathBuf, bytes: Vec<u8> },
     /// Supprimer un ancien bloc d'authentification non vide lors du changement de mode.
     DeleteAuthBlock { former_mode: String },
+    /// Mettre une requête ou un dossier à la corbeille (`d` dans l'arbre).
+    /// `requests` : nombre de requêtes d'un dossier, `None` pour une requête.
+    TrashItem {
+        path: PathBuf,
+        label: String,
+        requests: Option<usize>,
+    },
 }
 
 /// État de saisie du chemin pour l'export du corps de réponse.
@@ -1743,6 +1750,12 @@ pub struct Model {
     /// Plusieurs collections ouvertes ensemble ; `None` pour une seule
     /// collection. Les champs ci-dessus décrivent alors la collection active.
     pub workspace: Option<super::workspace::WorkspaceState>,
+    /// Popup de fichier ouvert sur l'arbre (`a`, `A`, `F2`, `p`).
+    pub file_popup: Option<super::file_popup::FilePopup>,
+    /// Élément à sélectionner au prochain chargement qui le contient
+    /// (chemin relatif à la racine de la collection active), après une
+    /// opération de fichier.
+    pub select_after_reload: Option<PathBuf>,
 }
 
 /// État des variables secrètes. Les valeurs ne sont jamais formatées :
@@ -1879,6 +1892,10 @@ pub enum StatusMessage {
     NoEnvironmentResult(String),
     /// Rappel pour définir la variable secrète remplacée (§ 5 spec).
     SecretVariableHint(String),
+    /// Opération de fichier réussie (`docs/edition-phase3.md`).
+    FileOpDone(String),
+    /// Opération de fichier refusée ou en échec ; rien n'est écrit à moitié.
+    FileOpRefused(String),
 }
 
 /// Série de campagnes multi-environnements : un `bru run` par
@@ -2388,6 +2405,8 @@ impl Model {
             history_enabled: false,
             editor: None,
             workspace: None,
+            file_popup: None,
+            select_after_reload: None,
         }
     }
 
@@ -2474,6 +2493,9 @@ impl Model {
         }
         if self.global_search.is_some() {
             return Some(TextCapture::GlobalSearch);
+        }
+        if self.file_popup.is_some() {
+            return Some(TextCapture::FilePopup);
         }
         match &self.secrets.input {
             Some(SecretInput::Name(_)) => return Some(TextCapture::SecretName),

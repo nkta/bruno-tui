@@ -15,8 +15,14 @@ mod draft;
 mod edit;
 pub mod environment;
 mod error;
+pub mod files;
 mod format;
+pub mod meta;
+pub mod names;
 mod query;
+pub mod sequence;
+pub mod trash;
+pub mod url_params;
 
 pub(crate) use draft::SUPPORTED_AUTH_MODES;
 pub use edit::{BODY_MODES, EntrySection, FieldEdit};

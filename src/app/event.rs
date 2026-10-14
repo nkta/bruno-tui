@@ -19,6 +19,7 @@ use crate::collection::{Collection, LoadError};
 use crate::runner;
 use crate::secrets::Resolved;
 use crate::writer::WriteError;
+use crate::writer::files::{FileOpError, FileOpOutcome};
 
 /// Taille du canal d'événements.
 pub const EVENT_BUFFER: usize = 256;
@@ -87,6 +88,12 @@ pub enum AppEvent {
         root: PathBuf,
         entries: Vec<HistoryEntry>,
         notice: Option<String>,
+    },
+    /// Issue d'une opération de fichier (`Command::FileOp`) dans la
+    /// collection de racine `root`.
+    FileOpDone {
+        root: PathBuf,
+        result: Result<FileOpOutcome, FileOpError>,
     },
 }
 

@@ -1,0 +1,263 @@
+[
+  {
+    "url": "{{base_url}}/posts/:id?full=1",
+    "query": [
+      {
+        "name": "full",
+        "value": "1"
+      }
+    ],
+    "path": [
+      "id"
+    ]
+  },
+  {
+    "url": "{{base_url}}/posts?tag=a&tag=b",
+    "query": [
+      {
+        "name": "tag",
+        "value": "a"
+      },
+      {
+        "name": "tag",
+        "value": "b"
+      }
+    ],
+    "path": []
+  },
+  {
+    "url": "http://h/x?a=1=2",
+    "query": [
+      {
+        "name": "a",
+        "value": "1=2"
+      }
+    ],
+    "path": []
+  },
+  {
+    "url": "http://h/x?flag",
+    "query": [
+      {
+        "name": "flag",
+        "value": null
+      }
+    ],
+    "path": []
+  },
+  {
+    "url": "http://h/x?=z&b=2",
+    "query": [
+      {
+        "name": "b",
+        "value": "2"
+      }
+    ],
+    "path": []
+  },
+  {
+    "url": "http://h/x?a=1#frag",
+    "query": [
+      {
+        "name": "a",
+        "value": "1"
+      }
+    ],
+    "path": []
+  },
+  {
+    "url": "http://h/x?a&&b=",
+    "query": [
+      {
+        "name": "a",
+        "value": null
+      },
+      {
+        "name": "b",
+        "value": ""
+      }
+    ],
+    "path": []
+  },
+  {
+    "url": "{{base_url}}/posts/:id?",
+    "query": [],
+    "path": [
+      "id"
+    ]
+  },
+  {
+    "url": "{{base_url?x}}/posts/:id",
+    "query": [],
+    "path": []
+  },
+  {
+    "url": "{{base_url}}/x?{{q?}}=1&y=2",
+    "query": [
+      {
+        "name": "{{q?}}",
+        "value": "1"
+      },
+      {
+        "name": "y",
+        "value": "2"
+      }
+    ],
+    "path": []
+  },
+  {
+    "url": "http://h/x?a=%20b&c=d+e",
+    "query": [
+      {
+        "name": "a",
+        "value": "%20b"
+      },
+      {
+        "name": "c",
+        "value": "d+e"
+      }
+    ],
+    "path": []
+  },
+  {
+    "url": "{{base_url}}/a b/:id",
+    "query": [],
+    "path": [
+      "id"
+    ]
+  },
+  {
+    "url": "{{base_url}}/café/:élève",
+    "query": [],
+    "path": [
+      "%C3%A9l%C3%A8ve"
+    ]
+  },
+  {
+    "url": "http://h/{x}/:a",
+    "query": [],
+    "path": [
+      "a"
+    ]
+  },
+  {
+    "url": "https://api.example.com/odata/Items(id=:key,b=:other)",
+    "query": [],
+    "path": [
+      "key",
+      "other"
+    ]
+  },
+  {
+    "url": "api.example.com/users/:userId/posts/:postId",
+    "query": [],
+    "path": [
+      "userId",
+      "postId"
+    ]
+  },
+  {
+    "url": "https://api.example.com/users/:id",
+    "query": [],
+    "path": [
+      "id"
+    ]
+  },
+  {
+    "url": "",
+    "query": [],
+    "path": []
+  },
+  {
+    "url": "{{base_url}}/users/:id/:id",
+    "query": [],
+    "path": [
+      "id"
+    ]
+  },
+  {
+    "url": "{{host}}:{{port}}/users/:id",
+    "query": [],
+    "path": [
+      "id"
+    ]
+  },
+  {
+    "url": "http://h:8080/a/:b",
+    "query": [],
+    "path": [
+      "b"
+    ]
+  },
+  {
+    "url": "http://h/a/:b#/:c",
+    "query": [],
+    "path": [
+      "b"
+    ]
+  },
+  {
+    "url": "http://h/a?x=1/:y",
+    "query": [
+      {
+        "name": "x",
+        "value": "1/:y"
+      }
+    ],
+    "path": []
+  },
+  {
+    "url": "http://h/a/:",
+    "query": [],
+    "path": []
+  },
+  {
+    "url": "http://h|x/:a",
+    "query": [],
+    "path": [
+      "a"
+    ]
+  },
+  {
+    "url": "HTTP://h/:a",
+    "query": [],
+    "path": [
+      "a"
+    ]
+  },
+  {
+    "url": "http://user@h/:a",
+    "query": [],
+    "path": [
+      "a"
+    ]
+  },
+  {
+    "url": "http://h/./:a",
+    "query": [],
+    "path": [
+      "a"
+    ]
+  },
+  {
+    "url": "http://h/a\\:b",
+    "query": [],
+    "path": [
+      "b"
+    ]
+  },
+  {
+    "url": "http://127.1/:a",
+    "query": [],
+    "path": [
+      "a"
+    ]
+  },
+  {
+    "url": "http://exämple.com/:a",
+    "query": [],
+    "path": [
+      "a"
+    ]
+  }
+]

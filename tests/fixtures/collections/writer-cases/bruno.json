@@ -12,6 +12,7 @@
     "folder-auth.bru",
     "folder-auth.after.bru",
     "collection-auth.bru",
-    "collection-auth.after.bru"
+    "collection-auth.after.bru",
+    "files"
   ]
 }

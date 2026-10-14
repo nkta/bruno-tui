@@ -1,0 +1,16 @@
+meta {
+  name: Supprimer: tout
+  type: http
+  seq: 12
+}
+
+delete {
+  url: https://api.example.com/items
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+  forwardAuthorizationHeader: false
+}

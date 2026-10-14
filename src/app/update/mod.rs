@@ -18,6 +18,7 @@ use ratatui::layout::{Position, Rect};
 
 pub mod edit;
 pub mod environment;
+pub mod files;
 pub mod find;
 pub mod navigation;
 pub mod output;
@@ -131,6 +132,13 @@ pub enum Command {
     ReloadMember(usize),
     /// Regroupe plusieurs commandes à exécuter séquentiellement par la boucle.
     Batch(Vec<Command>),
+    /// Opération de fichier (créer, renommer, cloner, réordonner, corbeille)
+    /// dans la collection `root` ; la boucle l'exécute dans `spawn_blocking`
+    /// via `writer::files::execute` et renvoie `Message::FileOpDone`.
+    FileOp {
+        root: std::path::PathBuf,
+        op: crate::writer::files::FileOp,
+    },
     /// Charger l'historique persistant depuis le disque.
     LoadHistory {
         root: std::path::PathBuf,
@@ -250,6 +258,9 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
                     super::model::PendingConfirm::DeleteAuthBlock { .. } => {
                         edit::force_save_edit(model)
                     }
+                    super::model::PendingConfirm::TrashItem { path, .. } => {
+                        files::confirm_trash(model, path)
+                    }
                 }
             }
             Message::ConfirmNo | Message::NextMatch | Message::FocusTree => {
@@ -356,6 +367,14 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
         return apply_global_search(model, message);
     }
 
+    // Popup de fichier : modal, il reçoit la frappe et la validation.
+    if model.file_popup.is_some()
+        && !is_background_result(&message)
+        && let Some(command) = files::file_popup_message(model, &message)
+    {
+        return command;
+    }
+
     // Popup d'édition : modal, il garde les touches de navigation et
     // laisse passer la saisie, la sauvegarde et les résultats de fond.
     if model.editing.is_some()
@@ -438,9 +457,22 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
                     scroll_tree_into_view(model);
                     if is_reloading {
                         model.detail_scroll = model.detail_scroll.min(detail_max_scroll(model));
-                        model.last_status = Some(super::model::StatusMessage::CollectionReloaded);
+                        // Le statut d'une opération de fichier reste affiché.
+                        if !matches!(
+                            model.last_status,
+                            Some(
+                                super::model::StatusMessage::FileOpDone(_)
+                                    | super::model::StatusMessage::FileOpRefused(_)
+                            )
+                        ) {
+                            model.last_status =
+                                Some(super::model::StatusMessage::CollectionReloaded);
+                        }
                     } else {
                         model.detail_scroll = 0;
+                    }
+                    if model.workspace.is_none() {
+                        files::apply_pending_selection(model);
                     }
                 }
                 Err(error) => {
@@ -485,6 +517,24 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
             model.help = Some(super::model::HelpPopup::default());
             Command::None
         }
+        Message::Add if model.focus == Focus::Tree => files::open_create(model, false),
+        Message::Delete if model.focus == Focus::Tree => files::ask_trash(model),
+        Message::CreateFolder if model.focus == Focus::Tree => files::open_create(model, true),
+        Message::RenameItem if model.focus == Focus::Tree => files::open_rename(model),
+        Message::CloneItem if model.focus == Focus::Tree => files::open_clone(model),
+        Message::MoveItemUp if model.focus == Focus::Tree => files::move_item(model, true),
+        Message::MoveItemDown if model.focus == Focus::Tree => files::move_item(model, false),
+        Message::MoveItemUp => apply(model, Message::Up),
+        Message::MoveItemDown => apply(model, Message::Down),
+        Message::CreateFolder
+        | Message::RenameItem
+        | Message::CloneItem
+        | Message::FilePopupKey(_)
+        | Message::FilePopupNext
+        | Message::FilePopupPrevious
+        | Message::FilePopupEnter
+        | Message::FilePopupCancel => Command::None,
+        Message::FileOpDone { root, result } => files::file_op_done(model, &root, result),
         Message::Add => {
             if model.focus == Focus::Secrets {
                 model.secrets.error = None;
@@ -1181,6 +1231,7 @@ fn is_background_result(message: &Message) -> bool {
             | Message::WatchReload(_)
             | Message::ResponseBodyExported { .. }
             | Message::HistoryLoaded { .. }
+            | Message::FileOpDone { .. }
     )
 }
 
