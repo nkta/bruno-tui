@@ -1,0 +1,20 @@
+meta {
+  name: Encodé
+  type: graphql
+  seq: 1
+}
+
+post {
+  url: {{base_url}}/café/:nom élève
+  body: none
+  auth: inherit
+}
+
+params:path {
+  nom%20%C3%A9l%C3%A8ve: 
+}
+
+settings {
+  encodeUrl: true
+  forwardAuthorizationHeader: false
+}

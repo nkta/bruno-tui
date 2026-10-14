@@ -267,9 +267,13 @@ Règles, reprises de Bruno :
   sont réservés pour une requête.
 - Collision : suffixe ` 1`, ` 2`… ; le statut donne le nom final.
 - Nouvelle requête : contenu identique à celui que Bruno écrit
-  (`jsonToBru`), `seq` = nombre d'éléments du dossier + 1. Une URL avec
-  paramètres (`?…`, `:id`) est refusée à la création : les ajouter ensuite
-  avec le popup Requête (`m`).
+  (`jsonToBru`), `seq` = nombre d'éléments du dossier + 1. Les paramètres
+  de l'URL (`?…`, `:id`, segments OData `Items(id=:key)`) sont écrits dans
+  `params:query` et `params:path`, comme Bruno. Une URL dont Bruno tirerait
+  un résultat incertain (identifiants `user@`, IPv6, hôte non ASCII,
+  `\`, segments `.`/`..`) ou un nom de paramètre à guillemets (`:`, `"`,
+  `{`, `}`, espace) est refusée : la créer sans, puis compléter l'URL avec
+  le popup Requête (`m`).
 - Renommer, cloner, réordonner : seules les lignes `name:` et `seq:` de
   `meta` changent, le reste du fichier est conservé à l'octet près. Un
   dossier sans `folder.bru` en reçoit un, avec le contenu que Bruno écrit.

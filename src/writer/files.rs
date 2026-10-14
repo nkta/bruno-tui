@@ -30,6 +30,7 @@ use super::names::{
     validate_request_filename,
 };
 use super::trash::{Trash, TrashError};
+use super::url_params::{UnsupportedUrl, bruno_url_params};
 use super::{FileStamp, write_atomic};
 use crate::collection::ast::METHODS;
 
@@ -53,8 +54,16 @@ pub enum FileOpError {
     NotFound { path: PathBuf },
     #[error("lien symbolique dans `{}` : clonage refusé", .path.display())]
     Symlink { path: PathBuf },
-    #[error("paramètres dans l'URL : crée la requête sans, puis ajoute-les (popup Requête, m)")]
-    UrlWithParams,
+    #[error("{0}")]
+    UnsupportedUrl(#[from] UnsupportedUrl),
+    /// Nom de paramètre que `jsonToBru` mettrait entre guillemets (`:`,
+    /// `"`, `{`, `}`, espace) : le TUI ne saurait pas le relire.
+    #[error(
+        "paramètre « {0} » : nom à écrire entre guillemets, non pris en charge (crée la requête sans, puis complète l'URL avec m)"
+    )]
+    QuotedParamName(String),
+    #[error("URL sur plusieurs lignes")]
+    MultilineUrl,
     #[error("méthode inconnue")]
     UnknownMethod,
     #[error("{0}")]
@@ -115,19 +124,52 @@ pub struct NewRequest {
     pub seq: u32,
 }
 
-/// Contenu d'une nouvelle requête : `jsonToBru` de la requête par défaut de
-/// Bruno 4.2.1 (fixture `writer-cases/files/new-request-*.bruno.bru`).
-pub fn new_request_content(request: &NewRequest) -> String {
-    format!(
+/// Contenu d'une nouvelle requête : `stringifyRequest` de la requête par
+/// défaut de Bruno 4.2.1, paramètres extraits de l'URL compris (fixtures
+/// `writer-cases/files/new-request-*.bruno.bru`). Refus si l'URL sort de
+/// ce que le TUI reproduit à l'identique.
+pub fn new_request_content(request: &NewRequest) -> Result<String, FileOpError> {
+    if request.url.contains(['\n', '\r']) {
+        return Err(FileOpError::MultilineUrl);
+    }
+    let params = bruno_url_params(&request.url)?;
+    let names = params
+        .query
+        .iter()
+        .map(|param| param.name.as_str())
+        .chain(params.path.iter().map(String::as_str));
+    for name in names {
+        // `getKeyString` de `@usebruno/lang`.
+        if name.contains([':', '"', '{', '}', ' ']) {
+            return Err(FileOpError::QuotedParamName(name.to_owned()));
+        }
+    }
+    let mut out = format!(
         "meta {{\n  name: {name}\n  type: {kind}\n  seq: {seq}\n}}\n\n\
-         {method} {{\n  url: {url}\n  body: none\n  auth: inherit\n}}\n\n\
-         settings {{\n  encodeUrl: true\n  forwardAuthorizationHeader: false\n}}\n",
+         {method} {{\n  url: {url}\n  body: none\n  auth: inherit\n}}\n\n",
         name = request.name,
         kind = request.kind.as_str(),
         seq = request.seq,
         method = request.method,
         url = request.url,
-    )
+    );
+    if !params.query.is_empty() {
+        out.push_str("params:query {\n");
+        for param in &params.query {
+            let value = param.value.as_deref().unwrap_or_default();
+            out.push_str(&format!("  {}: {value}\n", param.name));
+        }
+        out.push_str("}\n\n");
+    }
+    if !params.path.is_empty() {
+        out.push_str("params:path {\n");
+        for name in &params.path {
+            out.push_str(&format!("  {name}: \n"));
+        }
+        out.push_str("}\n\n");
+    }
+    out.push_str("settings {\n  encodeUrl: true\n  forwardAuthorizationHeader: false\n}\n");
+    Ok(out)
 }
 
 /// Contenu du `folder.bru` d'un nouveau dossier (`newFolder` de Bruno).
@@ -142,45 +184,6 @@ pub fn folder_meta_content(name: &str, seq: Option<u32>) -> String {
         Some(seq) => format!("meta {{\n  name: {name}\n  seq: {seq}\n}}\n"),
         None => format!("meta {{\n  name: {name}\n}}\n"),
     }
-}
-
-/// Vrai si l'URL ferait créer des paramètres de requête ou de chemin par
-/// Bruno (`?` hors `{{…}}`, segment `:nom`) : le TUI ne les reproduit pas
-/// à la création.
-pub fn url_has_params(url: &str) -> bool {
-    let mut masked = String::with_capacity(url.len());
-    let mut rest = url;
-    while let Some(start) = rest.find("{{") {
-        masked.push_str(&rest[..start]);
-        match rest[start..].find("}}") {
-            Some(end) => {
-                masked.push_str(&"_".repeat(end + 2));
-                rest = &rest[start + end + 2..];
-            }
-            None => {
-                masked.push_str(&rest[start..]);
-                rest = "";
-            }
-        }
-    }
-    masked.push_str(rest);
-    if masked.contains('?') {
-        return true;
-    }
-    let path = masked.split('#').next().unwrap_or_default();
-    path.split('/').any(|segment| {
-        let named = |s: &str| {
-            s.chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        };
-        (segment.len() > 1 && segment.starts_with(':'))
-            || (segment.contains('(')
-                && segment.ends_with(')')
-                && segment
-                    .match_indices(':')
-                    .any(|(i, _)| named(&segment[i + 1..])))
-    })
 }
 
 /// Racine canonique de la collection.
@@ -319,11 +322,8 @@ pub fn create_request(
     if !METHODS.contains(&request.method.as_str()) {
         return Err(FileOpError::UnknownMethod);
     }
-    if request.url.contains(['\n', '\r']) || url_has_params(&request.url) {
-        return Err(FileOpError::UrlWithParams);
-    }
+    let content = new_request_content(request)?;
     let dir = inside(root, dir)?;
-    let content = new_request_content(request);
     let created = first_created(&dir, &request.filename, BRU_EXTENSION, |candidate| {
         create_file_no_replace(candidate, content.as_bytes(), None)
     })?;
@@ -852,29 +852,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn url_params_are_detected() {
-        for url in [
-            "{{base_url}}/posts?page=1",
-            "http://h/a?b",
-            "{{base_url}}/posts/:id",
-            "http://h/users/:userId/posts",
-            "http://h/odata/Items(id=:key)",
-        ] {
-            assert!(url_has_params(url), "{url}");
-        }
-        for url in [
-            "",
-            "{{base_url}}/posts/1",
-            "http://h:8080/a",
-            "{{url?x}}/a",
-            "http://h/a#frag",
-            "http://h/a:b",
-        ] {
-            assert!(!url_has_params(url), "{url}");
-        }
-    }
-
-    #[test]
     fn contents_follow_bruno_layout() {
         let request = NewRequest {
             name: "A".into(),
@@ -884,7 +861,11 @@ mod tests {
             url: String::new(),
             seq: 1,
         };
-        assert!(new_request_content(&request).contains("post {\n  url: \n"));
+        assert!(
+            new_request_content(&request)
+                .expect("contenu")
+                .contains("post {\n  url: \n")
+        );
         assert_eq!(folder_meta_content("A", None), "meta {\n  name: A\n}\n");
     }
 }

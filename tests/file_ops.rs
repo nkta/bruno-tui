@@ -106,10 +106,43 @@ fn new_request_contents_match_json_to_bru() {
             },
             "new-request-delete.bruno.bru",
         ),
+        (
+            NewRequest {
+                name: "Commentaires".into(),
+                filename: "x".into(),
+                kind: RequestKind::Http,
+                method: "get".into(),
+                url: "{{base_url}}/posts/:id/comments?full=1&flag&a=1=2&full=2#haut".into(),
+                seq: 2,
+            },
+            "new-request-params.bruno.bru",
+        ),
+        (
+            NewRequest {
+                name: "OData".into(),
+                filename: "x".into(),
+                kind: RequestKind::Http,
+                method: "get".into(),
+                url: "https://api.example.com/odata/Items(id=:key)/:sub?$top=5".into(),
+                seq: 4,
+            },
+            "new-request-odata.bruno.bru",
+        ),
+        (
+            NewRequest {
+                name: "Encodé".into(),
+                filename: "x".into(),
+                kind: RequestKind::Graphql,
+                method: "post".into(),
+                url: "{{base_url}}/café/:nom élève".into(),
+                seq: 1,
+            },
+            "new-request-encoded.bruno.bru",
+        ),
     ];
     for (request, fixture) in cases {
         assert_eq!(
-            new_request_content(&request),
+            new_request_content(&request).expect("contenu"),
             reference(fixture),
             "{fixture}"
         );
@@ -172,17 +205,17 @@ fn create_request_refuses_invalid_names_and_params() {
         (http("", "a"), "nom affiché"),
         (
             NewRequest {
-                url: "{{base_url}}/posts/:id".into(),
+                url: "http://moi@h/posts/:id".into(),
                 ..http("A", "a")
             },
-            "params",
+            "URL incertaine",
         ),
         (
             NewRequest {
-                url: "{{base_url}}/posts?page=1".into(),
+                url: "{{base_url}}/posts?{{k}}=1".into(),
                 ..http("A", "a")
             },
-            "params",
+            "clé à guillemets",
         ),
         (
             NewRequest {
@@ -575,4 +608,78 @@ fn execute_reports_the_element_to_select() {
     .expect("dossier");
     assert_eq!(outcome.select, Some(PathBuf::from("Nouveau")));
     assert_eq!(outcome.message, "Dossier créé : Nouveau");
+}
+
+/// Paramètres d'URL : chaque cas de la table produite par le vrai code de
+/// Bruno (`scripts/bruno-new-items.js --url-params`) est reproduit à
+/// l'identique, ou refusé quand l'issue de `new URL` n'est pas certaine.
+#[test]
+fn url_params_match_bruno_or_are_refused() {
+    use bruno_tui::writer::url_params::bruno_url_params;
+    // Cas dont l'issue de `new URL` n'est pas reproduite : refus.
+    const REFUSED: [&str; 5] = [
+        "http://user@h/:a",
+        "http://h/./:a",
+        "http://h/a\\:b",
+        "http://127.1/:a",
+        "http://exämple.com/:a",
+    ];
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/url-params/bruno-url-params.json");
+    let table: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("table")).expect("JSON");
+    let cases = table.as_array().expect("tableau");
+    assert!(cases.len() >= 15);
+    for case in cases {
+        let url = case["url"].as_str().expect("url");
+        let result = bruno_url_params(url);
+        if REFUSED.contains(&url) {
+            assert!(result.is_err(), "{url} : refus attendu");
+            continue;
+        }
+        let params = result.unwrap_or_else(|error| panic!("{url} : {error}"));
+        let query: Vec<(String, Option<String>)> = params
+            .query
+            .into_iter()
+            .map(|p| (p.name, p.value))
+            .collect();
+        let expected_query: Vec<(String, Option<String>)> = case["query"]
+            .as_array()
+            .expect("query")
+            .iter()
+            .map(|p| {
+                (
+                    p["name"].as_str().expect("name").to_owned(),
+                    p["value"].as_str().map(str::to_owned),
+                )
+            })
+            .collect();
+        assert_eq!(query, expected_query, "{url}");
+        let expected_path: Vec<String> = case["path"]
+            .as_array()
+            .expect("path")
+            .iter()
+            .map(|p| p.as_str().expect("nom").to_owned())
+            .collect();
+        assert_eq!(params.path, expected_path, "{url}");
+    }
+}
+
+#[test]
+fn created_request_carries_bruno_params() {
+    let (root, _) = workspace("create-params");
+    let request = NewRequest {
+        url: "{{base_url}}/posts/:id/comments?full=1&flag&a=1=2&full=2#haut".into(),
+        ..http("Commentaires", "comments")
+    };
+    files::create_request(&root, Path::new(""), &request).expect("création");
+    let written = read(&root, "comments.bru");
+    assert!(written.contains("params:query {\n  full: 1\n  flag: \n  a: 1=2\n  full: 2\n}\n"));
+    assert!(written.contains("params:path {\n  id: \n}\n"));
+    let view = bruno_tui::collection::RequestView::from_ast(
+        &bruno_tui::collection::BruFile::parse(written).expect("AST"),
+    )
+    .expect("vue");
+    assert_eq!(view.query_params.len(), 4);
+    assert_eq!(view.path_params[0].key, "id");
 }

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use super::message::InputKey;
 use super::text_input::TextInput;
 use crate::collection::ast::METHODS;
-use crate::writer::files::{FileOp, NewRequest, RequestKind, url_has_params};
+use crate::writer::files::{FileOp, NewRequest, RequestKind, new_request_content};
 use crate::writer::names::{
     MAX_NAME_LENGTH, sanitize_name, validate_name, validate_request_filename,
 };
@@ -342,26 +342,23 @@ impl FilePopup {
             FilePopupKind::NewRequest => {
                 check_filename(&filename)?;
                 let url = self.url.text().trim().to_owned();
-                if url_has_params(&url) {
-                    return Err(
-                        "Paramètres dans l'URL : crée la requête sans, puis ajoute-les (m)."
-                            .to_owned(),
-                    );
-                }
+                let request = NewRequest {
+                    name,
+                    filename,
+                    kind: self.request_kind,
+                    method: METHODS
+                        .get(self.method)
+                        .copied()
+                        .unwrap_or("get")
+                        .to_owned(),
+                    url,
+                    seq: self.seq,
+                };
+                // Refus éventuel de l'URL, affiché dans le popup.
+                new_request_content(&request).map_err(|error| error.to_string())?;
                 FileOp::CreateRequest {
                     dir: self.dir.clone(),
-                    request: NewRequest {
-                        name,
-                        filename,
-                        kind: self.request_kind,
-                        method: METHODS
-                            .get(self.method)
-                            .copied()
-                            .unwrap_or("get")
-                            .to_owned(),
-                        url,
-                        seq: self.seq,
-                    },
+                    request,
                 }
             }
             FilePopupKind::NewFolder => {
@@ -491,8 +488,25 @@ mod tests {
         let mut popup = FilePopup::new_request(PathBuf::new(), "x".into(), 1);
         typed(&mut popup, "a");
         popup.cursor = 4;
-        typed(&mut popup, "{{u}}/posts/:id");
-        assert!(popup.submit().is_err_and(|e| e.starts_with("Paramètres")));
+        typed(&mut popup, "http://moi@h/posts/:id");
+        assert!(
+            popup
+                .submit()
+                .is_err_and(|e| e.starts_with("URL non prise en charge"))
+        );
+        let mut popup = FilePopup::new_request(PathBuf::new(), "x".into(), 1);
+        typed(&mut popup, "a");
+        popup.cursor = 4;
+        typed(&mut popup, "{{u}}/posts/:id?full=1");
+        assert!(popup.submit().is_ok_and(|op| op.is_some()));
+        let mut popup = FilePopup::new_request(PathBuf::new(), "x".into(), 1);
+        typed(&mut popup, "a");
+        popup.cursor = 4;
+        typed(&mut popup, "{{u}}/x?{{k}}=1");
+        assert_eq!(
+            popup.submit(),
+            Err("paramètre « {{k}} » : nom à écrire entre guillemets, non pris en charge (crée la requête sans, puis complète l'URL avec m)".into())
+        );
     }
 
     #[test]

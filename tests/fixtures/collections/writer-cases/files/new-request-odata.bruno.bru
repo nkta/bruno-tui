@@ -1,0 +1,25 @@
+meta {
+  name: OData
+  type: http
+  seq: 4
+}
+
+get {
+  url: https://api.example.com/odata/Items(id=:key)/:sub?$top=5
+  body: none
+  auth: inherit
+}
+
+params:query {
+  $top: 5
+}
+
+params:path {
+  key: 
+  sub: 
+}
+
+settings {
+  encodeUrl: true
+  forwardAuthorizationHeader: false
+}

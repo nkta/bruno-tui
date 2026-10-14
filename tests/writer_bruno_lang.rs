@@ -378,7 +378,27 @@ fn file_ops_references_are_still_produced_by_bruno() {
         assert_eq!(fresh, versioned, "{:?}", entry.file_name());
         count += 1;
     }
-    assert_eq!(count, 7);
+    assert_eq!(count, 10);
+
+    // Table des paramètres d'URL, recalculée par le code de Bruno.
+    let table = out.join("bruno-url-params.json");
+    let output = Command::new("node")
+        .arg(&script)
+        .arg("--url-params")
+        .arg(&table)
+        .output()
+        .expect("node lancé");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let versioned = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/url-params/bruno-url-params.json");
+    assert_eq!(
+        fs::read_to_string(&table).expect("table régénérée"),
+        fs::read_to_string(versioned).expect("table versionnée")
+    );
     let _ = fs::remove_dir_all(&out);
 }
 
@@ -407,6 +427,7 @@ process.stdout.write(JSON.stringify({
   seq: json.meta && json.meta.seq,
   type: json.meta && json.meta.type,
   url: json.http ? json.http.url : null,
+  params: (json.params || []).map((p) => [p.type, p.name, p.value, p.enabled]),
   method: json.http ? json.http.method : null,
   auth: json.auth && json.auth.mode
 }));
@@ -433,6 +454,19 @@ process.stdout.write(JSON.stringify({
     .expect("création");
     let folder =
         files::create_folder(&root, Path::new(""), "Nouveau", "Nouveau", 5).expect("dossier");
+    let with_params = files::create_request(
+        &root,
+        Path::new(""),
+        &NewRequest {
+            name: "Paramètres".into(),
+            filename: "params".into(),
+            kind: RequestKind::Http,
+            method: "get".into(),
+            url: "{{base_url}}/odata/Items(id=:key)/:id?full=1&flag&a=1=2".into(),
+            seq: 9,
+        },
+    )
+    .expect("création avec paramètres");
     let get = fs::read_to_string(root.join("get-post.bru")).expect("source");
     let cloned = files::clone_request(&root, Path::new("get-post.bru"), &get, "Copie", "Copie", 7)
         .expect("clone");
@@ -480,6 +514,17 @@ process.stdout.write(JSON.stringify({
     assert_eq!(value["type"], "graphql");
     assert_eq!(value["url"], "{{base_url}}/graphql");
     assert_eq!(value["method"], "post");
+    let value = read(&with_params);
+    assert_eq!(
+        value["params"],
+        serde_json::json!([
+            ["query", "full", "1", true],
+            ["query", "flag", "", true],
+            ["query", "a", "1=2", true],
+            ["path", "key", "", true],
+            ["path", "id", "", true]
+        ])
+    );
     let value = read(&folder.join("folder.bru"));
     assert_eq!(value["name"], "Nouveau");
     assert_eq!(seq(&value), "5");

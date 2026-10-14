@@ -222,7 +222,7 @@ fn new_request_in_a_folder_is_created_and_selected() {
     ui.press(KeyCode::Tab);
     ui.press(KeyCode::Right);
     ui.press(KeyCode::Tab);
-    ui.type_text("{{base_url}}/posts");
+    ui.type_text("{{base_url}}/posts/:id?full=1");
     // Entrée sur la dernière ligne crée.
     ui.press(KeyCode::Enter);
 
@@ -234,9 +234,10 @@ fn new_request_in_a_folder_is_created_and_selected() {
             filename: "Lire un article".into(),
             kind: RequestKind::Http,
             method: "post".into(),
-            url: "{{base_url}}/posts".into(),
+            url: "{{base_url}}/posts/:id?full=1".into(),
             seq: 2,
         })
+        .expect("contenu")
     );
     assert_eq!(
         ui.selected_path(),

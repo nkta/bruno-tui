@@ -102,6 +102,7 @@ Ici, `Entrée` sur la dernière ligne (ou `Ctrl+S`) **crée** ou **applique**.
 
 - `Fichier` suit le `Nom` (`sanitizeName`) tant qu'on ne l'a pas modifié.
 - `Type` : `http` ou `graphql`.
+- Paramètres de l'URL (`?…`, `:id`) : extraits comme Bruno (décision du 2026-10-14), refus si le résultat de Bruno n'est pas reproductible à l'identique.
 - Nom ou fichier invalide : refus avec le message de Bruno, en français.
 - Collision : suffixe ` 1`, ` 2`… comme Bruno ; le statut indique le nom final.
 - `seq` : celui que Bruno donnerait (relevé dans `app.asar`).

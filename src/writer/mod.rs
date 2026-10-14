@@ -21,6 +21,7 @@ pub mod meta;
 pub mod names;
 mod query;
 pub mod trash;
+pub mod url_params;
 
 pub(crate) use draft::SUPPORTED_AUTH_MODES;
 pub use edit::{BODY_MODES, EntrySection, FieldEdit};
