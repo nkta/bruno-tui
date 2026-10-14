@@ -279,7 +279,14 @@ Règles, reprises de Bruno :
   dossier sans `folder.bru` en reçoit un, avec le contenu que Bruno écrit.
 - Corbeille freedesktop (`$XDG_DATA_HOME/Trash`, par défaut
   `~/.local/share/Trash`) : jamais d'effacement définitif. Un élément situé
-  sur un autre disque que la corbeille est refusé.
+  sur un autre disque que la corbeille est refusé. Après la mise à la
+  corbeille, les `seq` des frères restants sont renumérotés 1, 2, 3… comme
+  Bruno ; seuls les fichiers dont le `seq` change sont écrits.
+- Ordre pour `Maj+↑`/`Maj+↓` et la renumérotation : celui de Bruno
+  (`sortItems` : `seq` d'abord, noms pour les `seq` absents ou en double).
+  Si cet ordre dépend de noms que le TUI ne compare pas comme Bruno (hors
+  lettres et chiffres ASCII, espace, `_`, `-`, `.`), ou de deux noms
+  identiques, rien n'est renuméroté et le statut le dit.
 - Refusé : collection YAML (lecture seule), exécution en cours, et, sur
   l'en-tête de la collection, tout sauf `a` et `A`. Aucune écriture hors de
   la collection, aucun fichier modifié sur disque depuis son chargement

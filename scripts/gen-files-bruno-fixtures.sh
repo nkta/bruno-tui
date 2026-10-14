@@ -5,7 +5,9 @@
 # - `tests/fixtures/collections/writer-cases/files/*.bruno.bru` : fichiers
 #   écrits par `stringifyRequest` / `stringifyFolder` (`@usebruno/filestore`) ;
 # - `tests/fixtures/url-params/bruno-url-params.json` : paramètres que Bruno
-#   extrait de chaque URL à la création d'une requête.
+#   extrait de chaque URL à la création d'une requête ;
+# - `tests/fixtures/sequence/bruno-sort-items.json` : renumérotation des
+#   `seq` (`sortItems`, `getItemsToResequence`) et `localeCompare`.
 #
 # Nécessite `node` et `@usebruno/cli` installé globalement, ou
 # `BRUNO_LANG_DIR` pointant vers `@usebruno/lang` (`@usebruno/filestore` est
@@ -14,7 +16,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/tests/fixtures/collections/writer-cases/files"
-mkdir -p "$OUT" "$ROOT/tests/fixtures/url-params"
+mkdir -p "$OUT" "$ROOT/tests/fixtures/url-params" "$ROOT/tests/fixtures/sequence"
 node "$ROOT/scripts/bruno-new-items.js" "$OUT"
 node "$ROOT/scripts/bruno-new-items.js" --url-params "$ROOT/tests/fixtures/url-params/bruno-url-params.json"
+node "$ROOT/scripts/bruno-sort-items.js" "$ROOT/tests/fixtures/sequence/bruno-sort-items.json"
 echo "bru $(bru --version 2>/dev/null || echo '?') : références écrites"

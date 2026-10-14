@@ -399,6 +399,27 @@ fn file_ops_references_are_still_produced_by_bruno() {
         fs::read_to_string(&table).expect("table régénérée"),
         fs::read_to_string(versioned).expect("table versionnée")
     );
+
+    // Table de renumérotation (`sortItems`, `localeCompare`) par Bruno.
+    let sort_table = out.join("bruno-sort-items.json");
+    let output = Command::new("node")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/bruno-sort-items.js"))
+        .arg(&sort_table)
+        .output()
+        .expect("node lancé");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&sort_table).expect("table régénérée"),
+        fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/sequence/bruno-sort-items.json")
+        )
+        .expect("table versionnée")
+    );
     let _ = fs::remove_dir_all(&out);
 }
 

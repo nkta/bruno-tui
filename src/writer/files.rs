@@ -762,6 +762,10 @@ pub enum FileOp {
     },
     Trash {
         path: PathBuf,
+        /// Frères à renuméroter après la mise à la corbeille, comme Bruno ;
+        /// `Err` : renumérotation impossible (raison), la corbeille se fait
+        /// quand même.
+        renumber: Result<Vec<SeqChange>, String>,
     },
 }
 
@@ -837,11 +841,22 @@ pub fn execute(
                 message: "Ordre enregistré".to_owned(),
             })
         }
-        FileOp::Trash { path } => {
+        FileOp::Trash { path, renumber } => {
             let trash = trash()?;
-            trash_item(root, path, &trash, deletion_date).map(|_| FileOpOutcome {
+            trash_item(root, path, &trash, deletion_date)?;
+            let trashed = format!("Mis à la corbeille : {}", display_name(path));
+            // La corbeille est faite : un échec de renumérotation n'annule
+            // rien, il est signalé.
+            let message = match renumber {
+                Ok(changes) => match resequence(root, changes) {
+                    Ok(()) => trashed,
+                    Err(error) => format!("{trashed} ; renumérotation des seq en échec : {error}"),
+                },
+                Err(reason) => format!("{trashed} ; seq non renumérotés : {reason}"),
+            };
+            Ok(FileOpOutcome {
                 select: None,
-                message: format!("Mis à la corbeille : {}", display_name(path)),
+                message,
             })
         }
     }

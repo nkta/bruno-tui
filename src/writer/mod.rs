@@ -20,6 +20,7 @@ mod format;
 pub mod meta;
 pub mod names;
 mod query;
+pub mod sequence;
 pub mod trash;
 pub mod url_params;
 

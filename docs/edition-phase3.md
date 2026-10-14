@@ -138,6 +138,7 @@ l'octet près, sauf `meta.name` (et `seq` si Bruno le change).
 Confirmation dans la barre de statut :
 « Mettre « Lire un article » à la corbeille ? (y/n) ».
 Pour un dossier, elle donne le nombre de requêtes qu'il contient.
+Ensuite, les `seq` des frères restants sont renumérotés comme Bruno (`getItemsToResequence`, décision du 2026-10-14) ; si l'ordre de Bruno n'est pas reproductible à l'identique, ils restent tels quels et le statut le dit.
 
 ## 5. Réordonner
 

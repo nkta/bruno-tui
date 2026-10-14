@@ -136,7 +136,7 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
             },
             HelpEntry {
                 key: "d",
-                effect: "mettre à la corbeille, après confirmation (y/n) ; jamais d'effacement définitif",
+                effect: "mettre à la corbeille, après confirmation (y/n), puis renuméroter les frères comme Bruno ; jamais d'effacement définitif",
             },
             HelpEntry {
                 key: "Popup fichier : ↑↓, Tab",

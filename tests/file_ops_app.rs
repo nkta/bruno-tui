@@ -129,6 +129,15 @@ impl Ui {
         }
     }
 
+    /// Recharge la collection, comme le watcher après une écriture externe.
+    fn reload(&mut self) {
+        self.run(Command::ReloadCollection);
+    }
+
+    fn write(&self, path: &str, text: &str) {
+        fs::write(self.root.join(path), text).expect("écriture");
+    }
+
     fn press_with(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         let event = AppEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)));
         if let Some(message) = to_message(event, self.model.text_capture()) {
@@ -584,5 +593,81 @@ fn workspace_operations_target_the_active_collection_and_keep_selection() {
     assert_eq!(
         ui.selected_path(),
         Some(PathBuf::from("Posts/Renommée.bru"))
+    );
+}
+
+fn request_text(name: &str, seq: Option<u32>) -> String {
+    let seq = seq.map(|seq| format!("  seq: {seq}\n")).unwrap_or_default();
+    format!("meta {{\n  name: {name}\n  type: http\n{seq}}}\n\nget {{\n  url: http://x\n}}\n")
+}
+
+fn modified(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .expect("date")
+}
+
+#[test]
+fn trash_renumbers_siblings_like_bruno() {
+    let mut ui = Ui::new("trash-renumber");
+    let list = ui.read("list-posts.bru");
+    let folder = ui.read("Posts/folder.bru");
+    let before = modified(&ui.root.join("list-posts.bru"));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    ui.select("get-post.bru");
+    ui.press(KeyCode::Char('d'));
+    ui.press(KeyCode::Char('y'));
+    // `sortItems` : NoMeta (sans seq) passe en tête, les autres gardent
+    // leur seq ; Bruno lui écrit un folder.bru nommé d'après le répertoire.
+    assert_eq!(
+        ui.read("NoMeta/folder.bru"),
+        files::folder_meta_content("NoMeta", Some(1))
+    );
+    assert_eq!(ui.read("list-posts.bru"), list);
+    assert_eq!(ui.read("Posts/folder.bru"), folder);
+    assert_eq!(modified(&ui.root.join("list-posts.bru")), before);
+    assert_eq!(
+        ui.status(),
+        Some(StatusMessage::FileOpDone(
+            "Mis à la corbeille : get-post.bru".into()
+        ))
+    );
+}
+
+#[test]
+fn trash_closes_gaps_and_duplicates() {
+    let mut ui = Ui::new("trash-gaps");
+    ui.write("Posts/a.bru", &request_text("A", Some(3)));
+    ui.write("Posts/b.bru", &request_text("B", Some(3)));
+    ui.write("Posts/c.bru", &request_text("C", Some(7)));
+    ui.reload();
+    ui.select("Posts/create.bru");
+    ui.press(KeyCode::Char('d'));
+    ui.press(KeyCode::Char('y'));
+    assert!(!ui.root.join("Posts/create.bru").exists());
+    assert_eq!(ui.read("Posts/a.bru"), request_text("A", Some(1)));
+    assert_eq!(ui.read("Posts/b.bru"), request_text("B", Some(2)));
+    assert_eq!(ui.read("Posts/c.bru"), request_text("C", Some(3)));
+}
+
+#[test]
+fn trash_without_reproducible_order_keeps_seqs_and_says_so() {
+    let mut ui = Ui::new("trash-unsortable");
+    // « Créer » (non ASCII) et un seq absent : l'ordre de Bruno dépendrait
+    // de `localeCompare` hors du cas reproduit.
+    ui.write("Posts/x.bru", &request_text("X", None));
+    ui.write("Posts/y.bru", &request_text("Y", Some(2)));
+    ui.reload();
+    ui.select("Posts/y.bru");
+    ui.press(KeyCode::Char('d'));
+    ui.press(KeyCode::Char('y'));
+    assert!(!ui.root.join("Posts/y.bru").exists());
+    assert_eq!(ui.read("Posts/x.bru"), request_text("X", None));
+    assert_eq!(
+        ui.status(),
+        Some(StatusMessage::FileOpDone(
+            "Mis à la corbeille : y.bru ; seq non renumérotés : noms non comparables comme Bruno (« Créer »)"
+                .into()
+        ))
     );
 }

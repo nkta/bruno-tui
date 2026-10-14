@@ -559,6 +559,7 @@ fn trash_moves_requests_and_folders_without_deleting() {
         &root,
         &FileOp::Trash {
             path: "get-post.bru".into(),
+            renumber: Ok(Vec::new()),
         },
         || Trash::from_env_values(Some(data.clone().into_os_string()), None),
         date,
@@ -579,6 +580,7 @@ fn trash_moves_requests_and_folders_without_deleting() {
         &root,
         &FileOp::Trash {
             path: "Posts".into(),
+            renumber: Ok(Vec::new()),
         },
         || Ok(Trash::at(data.join("Trash"))),
         date,
@@ -682,4 +684,51 @@ fn created_request_carries_bruno_params() {
     .expect("vue");
     assert_eq!(view.query_params.len(), 4);
     assert_eq!(view.path_params[0].key, "id");
+}
+
+/// La corbeille est faite même si la renumérotation échoue ou est
+/// impossible ; le statut le dit.
+#[test]
+fn trash_reports_a_failed_or_refused_renumbering() {
+    let (root, data) = workspace("trash-renumber");
+    let trash = || Ok(Trash::at(data.join("Trash")));
+    let outcome = files::execute(
+        &root,
+        &FileOp::Trash {
+            path: "get-post.bru".into(),
+            renumber: Ok(vec![SeqChange {
+                path: "list-posts.bru".into(),
+                is_folder: false,
+                seq: 1,
+                expected: Some("source chargée périmée".into()),
+            }]),
+        },
+        trash,
+        "2026-10-14T00:00:00",
+    )
+    .expect("corbeille faite");
+    assert!(!root.join("get-post.bru").exists());
+    assert!(
+        outcome
+            .message
+            .starts_with("Mis à la corbeille : get-post.bru ; renumérotation des seq en échec"),
+        "{}",
+        outcome.message
+    );
+    assert_eq!(read(&root, "list-posts.bru"), original("list-posts.bru"));
+
+    let outcome = files::execute(
+        &root,
+        &FileOp::Trash {
+            path: "list-posts.bru".into(),
+            renumber: Err("raison".into()),
+        },
+        || Ok(Trash::at(data.join("Trash"))),
+        "2026-10-14T00:00:00",
+    )
+    .expect("corbeille faite");
+    assert_eq!(
+        outcome.message,
+        "Mis à la corbeille : list-posts.bru ; seq non renumérotés : raison"
+    );
 }

@@ -15,6 +15,7 @@ use crate::app::model::{Model, PendingConfirm, StatusMessage};
 use crate::app::workspace::{active_member, member_of_root, run_in_progress};
 use crate::collection::{FolderNode, TreeNode};
 use crate::writer::files::{FileOp, FileOpError, FileOpOutcome, SeqChange};
+use crate::writer::sequence::{self, SeqItem};
 
 use super::tree::clear_detail_view_state;
 use super::{Command, refresh_rows, scroll_tree_into_view};
@@ -308,56 +309,80 @@ pub(crate) fn move_item(model: &mut Model, up: bool) -> Command {
     }
     let moved = node.path().to_path_buf();
     let parent = moved.parent().map(Path::to_path_buf).unwrap_or_default();
-    // Les fichiers illisibles, sans `seq`, restent en fin de liste.
-    let mut order: Vec<&TreeNode> = children_of(model, &parent)
+    let nodes = siblings(model, &parent, None);
+    let Some(position) = nodes.iter().position(|node| node.path() == moved) else {
+        return Command::None;
+    };
+    // Ordre de Bruno (`sortItems`), puis échange avec le voisin.
+    let changes = match sequence::move_one(&seq_items(&nodes), position, up) {
+        Ok(Some(changes)) => changes,
+        Ok(None) => return Command::None,
+        Err(error) => {
+            refuse(model, format!("{error} : déplacement refusé"));
+            return Command::None;
+        }
+    };
+    match seq_changes(&nodes, changes) {
+        Ok(changes) => Command::FileOp {
+            root,
+            op: FileOp::Resequence { changes, moved },
+        },
+        Err(reason) => {
+            refuse(model, format!("{reason} : déplacement refusé"));
+            Command::None
+        }
+    }
+}
+
+/// Frères lisibles du répertoire `parent`, sans `exclude` : les fichiers
+/// illisibles n'ont pas de `seq` à réécrire.
+fn siblings<'a>(model: &'a Model, parent: &Path, exclude: Option<&Path>) -> Vec<&'a TreeNode> {
+    children_of(model, parent)
         .unwrap_or_default()
         .iter()
         .filter(|node| !matches!(node, TreeNode::Error(_)))
-        .collect();
-    let Some(position) = order.iter().position(|node| node.path() == moved) else {
-        return Command::None;
-    };
-    let neighbour = if up {
-        position.checked_sub(1)
-    } else {
-        Some(position + 1).filter(|next| *next < order.len())
-    };
-    let Some(neighbour) = neighbour else {
-        return Command::None;
-    };
-    order.swap(position, neighbour);
+        .filter(|node| Some(node.path()) != exclude)
+        .collect()
+}
 
-    let mut changes = Vec::new();
-    for (index, node) in order.iter().enumerate() {
-        let seq = count_seq(index);
-        if node.seq() == Some(seq) {
-            continue;
-        }
-        let (is_folder, expected) = match node {
-            TreeNode::Request(request) => match &request.ast {
-                Some(ast) => (false, Some(ast.raw().to_owned())),
-                None => return Command::None,
-            },
-            TreeNode::Folder(folder) => match folder_source(folder) {
-                Ok(expected) => (true, expected),
-                Err(()) => {
-                    refuse(model, "folder.bru illisible : déplacement refusé");
-                    return Command::None;
-                }
-            },
-            TreeNode::Error(_) => continue,
-        };
-        changes.push(SeqChange {
-            path: node.path().to_path_buf(),
-            is_folder,
-            seq,
-            expected,
-        });
-    }
-    Command::FileOp {
-        root,
-        op: FileOp::Resequence { changes, moved },
-    }
+fn seq_items(nodes: &[&TreeNode]) -> Vec<SeqItem> {
+    nodes
+        .iter()
+        .map(|node| SeqItem {
+            name: node.name(),
+            seq: node.seq(),
+        })
+        .collect()
+}
+
+/// Nouveaux `seq` `(indice dans nodes, seq)` en opérations d'écriture.
+fn seq_changes(
+    nodes: &[&TreeNode],
+    changes: Vec<(usize, u32)>,
+) -> Result<Vec<SeqChange>, &'static str> {
+    changes
+        .into_iter()
+        .map(|(index, seq)| {
+            let node = nodes[index];
+            let (is_folder, expected) = match node {
+                TreeNode::Request(request) => match &request.ast {
+                    Some(ast) => (false, Some(ast.raw().to_owned())),
+                    None => return Err("requête en lecture seule"),
+                },
+                TreeNode::Folder(folder) => match folder_source(folder) {
+                    Ok(expected) => (true, expected),
+                    Err(()) => return Err("folder.bru illisible"),
+                },
+                TreeNode::Error(_) => return Err("fichier illisible"),
+            };
+            Ok(SeqChange {
+                path: node.path().to_path_buf(),
+                is_folder,
+                seq,
+                expected,
+            })
+        })
+        .collect()
 }
 
 /// `d` dans l'arbre : demande confirmation avant la corbeille.
@@ -401,9 +426,16 @@ pub(crate) fn confirm_trash(model: &mut Model, path: PathBuf) -> Command {
     let Some(root) = writable_root(model) else {
         return Command::None;
     };
+    // Frères restants renumérotés comme Bruno après la suppression
+    // (`getItemsToResequence`), calculés sur l'arbre chargé.
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let nodes = siblings(model, &parent, Some(&path));
+    let renumber = sequence::items_to_resequence(&seq_items(&nodes))
+        .map_err(|error| error.to_string())
+        .and_then(|changes| seq_changes(&nodes, changes).map_err(str::to_owned));
     Command::FileOp {
         root,
-        op: FileOp::Trash { path },
+        op: FileOp::Trash { path, renumber },
     }
 }
 
