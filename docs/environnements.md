@@ -15,10 +15,11 @@ Décisions à prendre par Nicolas :
    - *Option recommandée* : réécrire chirurgicalement la référence `extends` dans les fichiers frères de `environments/`.
    - *Raison* : comportement exact de Bruno 4.2.1 (`renameEnvironmentExtendsReferences` dans `/src/utils/environments.js`). Préserve l'intégrité de la hiérarchie d'héritage.
    - *Alternative* : ne renommer que le fichier cible et laisser les références enfants inchangées. (Non recommandé : rompt l'héritage).
-4. **Nom par défaut et collision au clonage** :
-   - *Option recommandée* : proposer `<nom> copie` dans le popup, puis `<nom> copie 1`, `<nom> copie 2` en cas de collision.
+4. **Nom proposé au clonage** :
+   - *Option recommandée* : proposer `<nom> copie` dans le popup.
    - *Raison* : cohérent avec le clonage des requêtes du TUI (`docs/edition-phase3.md`) et en français.
    - *Alternative* : proposer la chaîne anglaise de Bruno desktop (`<nom> - Copy`).
+   - Dans les deux cas, un nom déjà pris est **refusé**, comme à la création (voir § 2.2).
 5. **Bascule activée / désactivée (`~`) dans le popup de variables** :
    - *Option recommandée* : ajouter la touche `Espace` dans le popup de variables pour basculer l'état `~`.
    - *Raison* : `Espace` sert déjà à basculer les lignes dans tous les autres popups d'édition du TUI.
@@ -62,10 +63,10 @@ Relevé dans Bruno desktop 4.2.1 (`/snap/bruno/current/resources/app.asar`) et l
 ### 2.1 Canaux IPC et actions
 
 - **Création d'environnement** :
-  - Canal IPC : `renderer:create-environment` dans `/src/ipc/collection.js` (ligne 784).
+  - Canal IPC : `renderer:create-environment` dans `/src/ipc/collection.js` (l. 784).
   - Paramètres : `(collectionPathname, name, variables, color, inheritedEnvironmentName, externalSecrets)`.
-  - Action renderer : fonction thunk `eU` dans `/web/static/js/index.c9f1eb9b.js` (ligne 3494923).
-  - Validation du nom : composant modal `cm` dans le renderer (ligne 311960). Schéma Yup : 1 à 255 caractères, `validateName`, non vide, et unicité insensible à la casse (`Environment already exists`).
+  - Action renderer : fonction thunk `eU` dans `/web/static/js/index.c9f1eb9b.js` (position 3494923).
+  - Validation du nom : composant modal `cm` dans le renderer (position 311960). Schéma Yup : 1 à 255 caractères, `validateName`, non vide, et unicité insensible à la casse (`Environment already exists`).
 - **Sauvegarde d'un environnement** :
   - Canal IPC : `renderer:save-environment` dans `/src/ipc/collection.js` (ligne 846).
   - Verrouillage fichier : `withFileLock` (`/src/utils/filesystem.js`).
@@ -73,7 +74,7 @@ Relevé dans Bruno desktop 4.2.1 (`/snap/bruno/current/resources/app.asar`) et l
 - **Renommage d'un environnement** :
   - Canal IPC : `renderer:rename-environment` dans `/src/ipc/collection.js` (ligne 881).
   - Paramètres : `(collectionPathname, environmentName, newName)`.
-  - Action renderer : champ d'édition inline dans `LX` (`data-testid="env-rename-input"`, ligne 2553500) et thunk `(0, q.Oc)` (ligne 3495855).
+  - Action renderer : champ d'édition inline dans `LX` (`data-testid="env-rename-input"`, position 2553500) et thunk `(0, q.Oc)` (position 3495855).
   - Vérification collision : `safeToRename` ; si le fichier cible existe déjà, rejet par une exception `environment: ... already exists` (aucun suffixage automatique au renommage).
   - Renommage disque : `fs.renameSync(envFilePath, newEnvFilePath)`. Le contenu d'un fichier `.bru` n'est pas modifié car le nom de l'environnement est uniquement son nom de fichier.
   - Mise à jour des références `extends` : appel à `renameEnvironmentExtendsReferences` dans `/src/utils/environments.js`. Tous les fichiers `.bru` du dossier `environments/` ayant `extends === oldName` sont réécrits avec `extends = newName`.
@@ -81,16 +82,18 @@ Relevé dans Bruno desktop 4.2.1 (`/snap/bruno/current/resources/app.asar`) et l
 - **Suppression d'un environnement** :
   - Canal IPC : `renderer:delete-environment` dans `/src/ipc/collection.js` (ligne 925).
   - Paramètres : `(collectionPathname, environmentName)`.
-  - Action renderer : modal de confirmation `_D` (« Are you sure you want to delete <name>? », ligne 2456989) et thunk `(0, q.jA)` (ligne 3496165).
+  - Action renderer : modal de confirmation `_D` (« Are you sure you want to delete <name>? », position 2456989) et thunk `(0, q.jA)` (position 3496165).
   - Suppression disque : `fs.unlinkSync(envFilePath)`. Bruno efface définitivement le fichier.
   - Références `extends` orphelines : Bruno ne modifie **aucun** autre fichier. Si un environnement référence l'environnement supprimé, la fonction `getInheritedEnvironments` (`@usebruno/common/src/utils/environment-inheritance.ts`) interrompt la chaîne et renseigne `missingInheritedEnvironmentName` sans planter.
   - Nettoyage secrets : `environmentSecretsStore.deleteEnvironment(...)`.
 - **Clonage / Copie d'un environnement** :
   - Il n'existe **aucun canal IPC dédié** `renderer:copy-environment`.
-  - Action renderer : modal `_z` intitulé « Copy Environment » (ligne 2454500).
+  - Action renderer : modal `_z` intitulé « Copy Environment » (position 2454500).
   - Nom par défaut : `<nom> - Copy`. Validation : 1 à 50 caractères dans le modal.
-  - Mécanisme : appelle directement `renderer:create-environment` avec les variables, la couleur, `extends` et `externalSecrets` de l'environnement source (thunk `eH`, ligne 3495347).
+  - Mécanisme : appelle directement `renderer:create-environment` avec les variables, la couleur, `extends` et `externalSecrets` de l'environnement source (thunk `eH`, position 3495347).
   - Gestion des secrets : les noms déclarés dans `vars:secret` sont recopiés dans le fichier `.bru`. Si des valeurs secrètes existent dans le coffre Electron (`environmentSecretsStore`), elles sont dupliquées sous le nouveau nom.
+  - Le fichier du clone est **réécrit** par `stringifyEnvironment` : ce n'est pas une copie à l'octet près.
+- Les positions citées dans `index.c9f1eb9b.js` sont des positions en octets (fichier minifié sur une ligne).
 
 ### 2.2 Règles de nom et collisions
 
@@ -104,10 +107,12 @@ Relevé dans Bruno desktop 4.2.1 (`/snap/bruno/current/resources/app.asar`) et l
   - Remplacement des caractères interdits par `-`.
   - Suppression des espaces et tirets en tête.
   - Suppression des espaces et points en fin.
-- **Résolution des collisions à la création / clonage** (`generateUniqueName` dans `/src/utils/filesystem.js`, ligne 574) :
-  - Si le nom existe déjà : `<nom> copy`.
-  - Si `<nom> copy` existe déjà : `<nom> copy 2`, `<nom> copy 3`, etc.
-  - Au renommage : aucun suffixage automatique. Un nom déjà pris est strictement refusé.
+- **Nom déjà pris** :
+  - Le renderer **refuse** avant tout appel IPC, à la création comme au renommage : « Environment already exists ».
+    La comparaison ignore la casse et les espaces de début et de fin (`toLowerCase().trim()`, popup `cm` et renommage `G`).
+  - Repli côté electron seulement (`generateUniqueName`, `/src/utils/filesystem.js`, l. 574) : `<nom> copy`, puis `<nom> copy 2`, `<nom> copy 3`…
+    L'interface de Bruno n'y arrive pas en usage normal.
+  - Le TUI suit le renderer : **refus**, jamais de suffixe.
 
 ### 2.3 Contenu exact d'un fichier `.bru` d'environnement
 
@@ -195,7 +200,7 @@ Modèle identique aux popups de fichiers de l'arbre (`docs/edition-phase3.md`) :
 - Le champ `Nom` est focalisé au démarrage.
 - Validation immédiate à la frappe selon les règles de Bruno (`validateName`).
 - Si invalide, le motif de refus s'affiche en rouge en bas du popup.
-- En cas de nom déjà existant (insensible à la casse) : suffixe automatique ` 1`, ` 2`... à l'application.
+- Nom déjà pris (sans tenir compte de la casse ni des espaces de bord) : refus avec « Un environnement de ce nom existe déjà », comme Bruno.
 - Fichier créé : `environments/<nom>.bru` contenant exactement `vars {\n}\n`.
 - Après création : la collection est rechargée, le panneau Environnement reste ouvert et le nouvel environnement est sélectionné sous le curseur (non activé).
 
@@ -226,8 +231,10 @@ Modèle identique aux popups de fichiers de l'arbre (`docs/edition-phase3.md`) :
 ╰──────────────────────────────────────────────╯
 ```
 
-- Champ pré-rempli avec `<nom> copie` (ou `<nom> copie 1` si déjà pris).
-- Fichier créé : copie fidèle à l'octet près du fichier source.
+- Champ pré-rempli avec `<nom> copie`.
+- Nom déjà pris : refus, comme à la création.
+- Fichier créé : copie à l'octet près du fichier source (le nom d'un environnement `.bru` est son nom de fichier).
+  Différence avec Bruno, qui réécrit le clone avec `stringifyEnvironment` : le TUI garde le fichier tel quel, comme pour le clonage des requêtes.
 - Variables secrètes : le bloc `vars:secret [ ... ]` est dupliqué à l'identique dans le fichier `.bru`. Les secrets saisis en mémoire dans la session active (`model.secrets.typed`) étant indexés par nom de variable, ils s'appliquent immédiatement au clone.
 
 ### 4.4 Mettre à la corbeille (`d`)
@@ -235,7 +242,7 @@ Modèle identique aux popups de fichiers de l'arbre (`docs/edition-phase3.md`) :
 Confirmation demandée dans la barre de statut (comme pour les fichiers de l'arbre) :
 `Mettre l'environnement « staging » à la corbeille ? (y/n)`
 
-- `y` ou `O` confirme ; `n`, `N` ou `Échap` annule.
+- `y` confirme ; `n` ou `Échap` annule (comme dans l'arbre).
 - Le fichier `environments/<nom>.bru` est déplacé vers la corbeille utilisateur (`$XDG_DATA_HOME/Trash` via `src/writer/trash.rs`). Jamais d'effacement définitif.
 - Si l'environnement supprimé était l'environnement actif de la collection : `current_environment` bascule à `None` (« Aucun »).
 - Les autres fichiers d'environnement ne sont pas modifiés (comportement Bruno 4.2.1).
@@ -247,6 +254,7 @@ Confirmation demandée dans la barre de statut (comme pour les fichiers de l'arb
 1. **Exécution et résolution** : l'exécution d'une requête est toujours déléguée à `bru run --env <nom>`. Le TUI n'évalue ni ne résout jamais les variables d'environnement ni la hiérarchie `extends`.
 2. **Écriture chirurgicale** :
    - Pour la mise à jour de `extends` lors d'un renommage, seule la ligne `extends:` change dans les fichiers dépendants.
+     Bruno, lui, réécrit tout le fichier enfant avec `stringifyEnvironment` (`/src/utils/environments.js`) ; il ne compare que les `extends` simples, à l'identique (casse comprise). Le TUI applique la même règle de correspondance.
    - Le reste du fichier (commentaires, espacements, variables, secrets) est préservé à l'octet près.
 3. **Contrôle de fraîcheur** : toute écriture ou renommage capture au préalable un `FileStamp`. Si le fichier a été modifié sur le disque par un processus externe depuis son chargement, l'opération est refusée avec une erreur claire (`Stale`).
 4. **Écriture atomique** : création d'un fichier temporaire dans le même répertoire (`environments/.<nom>.tmp.<random>`), synchronisation, puis renommage atomique vers la cible finale.
@@ -265,8 +273,7 @@ Confirmation demandée dans la barre de statut (comme pour les fichiers de l'arb
    - Vérification que le fichier généré contient exactement `vars {\n}\n` (9 octets).
    - Relecture par `@usebruno/filestore` (`parseEnvironment`) et `@usebruno/lang` (`bruToEnvJsonV2`).
 3. **Collisions de noms** :
-   - À la création et au clonage : attribution séquentielle des suffixes ` 1`, ` 2`...
-   - Au renommage : refus net avec message d'erreur explicite sans modification du disque.
+   - À la création, au clonage et au renommage : refus d'un nom déjà pris (casse et espaces de bord ignorés), sans modification du disque.
 4. **Renommage et mise à jour d'héritage** :
    - Renommage d'un parent référencé par `extends: parent`.
    - Vérification que le fichier enfant a été mis à jour avec `extends: nouveau_nom`.
