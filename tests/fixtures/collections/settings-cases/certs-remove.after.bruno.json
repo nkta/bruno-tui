@@ -1,0 +1,18 @@
+{
+  "version": "1",
+  "name": "demo",
+  "clientCertificates": {
+    "enabled": true,
+    "certs": [
+      {
+        "domain": "vieux.exemple.fr",
+        "type": "cert",
+        "certFilePath": "certs/old.crt",
+        "keyFilePath": "certs/old.key",
+        "passphrase": "{{oldPass}}",
+        "disabled": true
+      }
+    ]
+  },
+  "ignore": ["node_modules", ".git"]
+}

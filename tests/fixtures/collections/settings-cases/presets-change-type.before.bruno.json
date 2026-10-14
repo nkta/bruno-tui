@@ -1,0 +1,10 @@
+{
+  "version": "1",
+  "name": "demo",
+  "presets": {
+    "requestType": "graphql",
+    "requestUrl": "{{base_url}}",
+    "defaultEnvironment": "local"
+  },
+  "ignore": ["node_modules", ".git"]
+}
