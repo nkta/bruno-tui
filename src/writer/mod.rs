@@ -16,6 +16,7 @@ mod edit;
 pub mod environment;
 mod error;
 mod format;
+pub mod names;
 mod query;
 
 pub(crate) use draft::SUPPORTED_AUTH_MODES;
