@@ -96,6 +96,10 @@ pub enum EditError {
     /// atteint par construction (blocs et entrées disjoints).
     #[error("chevauchement interne entre deux modifications résolues")]
     Overlap,
+
+    /// Nom affiché vide, avec un saut de ligne ou des espaces en bord.
+    #[error("nom invalide : vide, sur plusieurs lignes ou entouré d'espaces")]
+    InvalidMetaName,
 }
 
 /// Erreur d'écriture, enveloppant une erreur de résolution ou d'I/O.
