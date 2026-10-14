@@ -875,3 +875,86 @@ fn only_b_opens_the_settings() {
         assert_eq!(opens, c == 'B', "touche {c:?}");
     }
 }
+
+/// Relecture par le vrai `bru` (ignoré par défaut : nécessite `bru` dans le
+/// `PATH`) : la collection écrite par le TUI se charge et `bru run` produit
+/// son rapport. Lancer avec `cargo test -- --ignored`.
+#[test]
+#[ignore = "nécessite bru"]
+fn every_written_file_loads_in_the_real_bru() {
+    for (name, script) in scripts() {
+        let mut ui = Ui::from_case(name);
+        ui.open();
+        script(&mut ui);
+        ui.save();
+        fs::write(
+            ui.root.join("ping.bru"),
+            "meta {\n  name: ping\n  type: http\n  seq: 1\n}\n\nget {\n  url: http://127.0.0.1:9/\n  body: none\n  auth: none\n}\n",
+        )
+        .expect("requête");
+        let report = ui.root.join("report.json");
+        let output = Process::new("bru")
+            .current_dir(&ui.root)
+            .args(["run", "ping.bru", "--reporter-json"])
+            .arg(&report)
+            .output()
+            .expect("bru");
+        let text = fs::read_to_string(&report).unwrap_or_default();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&text).is_ok(),
+            "{name} : bru n'a pas produit de rapport\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// En workspace, `B` ouvre les réglages de la collection de la ligne
+/// sélectionnée (`docs/workspace.md` § 4).
+#[test]
+fn in_a_workspace_b_opens_the_settings_of_the_selected_collection() {
+    use bruno_tui::app::update::refresh_rows;
+    use bruno_tui::app::workspace::install;
+    use bruno_tui::collection::workspace::from_paths;
+
+    let first = Ui::new("ws-un", "{\n  \"name\": \"un\"\n}");
+    let second = Ui::new("ws-deux", "{\n  \"name\": \"deux\"\n}");
+    let mut model = Model::new(first.root.clone(), (120, 40));
+    install(
+        &mut model,
+        from_paths(&[first.root.clone(), second.root.clone()]),
+    );
+    for (member, root) in [(1, &second.root), (0, &first.root)] {
+        update(
+            &mut model,
+            Message::MemberLoaded {
+                member,
+                result: BruLoader.load(root),
+            },
+        );
+    }
+    refresh_rows(&mut model);
+    let index = model
+        .tree
+        .rows
+        .iter()
+        .position(|row| row.member == 1)
+        .expect("en-tête du second membre");
+    model.tree.selected = index;
+    model.selected_collection = true;
+    // Comme après un déplacement de la sélection : la collection de la ligne devient active.
+    update(
+        &mut model,
+        Message::Resize {
+            width: 120,
+            height: 40,
+        },
+    );
+    update(&mut model, Message::OpenSettings);
+    let session = model.settings.as_ref().expect("popup ouvert");
+    assert_eq!(
+        session.root,
+        second.root.canonicalize().unwrap_or(second.root.clone())
+    );
+    assert_eq!(session.name, "deux");
+}
