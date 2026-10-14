@@ -481,6 +481,16 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// La fixture est générée par `stringifyEnvironment` de
+    /// `@usebruno/filestore` (`scripts/gen-environment-fixtures.sh`).
+    #[test]
+    fn new_environment_content_matches_the_bruno_generated_fixture() {
+        let fixture = include_str!(
+            "../../tests/fixtures/collections/writer-cases/files/new-environment.bruno.bru"
+        );
+        assert_eq!(NEW_ENVIRONMENT_CONTENT, fixture);
+    }
+
     #[test]
     fn new_environment_content_is_nine_bytes_and_parses() {
         assert_eq!(NEW_ENVIRONMENT_CONTENT, "vars {\n}\n");
