@@ -406,6 +406,9 @@ pub enum Message {
     RenameItem,
     /// `p` dans l'arbre : cloner la ligne sélectionnée.
     CloneItem,
+    /// `F5` : recharger la collection depuis le disque (fichiers `.bru`
+    /// ajoutés ou modifiés hors du TUI).
+    ReloadCollection,
     /// `Maj+↑` dans l'arbre : monter la ligne parmi ses frères.
     MoveItemUp,
     /// `Maj+↓` dans l'arbre : descendre la ligne parmi ses frères.
@@ -592,6 +595,7 @@ fn key_message(key: KeyEvent, capture: Option<TextCapture>) -> Option<Message> {
         KeyCode::Char('A') => Message::CreateFolder,
         KeyCode::Char('B') => Message::OpenSettings,
         KeyCode::F(2) => Message::RenameItem,
+        KeyCode::F(5) => Message::ReloadCollection,
         KeyCode::Char('p') => Message::CloneItem,
         _ => return None,
     };
@@ -1376,6 +1380,7 @@ mod tests {
             (KeyCode::Char('A'), shift, "CreateFolder"),
             (KeyCode::F(2), none, "RenameItem"),
             (KeyCode::Char('p'), none, "CloneItem"),
+            (KeyCode::F(5), none, "ReloadCollection"),
             (KeyCode::Up, shift, "MoveItemUp"),
             (KeyCode::Down, shift, "MoveItemDown"),
             (KeyCode::Char('d'), none, "Delete"),

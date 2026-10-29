@@ -305,10 +305,15 @@ pub(crate) fn handle_watch_reload(model: &mut Model, paths: Vec<std::path::PathB
     if !external_change(model, &paths) {
         return Command::None;
     }
+    reload_collection(model)
+}
 
-    // Session d'édition ouverte avec des modifications non enregistrées :
-    // NE PAS écraser. Afficher un avertissement dans le statut (« fichier modifié sur disque »),
-    // recharger seulement après la fermeture de la session.
+/// Recharge la collection active (`F5` ou changement détecté sur disque).
+///
+/// Session d'édition ouverte avec des modifications non enregistrées : NE PAS
+/// écraser. Afficher un avertissement dans le statut et recharger seulement
+/// après la fermeture de la session.
+pub(crate) fn reload_collection(model: &mut Model) -> Command {
     let has_unsaved_session = model.editing.as_ref().is_some_and(EditSession::has_unsaved)
         || model
             .environment_editing
@@ -1288,6 +1293,29 @@ mod tests {
 
         assert!(matches!(cmd, Command::None));
         assert!(!model.pending_reload);
+    }
+
+    #[test]
+    fn manual_reload_requests_collection_reload() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        model.editing = None;
+
+        let cmd = update(&mut model, Message::ReloadCollection);
+
+        assert!(matches!(cmd, Command::ReloadCollection));
+        assert!(!model.pending_reload);
+    }
+
+    #[test]
+    fn manual_reload_is_ignored_during_an_edit_session() {
+        let mut model = edit_session("simple-get.bru", (100, 30));
+        model.editing.as_mut().unwrap().dirty = true;
+
+        let cmd = update(&mut model, Message::ReloadCollection);
+
+        // Le popup d'édition est modal : rien n'est rechargé ni écrasé.
+        assert!(matches!(cmd, Command::None));
+        assert!(model.editing.as_ref().unwrap().dirty);
     }
 
     #[test]

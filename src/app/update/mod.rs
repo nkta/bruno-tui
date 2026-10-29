@@ -1220,6 +1220,7 @@ pub(crate) fn apply(model: &mut Model, message: Message) -> Command {
         }
         Message::ToggleMouseCapture => Command::SetMouseCapture(!model.mouse.capture),
         Message::WatchReload(paths) => handle_watch_reload(model, paths),
+        Message::ReloadCollection => reload_collection(model),
         Message::MouseCaptureChanged { enabled, result } => {
             match result {
                 Ok(()) => {

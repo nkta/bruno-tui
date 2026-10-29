@@ -127,6 +127,10 @@ pub const HELP_SECTIONS: &[HelpSection] = &[
                 effect: "renommer la ligne (nom affiché ; fichier ou dossier si la case est cochée)",
             },
             HelpEntry {
+                key: "F5",
+                effect: "recharger la collection depuis le disque (fichiers ajoutés hors du TUI)",
+            },
+            HelpEntry {
                 key: "p",
                 effect: "cloner la ligne (« <nom> copie » ; un dossier est copié en entier)",
             },
@@ -737,7 +741,7 @@ mod tests {
             .iter()
             .find(|s| s.title == "Collection")
             .expect("section");
-        for key in ["a", "A", "F2", "p", "Maj+↑, Maj+↓", "m", "d"] {
+        for key in ["a", "A", "F2", "F5", "p", "Maj+↑, Maj+↓", "m", "d"] {
             assert!(section.entries.iter().any(|e| e.key == key), "{key}");
         }
     }
