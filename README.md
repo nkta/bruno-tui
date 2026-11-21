@@ -723,3 +723,32 @@ Toutes les autres touches sont ignorées tant que le popup est ouvert, à
 l'exception de `Ctrl+C` qui quitte l'application. À la souris, cliquer en
 dehors du popup le referme également.
 
+## Publier une nouvelle version
+
+Les binaires sont produits par [cargo-dist](https://opensource.axo.dev/cargo-dist/)
+(workflow `.github/workflows/release.yml`, déclenché par un tag `v*`).
+
+Prérequis, une seule fois : `cargo login` avec un token crates.io
+(scopes `publish-new` et `publish-update`) et une adresse e-mail vérifiée
+sur crates.io.
+
+1. Monter `version` dans `Cargo.toml` (ex. `0.2.0`), puis `cargo build`
+   pour mettre à jour `Cargo.lock`.
+2. Commiter sur `main`, puis taguer et pousser :
+
+   ```
+   git tag -a v0.2.0 -m "bruno-tui 0.2.0"
+   git push origin main v0.2.0
+   ```
+
+   La CI compile les binaires Linux et macOS et crée la GitHub Release.
+3. Publier sur crates.io depuis un arbre propre, positionné sur le tag :
+
+   ```
+   git worktree add --detach ../bruno-tui-publish v0.2.0
+   cd ../bruno-tui-publish && cargo publish --locked
+   cd - && git worktree remove ../bruno-tui-publish
+   ```
+
+Après un changement de configuration dans `dist-workspace.toml`, relancer
+`dist generate` pour régénérer le workflow.
