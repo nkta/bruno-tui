@@ -2,6 +2,14 @@
 name = "bruno-tui"
 version = "0.1.0"
 edition = "2024"
+description = "TUI pour explorer et exécuter des collections Bruno (.bru) via le CLI bru"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nkta/bruno-tui"
+homepage = "https://github.com/nkta/bruno-tui"
+readme = "README.md"
+keywords = ["bruno", "tui", "api", "http", "testing"]
+categories = ["command-line-utilities", "development-tools::testing"]
+exclude = [".agents/", ".claude/", "openspec/", "exempleTui/", "scripts/", "CLAUDE.md"]
 
 [dependencies]
 arboard = { version = "3.6.1", default-features = false }
@@ -19,3 +27,8 @@ time = { version = "0.3.55", default-features = false, features = ["std", "local
 
 [target.'cfg(unix)'.dependencies]
 command-fds = { version = "0.3.3", features = ["tokio"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
