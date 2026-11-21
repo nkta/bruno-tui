@@ -5,6 +5,24 @@ TUI en Rust pour explorer et éditer des collections [Bruno](https://www.usebrun
 déléguée au vrai CLI `bru` : ce projet n'interprète ni les variables, ni les
 scripts, ni les tests — seulement l'affichage et l'édition des fichiers.
 
+## Installation
+
+Prérequis : le CLI Bruno, qui exécute les requêtes.
+
+```
+npm install -g @usebruno/cli
+```
+
+Puis, au choix :
+
+| Méthode | Commande |
+|---|---|
+| Binaire précompilé (Linux, macOS) | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nkta/bruno-tui/releases/latest/download/bruno-tui-installer.sh \| sh` |
+| crates.io | `cargo install bruno-tui --locked` |
+| Depuis les sources | `cargo install --git https://github.com/nkta/bruno-tui --locked` |
+
+Windows n'est pas pris en charge.
+
 ## Lancer l'application
 
 ```
